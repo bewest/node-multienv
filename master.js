@@ -146,12 +146,16 @@ module.exports = create;
 
 
 if (!module.parent) {
-  console.log(env);
-  scan(env, function iter (err, environs) {
-    var master = create(env);
-    environs.forEach(function map (env) {
-      fork(env);
+  process.env.WORKER_DIR = env.WORKER_DIR;
+  var init = require('./init')(function ready ( ) {
+    console.log(env);
+    scan(env, function iter (err, environs) {
+      var master = create(env);
+      environs.forEach(function map (env) {
+        fork(env);
+      });
     });
+
   });
 
   console.log('MONITOR', env.WORKER_ENV);
@@ -172,27 +176,6 @@ if (!module.parent) {
   /*
   */
 
-  /*
-  watch.createMonitor(path.resolve(env.WORKER_ENV), {filter: function (ff) { return true; } }, function (monitor) {
-    console.log('MONITORING' );
-    monitor.on("changed", function (f, stat) {
-      console.log('CHANGED', arguments);
-    });
-    monitor.on("removed", function (f, stat) {
-      console.log('REMOVED', arguments );
-    });
-    monitor.on("created", function (f, stat) {
-      console.log('CREATED YXYX', f, arguments);
-      scan(env, f, function iter (err, environs) {
-        var master = create(env);
-        environs.forEach(function map (env) {
-          fork(env);
-        });
-      });
-
-    });
-  });
-  */
   var server = Server({cluster: cluster, create:create});
   var port = process.env.PORT || 3434;
   server.listen(port);
