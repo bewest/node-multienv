@@ -9,6 +9,8 @@
   "author": "",
   "license": "BSD-2-Clause",
   "dependencies": {
-    "glob": "~4.0.5"
+    "glob": "~4.0.5",
+    "restify": "^3.0.3",
+    "watch": "^0.16.0"
   }
 }
