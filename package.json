@@ -6,7 +6,7 @@
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
     "start": "node master.js",
-    "postinstall": "env"
+    "postinstall": "env ; (test -d $WORKER_DIR && cd $WORKER_DIR && npm install)"
   },
   "author": "Ben West <bewest@gmail.com>",
   "license": "AGPLv3",
