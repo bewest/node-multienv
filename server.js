@@ -99,7 +99,7 @@ function createServer (opts) {
   });
 
   server.get('/environs/:name', function (req, res, next) {
-    var file = path.resolve(master.env.WORKER_ENV, req.params.name + '.env');
+    var file = path.resolve(master.env.WORKER_ENV, path.basename(req.params.name + '.env'));
     var handler = master.handlers[file];
     var worker = handler ? handler.worker : { };
     var v = {
@@ -117,7 +117,7 @@ function createServer (opts) {
   });
 
   server.del('/environs/:name', function (req, res, next) {
-    var file = path.resolve(master.env.WORKER_ENV, req.params.name + '.env');
+    var file = path.resolve(master.env.WORKER_ENV, path.basename(req.params.name + '.env'));
 
     fs.unlink(file, function (ev) {
       res.status(204);
@@ -128,7 +128,7 @@ function createServer (opts) {
   });
 
   server.get('/environs/:name/env', function (req, res, next) {
-    var file = path.resolve(master.env.WORKER_ENV, req.params.name + '.env');
+    var file = path.resolve(master.env.WORKER_ENV, path.basename(req.params.name + '.env'));
     var handler = master.handlers[file];
     var worker = handler ? handler.worker : { };
 
@@ -138,7 +138,7 @@ function createServer (opts) {
   });
 
   server.get('/environs/:name/env/:field', function (req, res, next) {
-    var file = path.resolve(master.env.WORKER_ENV, req.params.name + '.env');
+    var file = path.resolve(master.env.WORKER_ENV, path.basename(req.params.name + '.env'));
     var worker = master.handlers[file].worker || { };
 
     var field = worker.custom_env[req.params.field];
@@ -152,7 +152,7 @@ function createServer (opts) {
   });
 
   server.post('/environs/:name', function (req, res, next) {
-    var file = path.resolve(master.env.WORKER_ENV, req.params.name + '.env');
+    var file = path.resolve(master.env.WORKER_ENV, path.basename(req.params.name + '.env'));
     var text = [ ];
     var item = { };
     var out = fs.createWriteStream(file);
