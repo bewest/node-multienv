@@ -1,11 +1,11 @@
 {
-  "name": "node-multienv",
+  "name": "multienv",
   "version": "0.0.0",
-  "description": "Unique environment for same server.",
+  "description": "Many unique environment for one server/process.",
   "main": "index.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
-    "start": "node server.js"
+    "start": "node master.js"
   },
   "author": "",
   "license": "AGPLv3",

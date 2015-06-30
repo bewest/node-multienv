@@ -1,4 +1,4 @@
-### metaenvdir server
+### `multienv` server
 
 Manage many unique environments for a single tenant server.
 
