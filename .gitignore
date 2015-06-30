@@ -2,6 +2,7 @@
 logs
 *.log
 
+.*.sw[op]
 envs/
 # Runtime data
 pids
