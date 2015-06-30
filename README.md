@@ -64,11 +64,14 @@ but all files in `$WORKER_DIR`.
 
 ### Behavior
 If `WORKER_DIR`'s application fails, `multienv` will try to restart it up to 4
-times, and then give up.
+times, and then gives up.
 
 ## REST API
 
-There's a builtin REST API, of course, to manage basic CRUD operations.
+There's a built-in REST API, of course, to manage basic CRUD operations.  The
+REST API edits and lists the `*.env` text files in `WORKER_ENV`.  It can also
+select them by name, or by running cluster id.  It can also create new
+environments, which cause new processes to start.
 
 ### **GET** `/cluster`
 `/cluster` returns a json description of all currently running processes.
