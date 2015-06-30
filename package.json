@@ -1,17 +1,26 @@
 {
-  "name": "enterprise",
+  "name": "node-multienv",
   "version": "0.0.0",
-  "description": "",
+  "description": "Unique environment for same server.",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "start": "node server.js"
   },
   "author": "",
-  "license": "BSD-2-Clause",
+  "license": "AGPLv3",
   "dependencies": {
     "glob": "~4.0.5",
     "restify": "^3.0.3",
     "shell-quote": "^1.4.3",
     "watch": "^0.16.0"
-  }
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/bewest/node-multienv.git"
+  },
+  "bugs": {
+    "url": "https://github.com/bewest/node-multienv/issues"
+  },
+  "homepage": "https://github.com/bewest/node-multienv"
 }
