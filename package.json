@@ -11,6 +11,7 @@
   "dependencies": {
     "glob": "~4.0.5",
     "restify": "^3.0.3",
+    "shell-quote": "^1.4.3",
     "watch": "^0.16.0"
   }
 }

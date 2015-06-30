@@ -6,6 +6,7 @@ var path = require('path');
 var glob = require('glob');
 var fs = require('fs');
 var watch = require('watch');
+var shlex = require('shell-quote');
 var Server = require('./server');
 
 var work_dir = process.env.WORKER_DIR || '../cgm-remote-monitor';
@@ -23,7 +24,8 @@ function read (config) {
   lines.toString( ).split('\n').forEach(function (line) {
     var p = line.split('=');
     if (p.length == 2) {
-      e[p[0].trim( )] = p.slice(1).join('=').trim( );
+      var val =  p.slice(1).join('=').trim( );
+      e[p[0].trim( )] = shlex.parse(val).join('');
     }
   });
   return e;
@@ -160,7 +162,6 @@ if (!module.parent) {
     if (event == 'rename' && fs.existsSync(f)) {
       // console.log('CREATED YXYX', f, arguments);
       scan(env, f, function iter (err, environs) {
-        var sub = create(env);
         environs.forEach(function map (env) {
           fork(env);
         });
