@@ -99,4 +99,27 @@ http {
     # include /home/dokku/login/nginx.conf.d/*.conf;
   }
 
+  server {
+    keepalive_timeout   70;
+    # add_header Alternate-Protocol 443:npn-spdy/2;
+
+    server_name ~^p(?<cluster_port>[0-9]+)-backends.*
+      ;
+
+    location    / {
+      proxy_pass  http://127.0.0.1:$cluster_port/;
+      # proxy_redirect http://login.diabetes.watch:5000/ https://login.diabetes.watch/;
+      # proxy_redirect $INTERNAL_PORT https://login.diabetes.watch/;
+      proxy_http_version 1.1;
+      proxy_set_header Upgrade $http_upgrade;
+      proxy_set_header Connection "upgrade";
+      proxy_set_header Host $http_host;
+      proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+      proxy_set_header X-Forwarded-Proto $scheme;
+      proxy_set_header X-Forwarded-Port $server_port;
+      proxy_set_header X-Request-Start $msec;
+    }
+
+  }
+
 }
