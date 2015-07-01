@@ -11,5 +11,6 @@ export PORT=80
 erb nginx.conf.erb | tee /etc/nginx/nginx.conf
 service nginx restart
 
+npm install
 node master.js
 
