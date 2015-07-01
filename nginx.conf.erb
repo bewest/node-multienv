@@ -84,6 +84,11 @@ http {
 
     }
 
+    location @status/(.*?)/ {
+        set $target $1;
+        # set $target_url http://127.0.0.1:$target/;
+        proxy_pass http://127.0.0.1:$target/api/v1/status.json;
+    }
     location @proxy/ {
     }
     # include /home/dokku/login/nginx.conf.d/*.conf;
