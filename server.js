@@ -39,12 +39,12 @@ function createServer (opts) {
     console.log('worker', worker);
     var v = {
       id: id
-    , state: worker.state
+    , state: worker.state || 'missing'
     , url: "http://" + [ 'localhost', worker.custom_env.PORT ].join(':') + '/'
     , status_url: "http://" + [ 'localhost', worker.custom_env.PORT ].join(':') + '/api/v1/status.json'
     };
 
-    res.header('X-FOO', 'Bar' + v.state);
+    res.header('X-Backend-State', v.state);
     res.header('X-Backend', v.url);
     res.end( );
     next( );
