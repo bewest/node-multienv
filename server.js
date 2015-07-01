@@ -46,7 +46,7 @@ function createServer (opts) {
     , status_url: "http://" + [ 'localhost', worker.custom_env.PORT ].join(':') + '/api/v1/status.json'
     };
 
-    console.log(rel.url, req.headers);
+    console.log(req.url, req.headers);
     res.header('X-Backend-State', v.state);
     res.header('X-Backend-Name', v.name);
     res.header('X-Backend', v.url);
@@ -68,7 +68,7 @@ function createServer (opts) {
     , url: "http://" + [ 'localhost', port ].join(':') + '/'
     , status_url: "http://" + [ 'localhost', port ].join(':') + '/api/v1/status.json'
     };
-    console.log(rel.url, req.headers);
+    console.log(req.url, req.headers);
     res.header('X-Backend-State', v.state);
     res.header('X-Backend-Name', v.name);
     res.header('X-Backend', v.url);
