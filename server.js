@@ -36,6 +36,7 @@ function createServer (opts) {
   server.get('/resolve/:id', function (req, res, next) {
     var id = parseInt(req.params.id);
     var worker = cluster.workers[id];
+    console.log('worker', worker);
     var v = {
       id: id
     , state: worker.state
