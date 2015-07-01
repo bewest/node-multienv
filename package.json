@@ -1,6 +1,6 @@
 {
   "name": "multienv",
-  "version": "0.0.0",
+  "version": "0.0.1",
   "description": "Many unique environment for one server/process.",
   "main": "index.js",
   "scripts": {
