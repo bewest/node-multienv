@@ -177,7 +177,7 @@ if (!module.parent) {
   */
 
   var server = Server({cluster: cluster, create:create});
-  var port = process.env.PORT || 3434;
+  var port = process.env.INTERNAL_PORT || process.env.PORT || 3434;
   server.listen(port);
   server.on('listen', console.log.bind(console, 'port', port));
 }

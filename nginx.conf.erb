@@ -1,0 +1,91 @@
+user www-data;
+worker_processes auto;
+pid /run/nginx.pid;
+
+events {
+	worker_connections 768;
+	# multi_accept on;
+}
+
+http {
+
+	##
+	# Basic Settings
+	##
+
+	sendfile on;
+	tcp_nopush on;
+	tcp_nodelay on;
+	keepalive_timeout 65;
+	types_hash_max_size 2048;
+	# server_tokens off;
+
+	server_names_hash_bucket_size 64;
+	# server_name_in_redirect off;
+
+	include /etc/nginx/mime.types;
+	default_type application/octet-stream;
+
+	##
+	# SSL Settings
+	##
+
+	ssl_protocols TLSv1 TLSv1.1 TLSv1.2; # Dropping SSLv3, ref: POODLE
+	ssl_prefer_server_ciphers on;
+
+	##
+	# Logging Settings
+	##
+
+	access_log /var/log/nginx/access.log;
+	error_log /var/log/nginx/error.log;
+
+  # INTERNAL_PORT 
+  # PORT
+  upstream backends { server localhost:<%= ENV['INTERNAL_PORT'] %>; }
+  server {
+    listen      [::]:<%= ENV['PORT'] %>;
+    listen      *:<%= ENV['PORT'] %>;
+    # server_name login.diabetes.watch;
+    # return 301 https://$host$request_uri;
+  # }
+  # server {
+    # listen      [::]:443 ssl spdy;
+    # listen      *:443 ssl spdy;
+    server_name _;
+
+    keepalive_timeout   70;
+    # add_header Alternate-Protocol 443:npn-spdy/2;
+
+    location    / {
+      proxy_pass  http://backends;
+      # proxy_redirect http://login.diabetes.watch:5000/ https://login.diabetes.watch/;
+      # proxy_redirect $INTERNAL_PORT https://login.diabetes.watch/;
+      proxy_http_version 1.1;
+      proxy_set_header Upgrade $http_upgrade;
+      proxy_set_header Connection "upgrade";
+      proxy_set_header Host $http_host;
+      proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+      proxy_set_header X-Forwarded-Proto $scheme;
+      proxy_set_header X-Forwarded-Port $server_port;
+      proxy_set_header X-Request-Start $msec;
+    }
+
+    location ~ /xa-redirect/ {
+      internal;
+    }
+    location ~  /x-accel-redirect/(.*?)/(.*) {
+      set $target $1;
+      set $target_url https://$target/;
+
+      rewrite ^/x-accel-redirect/(.*)/ $request_uri break;
+      proxy_pass http://$target$uri$is_args$args;
+
+    }
+
+    location @proxy/ {
+    }
+    # include /home/dokku/login/nginx.conf.d/*.conf;
+  }
+
+}
