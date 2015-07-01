@@ -54,6 +54,7 @@ http {
     # listen      *:443 ssl spdy;
     server_name _;
 
+    resolver 8.8.8.8;
     keepalive_timeout   70;
     # add_header Alternate-Protocol 443:npn-spdy/2;
 
