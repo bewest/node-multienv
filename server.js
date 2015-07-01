@@ -57,7 +57,7 @@ function createServer (opts) {
   server.get('/resolve/:id/test', function (req, res, next) {
     var id = parseInt(req.params.id);
     var worker = cluster.workers[id] || {custom_env: { }, state: 'missing'};
-    var port = worker.PORT;
+    var port = worker.custom_env.PORT;
     console.log('worker', port, worker);
     var v = {
       id: id
