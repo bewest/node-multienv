@@ -48,6 +48,7 @@ function createServer (opts) {
 
     console.log(rel.url, req.headers);
     res.header('X-Backend-State', v.state);
+    res.header('X-Backend-Name', v.name);
     res.header('X-Backend', v.url);
     res.end( );
     next( );
@@ -67,8 +68,11 @@ function createServer (opts) {
     };
     console.log(rel.url, req.headers);
     res.header('X-Backend-State', v.state);
+    res.header('X-Backend-Name', v.name);
     res.header('X-Backend', v.url);
-    res.header('X-Accel-Redirect', '/x-accel-redirect/localhost:' + encodeURIComponent(v.port) + '/api/v1/status.json'));
+    var internal = '/x-accel-redirect/localhost:' + encodeURIComponent(v.port) + '/api/v1/status.json';
+    console.log('internal!', internal);
+    res.header('X-Accel-Redirect', internal);
     res.end( );
     next( );
   });
