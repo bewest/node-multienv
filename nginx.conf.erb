@@ -80,7 +80,7 @@ http {
       set $target_url https://$target/;
 
       rewrite ^/x-accel-redirect/(.*)/ $request_uri break;
-      proxy_pass http://localhost:$target$uri$is_args$args;
+      proxy_pass http://127.0.0.1:$target$uri$is_args$args;
 
     }
 
