@@ -6,7 +6,6 @@ ENV DEBIAN_FRONTEND noninteractive
 RUN apt-get update -y
 RUN apt-get install -y wget curl git -y
 RUN curl -sL https://deb.nodesource.com/setup_dev | sudo bash -
-RUN apt-get install -y nodejs build-essential nginx ruby
 
 ADD . /app
 
