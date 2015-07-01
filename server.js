@@ -53,18 +53,20 @@ function createServer (opts) {
     res.end( );
     next( );
   });
+
   server.get('/resolve/:id/test', function (req, res, next) {
     var id = parseInt(req.params.id);
     var worker = cluster.workers[id] || {custom_env: { }, state: 'missing'};
-    console.log('worker', worker);
+    var port = worker.PORT;
+    console.log('worker', port, worker);
     var v = {
       id: id
     , state: worker.state
     , envfile: worker.custom_env.envfile
     , name: path.basename(custom_env.envfile, '.env')
-    , port: worker.custom_env.PORT
-    , url: "http://" + [ 'localhost', worker.custom_env.PORT ].join(':') + '/'
-    , status_url: "http://" + [ 'localhost', worker.custom_env.PORT ].join(':') + '/api/v1/status.json'
+    , port: port
+    , url: "http://" + [ 'localhost', port ].join(':') + '/'
+    , status_url: "http://" + [ 'localhost', port ].join(':') + '/api/v1/status.json'
     };
     console.log(rel.url, req.headers);
     res.header('X-Backend-State', v.state);
