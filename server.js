@@ -63,7 +63,7 @@ function createServer (opts) {
       id: id
     , state: worker.state
     , envfile: worker.custom_env.envfile
-    , name: path.basename(custom_env.envfile, '.env')
+    , name: path.basename(worker.custom_env.envfile, '.env')
     , port: port
     , url: "http://" + [ 'localhost', port ].join(':') + '/'
     , status_url: "http://" + [ 'localhost', port ].join(':') + '/api/v1/status.json'
