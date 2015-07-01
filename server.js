@@ -73,7 +73,7 @@ function createServer (opts) {
     res.header('X-Backend-Name', v.name);
     res.header('X-Backend', v.url);
     // var internal = '/x-accel-redirect/' + v.port + '/api/v1/status.json';
-    var internal = '@proxy/' + v.port + '/api/v1/status.json';
+    var internal = '@proxy/' + v.port + '/' + v.id;
     console.log('internal!', internal);
     res.header('x-accel-redirect', internal);
     res.end( );

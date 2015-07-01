@@ -89,10 +89,11 @@ http {
         # set $target_url http://127.0.0.1:$target/;
         proxy_pass http://127.0.0.1:$target/api/v1/status.json;
     }
-    location ~ @proxy/(.*?)/.* {
-        set $port $1;
-        rewrite ^@proxy/(.*)/ $request_uri break;
-        proxy_pass http://127.0.0.1:$port/;
+    location ~ @proxy/(.*?)/(.*) {
+        set $backend_port $1;
+        set $backend_id $2;
+        rewrite ^@proxy/(.*)/(.*) $request_uri break;
+        proxy_pass http://127.0.0.1:$backend_port/;
     }
     # include /home/dokku/login/nginx.conf.d/*.conf;
   }
