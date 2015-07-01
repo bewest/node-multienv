@@ -35,11 +35,11 @@ function createServer (opts) {
 
   server.get('/resolve/:id', function (req, res, next) {
     var id = parseInt(req.params.id);
-    var worker = cluster.workers[id];
+    var worker = cluster.workers[id] || {custom_env: { }, state: 'missing'};
     console.log('worker', worker);
     var v = {
       id: id
-    , state: worker.state || 'missing'
+    , state: worker.state
     , url: "http://" + [ 'localhost', worker.custom_env.PORT ].join(':') + '/'
     , status_url: "http://" + [ 'localhost', worker.custom_env.PORT ].join(':') + '/api/v1/status.json'
     };
