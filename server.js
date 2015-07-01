@@ -60,7 +60,7 @@ function createServer (opts) {
     var v = {
       id: id
     , state: worker.state
-    , envfile: custom_env.envfile
+    , envfile: worker.custom_env.envfile
     , name: path.basename(custom_env.envfile, '.env')
     , port: worker.custom_env.PORT
     , url: "http://" + [ 'localhost', worker.custom_env.PORT ].join(':') + '/'
