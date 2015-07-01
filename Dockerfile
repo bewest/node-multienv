@@ -7,6 +7,12 @@ RUN apt-get update -y
 RUN apt-get install -y wget curl git -y
 RUN curl -sL https://deb.nodesource.com/setup_dev | sudo bash -
 
+RUN echo "deb http://ppa.launchpad.net/nginx/stable/ubuntu trusty main" | tee /etc/apt/sources.list.d/nginx.list
+RUN echo "deb-src http://ppa.launchpad.net/nginx/stable/ubuntu trusty main" | tee /etc/apt/sources.list.d/nginx.list
+RUN apt-key  adv --keyserver keyserver.ubuntu.com --recv-keys C300EE8C
+RUN apt-get update
+RUN apt-get install -y nodejs build-essential nginx ruby
+
 ADD . /app
 
 WORKDIR /app
