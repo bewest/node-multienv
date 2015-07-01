@@ -40,7 +40,7 @@ function createServer (opts) {
     var v = {
       id: id
     , state: worker.state
-    , name: path.basename(custom_env.envfile, '.env')
+    , name: path.basename(worker.custom_env.envfile, '.env')
     , url: "http://" + [ 'localhost', worker.custom_env.PORT ].join(':') + '/'
     , port: worker.custom_env.PORT
     , status_url: "http://" + [ 'localhost', worker.custom_env.PORT ].join(':') + '/api/v1/status.json'
@@ -72,7 +72,7 @@ function createServer (opts) {
     res.header('X-Backend-State', v.state);
     res.header('X-Backend-Name', v.name);
     res.header('X-Backend', v.url);
-    var internal = '/x-accel-redirect/' + 'localhost:' + v.port + '/' + encodeURIComponent('api/v1/status.json');
+    var internal = '/x-accel-redirect/' + v.port + '/' + encodeURIComponent('api/v1/status.json');
     console.log('internal!', internal);
     res.header('X-Accel-Redirect', internal);
     res.end( );
