@@ -36,7 +36,7 @@ function createServer (opts) {
   server.get('/resolve/:id', function (req, res, next) {
     var worker = cluster.workers[req.params.id];
     var v = {
-      id: id
+      id: req.params.id
     , state: worker.state
     , url: "http://" + [ 'localhost', worker.custom_env.PORT ].join(':') + '/'
     , status_url: "http://" + [ 'localhost', worker.custom_env.PORT ].join(':') + '/api/v1/status.json'
