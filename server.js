@@ -163,6 +163,34 @@ function createServer (opts) {
     
   });
 
+  server.get('/environs/:name/resolver', function (req, res, next) {
+    var file = path.resolve(master.env.WORKER_ENV, path.basename(req.params.name + '.env'));
+    var name = req.params.name;
+    var frontend = req.params.frontend;
+    var hostname = req.header('host');
+    var scheme = req.isSecure( ) ? 'https' : 'http';
+    var handler = master.handlers[file];
+    var worker = handler ? handler.worker : { };
+    var port = worker.custom_env.PORT || 80;
+    var missing_url = scheme + '://' + hostname + '/';
+    var v = {
+      id: worker.id || 'missing'
+    , custom_env: worker.custom_env
+    , port: port
+    , state: worker.state || 'missing'
+    , isDead: worker.isDead && worker.isDead( )
+    // , url: "http://" + [ 'localhost', worker.custom_env.PORT ].join(':') + '/'
+    // , status_url: "http://" + [ 'localhost', worker.custom_env.PORT ].join(':') + '/api/v1/status.json'
+    };
+
+    var internal = '@proxy/' + v.port + '/' + v.id;
+    console.log('internal!', internal, v);
+    res.header('x-accel-redirect', internal);
+    res.end( );
+    next( );
+
+  });
+
   server.del('/environs/:name', function (req, res, next) {
     var file = path.resolve(master.env.WORKER_ENV, path.basename(req.params.name + '.env'));
 
