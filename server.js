@@ -175,9 +175,11 @@ function createServer (opts) {
     var hostname = req.header('host');
     var scheme = req.isSecure( ) ? 'https' : 'http';
     var handler = master.handlers[file];
-    var worker = handler ? handler.worker : { };
+    var worker = handler ? cluster.workers[handler.worker.id] : { };
     var port = worker.custom_env.PORT || 80;
     var missing_url = scheme + '://' + hostname + '/';
+    console.log('LIVE WORKER', worker);
+    console.log('PORT WORKER', port);
     var v = {
       id: worker.id || 'missing'
     , custom_env: worker.custom_env
