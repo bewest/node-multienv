@@ -162,10 +162,12 @@ if (!module.parent) {
   });
 
   console.log('MONITOR', env.WORKER_ENV);
-  fs.watch(env.WORKER_ENV, debounce(function (event, file) {
+  fs.watch(env.WORKER_ENV,
+  // debounce(
+  function (event, file) {
     // new file
     var f = path.resolve(env.WORKER_ENV, file);
-    if (fs.existsSync(f)) {
+    if (event == 'rename' && fs.existsSync(f)) {
       var worker = create.handlers[f] ? create.handlers[f].worker : { state: 'missing' };
       var valid = [null, 'listening', 'online'];
       if (valid.indexOf(worker.state) < 1) {
@@ -177,7 +179,9 @@ if (!module.parent) {
         });
       }
     }
-  }, 250));
+  }
+  // ,  10)
+  );
 
   var server = Server({cluster: cluster, create:create});
   var port = process.env.INTERNAL_PORT || process.env.PORT || 3434;
