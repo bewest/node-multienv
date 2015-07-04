@@ -129,13 +129,13 @@ http {
     location ~ @proxy/(.*?)/(.*)/ {
         set $backend_port $1;
         set $backend_id $2;
-        rewrite ^@proxy/(.*)/(.*)/ $request_uri break;
+        rewrite ^@proxy/(.*)/([0-9]+)/ $request_uri break;
         # proxy_pass http://127.0.0.1:$backend_port$uri$is_args$args;
         proxy_pass http://127.0.0.1:$backend_port$request_uri;
     }
 
     location    / {
-      proxy_pass  http://127.0.0.1/environs/$cluster_user/resolver/;
+      proxy_pass  http://127.0.0.1:3434/environs/$cluster_user/resolver$request_uri;
       # $request_uri;
       # proxy_redirect http://login.diabetes.watch:5000/ https://login.diabetes.watch/;
       # proxy_redirect $INTERNAL_PORT https://login.diabetes.watch/;
