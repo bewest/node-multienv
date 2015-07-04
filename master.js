@@ -18,6 +18,10 @@ var env = {
   , WORKER_ENV: path.resolve(__dirname, work_env)
   , HOSTEDPORTS: 5000
 };
+var ctx = {
+    base: __dirname
+  , last_port : env.HOSTEDPORTS
+};
 
 function read (config) {
   var lines = fs.readFileSync(path.resolve(env.WORKER_ENV, config));
@@ -35,7 +39,7 @@ function read (config) {
 function create (env) {
   process.chdir(env.WORKER_DIR);
   create.handlers = { };
-  create.last_port = env.HOSTEDPORTS;
+  // ctx.last_port = env.HOSTEDPORTS;
   cluster.setupMaster(
     {
       exec: 'server.js'
@@ -47,11 +51,12 @@ function create (env) {
 
 
 function fork (env) {
-  console.log('CREATE FORK', create.last_port);
-  var port = env.PORT = create.last_port++;
+  console.log('CREATE FORK', ctx.last_port);
+  var port = env.PORT = ctx.last_port++;
 
   function start (failures) {
     env.port = port;
+    env.PORT = port;
     var worker = cluster.fork(env);
     worker.custom_env = env;
     worker.failures = failures;
@@ -123,7 +128,7 @@ function scan (env, cb, p) {
     matches.forEach(function iter (file) {
       var defaults = merge({envfile: file}, env);
       var custom = read(file);
-      configs.push(merge({PATH: process.env.PATH}, merge(defaults, custom)));
+      configs.push(merge({PATH: process.env.PATH, PORT: null}, merge(defaults, custom)));
     });
     cb(null, configs);
   });
