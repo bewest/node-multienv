@@ -11,8 +11,16 @@ export PORT=80
 erb nginx.conf.erb | tee /etc/nginx/nginx.conf
 service nginx restart
 
+# clean things
 rm -rf node_modules
 npm cache clean
+(
+  cd $WORKER_DIR/checkout
+  rm -rf node_modules
+  npm cache clean
+  npm install
+  
+)
 npm install
 node master.js
 
