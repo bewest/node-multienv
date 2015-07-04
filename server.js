@@ -163,7 +163,12 @@ function createServer (opts) {
     
   });
 
-  server.get('/environs/:name/resolver', function (req, res, next) {
+  server.get(/^\/environs\/(.*)\/resolve\/(.*)?$/, function (req, res, next) {
+      req.params.name = req.params[0];
+      req.params.target = req.params[1];
+      console.log('found target', req.params.target);
+      next( );
+    }, function (req, res, next) {
     var file = path.resolve(master.env.WORKER_ENV, path.basename(req.params.name + '.env'));
     var name = req.params.name;
     var frontend = req.params.frontend;
@@ -183,7 +188,8 @@ function createServer (opts) {
     // , status_url: "http://" + [ 'localhost', worker.custom_env.PORT ].join(':') + '/api/v1/status.json'
     };
 
-    var internal = '@proxy/' + v.port + '/' + v.id;
+    var internal = '@proxy/' + v.port + '/' + v.id + '/' + encodeURIComponent(req.params.uri;
+    // var internal = '@proxy/' + v.port + '/' + v.id;
     console.log('internal!', internal, v);
     res.header('x-accel-redirect', internal);
     res.end( );
