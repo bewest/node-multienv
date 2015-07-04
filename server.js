@@ -188,7 +188,7 @@ function createServer (opts) {
     // , status_url: "http://" + [ 'localhost', worker.custom_env.PORT ].join(':') + '/api/v1/status.json'
     };
 
-    var internal = '@proxy/' + v.port + '/' + v.id + '/' + encodeURIComponent(req.params.uri);
+    var internal = '@proxy/' + v.port + '/' + v.id + '/' + encodeURIComponent(req.params.target);
     // var internal = '@proxy/' + v.port + '/' + v.id;
     console.log('internal!', internal, v);
     res.header('x-accel-redirect', internal);
