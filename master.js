@@ -128,7 +128,7 @@ function scan (env, cb, p) {
     matches.forEach(function iter (file) {
       var defaults = merge({envfile: file}, env);
       var custom = read(file);
-      configs.push(merge({PATH: process.env.PATH, PORT: null}, merge(defaults, custom)));
+      configs.push(merge({PATH: process.env.PATH}, merge(defaults, custom)));
     });
     cb(null, configs);
   });
