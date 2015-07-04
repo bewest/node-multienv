@@ -8,6 +8,7 @@ var fs = require('fs');
 var watch = require('watch');
 var shlex = require('shell-quote');
 var Server = require('./server');
+var debounce = require('debounce');
 
 var work_dir = process.env.WORKER_DIR || '../cgm-remote-monitor';
 var work_env = process.env.WORKER_ENV || './envs';
@@ -46,13 +47,15 @@ function create (env) {
 
 
 function fork (env) {
-  env.PORT = create.last_port++;
+  console.log('CREATE FORK', create.last_port);
+  var port = env.PORT = create.last_port++;
 
   function start (failures) {
+    env.port = port;
     var worker = cluster.fork(env);
     worker.custom_env = env;
     worker.failures = failures;
-    create.handlers[env.envfile] = {worker: worker, env: env};
+    create.handlers[env.envfile] = {worker: worker, env: env, port: env.PORT};
     worker.on('disconnect', console.log.bind(console, 'DISCONNECT'));
     worker.on('exit', console.log.bind(console, 'EXIT'));
     worker.on('exit', function (ev) {
@@ -159,22 +162,22 @@ if (!module.parent) {
   });
 
   console.log('MONITOR', env.WORKER_ENV);
-  fs.watch(env.WORKER_ENV, function (event, file) {
+  fs.watch(env.WORKER_ENV, debounce(function (event, file) {
     // new file
     var f = path.resolve(env.WORKER_ENV, file);
-    // console.log("DFLKDJ", arguments);
-    if (event == 'rename' && fs.existsSync(f)) {
-      // console.log('CREATED YXYX', f, arguments);
-      scan(env, f, function iter (err, environs) {
-        environs.forEach(function map (env) {
-          fork(env);
+    if (fs.existsSync(f)) {
+      var worker = create.handlers[f] ? create.handlers[f].worker : { state: 'missing' };
+      var valid = [null, 'listening', 'online'];
+      if (valid.indexOf(worker.state) < 1) {
+        if (worker.failures) { worker.failures = 0; }
+        scan(env, f, function iter (err, environs) {
+          environs.forEach(function map (env) {
+            fork(env);
+          });
         });
-      });
-
+      }
     }
-  });
-  /*
-  */
+  }, 250));
 
   var server = Server({cluster: cluster, create:create});
   var port = process.env.INTERNAL_PORT || process.env.PORT || 3434;

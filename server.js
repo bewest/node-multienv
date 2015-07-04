@@ -2,6 +2,8 @@
 var restify = require('restify');
 var fs = require('fs');
 var path = require('path');
+var tmp = require('tmp');
+var mv = require('mv');
 
 function createServer (opts) {
   var cluster = opts.cluster;
@@ -36,7 +38,7 @@ function createServer (opts) {
   server.get('/resolve/:id', function (req, res, next) {
     var id = parseInt(req.params.id);
     var worker = cluster.workers[id] || {custom_env: { }, state: 'missing'};
-    console.log('worker', worker);
+    // console.log('worker', worker);
     var v = {
       id: id
     , state: worker.state
@@ -58,7 +60,7 @@ function createServer (opts) {
     var id = parseInt(req.params.id);
     var worker = cluster.workers[id] || {custom_env: { }, state: 'missing'};
     var port = worker.custom_env.PORT;
-    console.log('worker', port, worker);
+    // console.log('worker', port, worker);
     var v = {
       id: id
     , state: worker.state
@@ -68,7 +70,7 @@ function createServer (opts) {
     , url: "http://" + [ 'localhost', port ].join(':') + '/'
     , status_url: "http://" + [ 'localhost', port ].join(':') + '/api/v1/status.json'
     };
-    console.log(req.url, req.headers);
+    // console.log(req.url, req.headers);
     res.header('X-Backend-State', v.state);
     res.header('X-Backend-Name', v.name);
     res.header('X-Backend', v.url);
@@ -236,16 +238,20 @@ function createServer (opts) {
 
   server.post('/environs/:name', function (req, res, next) {
     var file = path.resolve(master.env.WORKER_ENV, path.basename(req.params.name + '.env'));
+    var tmpname = tmp.tmpNameSync( );
     var text = [ ];
     var item = { };
-    var out = fs.createWriteStream(file);
+    var out = fs.createWriteStream(tmpname);
+    if (fs.existsSync(file)) {
+      fs.unlinkSync(file);
+    }
     out.on('close', function (ev) {
-      console.log('closed done');
-      res.send(item);
-      next( );
+      mv(tmpname, file, function (err) {
+        res.send(item);
+        next(err);
+      });
     });
 
-    console.log("FILE", file);
     console.log('query', req.query);
     console.log('input', req.body);
     var x;
@@ -259,7 +265,7 @@ function createServer (opts) {
       text.push([x, req.body[x] ].join('='));
       item[x] = req.body[x];
     }
-    console.log('writing', out);
+    console.log('writing', file);
     out.write(text.join("\n"));
 
     res.status(201);
