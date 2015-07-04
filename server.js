@@ -163,7 +163,7 @@ function createServer (opts) {
     
   });
 
-  server.get(/^\/environs\/(.*)\/resolve\/(.*)?$/, function (req, res, next) {
+  server.get(/^\/environs\/(.*)\/resolver\/(.*)?$/, function (req, res, next) {
       req.params.name = req.params[0];
       req.params.target = req.params[1];
       console.log('found target', req.params.target);
