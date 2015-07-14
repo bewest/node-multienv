@@ -165,12 +165,15 @@ function createServer (opts) {
     
   });
 
-  server.get(/^\/environs\/(.*)\/resolver\/(.*)?$/, function (req, res, next) {
+  // server.get(/^\/environs\/(.*)\/resolver\/(.*)?$/, function (req, res, next) { })
+  function resolverA (req, res, next) {
       req.params.name = req.params[0];
       req.params.target = req.params[1] || '';
       console.log('found target', req.params.target);
       next( );
-    }, function (req, res, next) {
+  }
+
+  function resolverB (req, res, next) {
     var file = path.resolve(master.env.WORKER_ENV, path.basename(req.params.name + '.env'));
     var name = req.params.name;
     var frontend = req.params.frontend;
@@ -205,11 +208,18 @@ function createServer (opts) {
     res.end( );
     next( );
 
-  });
+  }
+
+  server.get(/^\/environs\/(.*)\/resolver\/(.*)?$/, resolverA, resolverB);
+  server.del(/^\/environs\/(.*)\/resolver\/(.*)?$/, resolverA, resolverB);
+  server.post(/^\/environs\/(.*)\/resolver\/(.*)?$/, resolverA, resolverB);
+  server.put(/^\/environs\/(.*)\/resolver\/(.*)?$/, resolverA, resolverB);
 
   server.del('/environs/:name', function (req, res, next) {
     var file = path.resolve(master.env.WORKER_ENV, path.basename(req.params.name + '.env'));
 
+    console.log("DELETING", req.params.name, file);
+    console.log('OK', handler);
     fs.unlink(file, function (ev) {
       res.status(204);
       res.send("");
