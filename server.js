@@ -10,9 +10,6 @@ function createServer (opts) {
   var master = opts.create;
   var server = restify.createServer(opts);
 
-  server.use(restify.queryParser( ));
-  server.use(restify.bodyParser( ));
-
   server.get('/cluster', function (req, res, next) {
     var h = { };
     var worker;
@@ -214,6 +211,10 @@ function createServer (opts) {
   server.del(/^\/environs\/(.*)\/resolver\/(.*)?$/, resolverA, resolverB);
   server.post(/^\/environs\/(.*)\/resolver\/(.*)?$/, resolverA, resolverB);
   server.put(/^\/environs\/(.*)\/resolver\/(.*)?$/, resolverA, resolverB);
+
+  server.use(restify.queryParser( ));
+  server.use(restify.bodyParser( ));
+
 
   server.del('/environs/:name', function (req, res, next) {
     var file = path.resolve(master.env.WORKER_ENV, path.basename(req.params.name + '.env'));
