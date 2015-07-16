@@ -18,7 +18,7 @@ ADD . /app
 
 WORKDIR /app
 
-EXPOSE 80
+EXPOSE 4545
 EXPOSE 3434
 RUN /app/setup_docker_guest.sh
 CMD /app/start_container.sh

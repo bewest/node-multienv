@@ -6,7 +6,7 @@ pwd
 env
 ls -alh /etc/nginx
 export INTERNAL_PORT=3434
-export PORT=80
+export PORT=4545
 
 erb nginx.conf.erb | tee /etc/nginx/nginx.conf
 service nginx restart
