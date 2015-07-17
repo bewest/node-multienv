@@ -123,8 +123,8 @@ http {
   }
 
   server {
-    server_name ~^u-(?<cluster_user>.*)-backends.*
-      ;
+    server_name ~^(u-(?<cluster_user>.*)-backends.*);
+    listen  *:3535;
 
     location ~ @proxy/(.*?)/(.*)/ {
         set $backend_port $1;
