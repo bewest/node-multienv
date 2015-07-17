@@ -15,7 +15,7 @@ service nginx restart
 rm -rf node_modules
 npm cache clean
 (
-  cd $WORKER_DIR/checkout
+  cd $WORKER_DIR
   rm -rf node_modules
   npm cache clean
   npm install
