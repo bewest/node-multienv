@@ -4,11 +4,21 @@ var fs = require('fs');
 var path = require('path');
 var tmp = require('tmp');
 var mv = require('mv');
+var bunyan = require('bunyan');
 
 function createServer (opts) {
   var cluster = opts.cluster;
   var master = opts.create;
+  if (opts) {
+    opts.handleUpgrades = true;
+  }
   var server = restify.createServer(opts);
+  server.on('after', restify.auditLogger({
+    log: bunyan.createLogger({
+      name: 'audit',
+      stream: process.stdout
+    })
+  }));
 
   server.get('/cluster', function (req, res, next) {
     var h = { };

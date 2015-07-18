@@ -11,6 +11,7 @@
   "author": "Ben West <bewest@gmail.com>",
   "license": "AGPLv3",
   "dependencies": {
+    "bunyan": "^1.4.0",
     "debounce": "^1.0.0",
     "glob": "~4.0.5",
     "mv": "^2.1.1",
