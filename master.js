@@ -9,6 +9,7 @@ var watch = require('watch');
 var shlex = require('shell-quote');
 var Server = require('./server');
 var debounce = require('debounce');
+var dotenv = require('dotenv/lib/main').parse;
 
 var work_dir = process.env.WORKER_DIR || '../cgm-remote-monitor';
 var work_env = process.env.WORKER_ENV || './envs';
@@ -25,6 +26,8 @@ var ctx = {
 
 function read (config) {
   var lines = fs.readFileSync(path.resolve(env.WORKER_ENV, config));
+  var e = dotenv(lines);
+  return e;
   var e = { };
   lines.toString( ).split('\n').forEach(function (line) {
     var p = line.split('=');
