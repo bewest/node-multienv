@@ -221,6 +221,9 @@ function createServer (opts) {
   server.del(/^\/environs\/(.*)\/resolver\/(.*)?$/, resolverA, resolverB);
   server.post(/^\/environs\/(.*)\/resolver\/(.*)?$/, resolverA, resolverB);
   server.put(/^\/environs\/(.*)\/resolver\/(.*)?$/, resolverA, resolverB);
+  server.head(/^\/environs\/(.*)\/resolver\/(.*)?$/, resolverA, resolverB);
+  server.opts(/^\/environs\/(.*)\/resolver\/(.*)?$/, resolverA, resolverB);
+  server.patch(/^\/environs\/(.*)\/resolver\/(.*)?$/, resolverA, resolverB);
 
   server.use(restify.queryParser( ));
   server.use(restify.bodyParser( ));
