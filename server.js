@@ -257,13 +257,47 @@ function createServer (opts) {
     var worker = master.handlers[file].worker || { };
 
     var field = worker.custom_env[req.params.field];
+    console.log(req.params.field, field);
     if (typeof field !== 'undefined') {
       res.send(field);
     } else {
       res.status(404);
+      res.send({msg: "field unknown", field: req.params.field});
     }
     next( );
     
+  });
+
+  server.post('/environs/:name/env/:field', function (req, res, next) {
+    var file = path.resolve(master.env.WORKER_ENV, path.basename(req.params.name + '.env'));
+    var env = master.read(file);
+    env[req.params.field] = req.params[req.params.field] || req.body;
+    var tmpname = tmp.tmpNameSync( );
+    var out = fs.createWriteStream(tmpname);
+    out.on('close', function (ev) {
+      mv(tmpname, file, function (err) {
+        res.status(201);
+        res.send(env[req.params.field]);
+        next(err);
+      });
+    });
+
+    var text = [ ];
+
+    for (x in env) {
+      text.push([x, env[x] ].join('='));
+    }
+
+    if (fs.existsSync(file)) {
+      fs.unlinkSync(file);
+    }
+
+    out.write(text.join("\n"));
+    out.end( );
+    res.status(201);
+    res.header('Location', '/environs/' + req.params.name);
+    next( );
+
   });
 
   server.post('/environs/:name', function (req, res, next) {
