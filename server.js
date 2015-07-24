@@ -300,6 +300,38 @@ function createServer (opts) {
 
   });
 
+  server.del('/environs/:name/env/:field', function (req, res, next) {
+    var file = path.resolve(master.env.WORKER_ENV, path.basename(req.params.name + '.env'));
+    var env = master.read(file);
+    delete env[req.params.field];
+    var tmpname = tmp.tmpNameSync( );
+    var out = fs.createWriteStream(tmpname);
+    out.on('close', function (ev) {
+      mv(tmpname, file, function (err) {
+        res.status(204);
+        res.send(env[req.params.field]);
+        next(err);
+      });
+    });
+
+    var text = [ ];
+
+    for (x in env) {
+      text.push([x, env[x] ].join('='));
+    }
+
+    if (fs.existsSync(file)) {
+      fs.unlinkSync(file);
+    }
+
+    out.write(text.join("\n"));
+    out.end( );
+    res.status(201);
+    res.header('Location', '/environs/' + req.params.name);
+    next( );
+
+  });
+
   server.post('/environs/:name', function (req, res, next) {
     var file = path.resolve(master.env.WORKER_ENV, path.basename(req.params.name + '.env'));
     var tmpname = tmp.tmpNameSync( );
