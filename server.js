@@ -167,6 +167,7 @@ function createServer (opts) {
     // , status_url: "http://" + [ 'localhost', worker.custom_env.PORT ].join(':') + '/api/v1/status.json'
     };
 
+    res.header('content-type', 'application/json');
     res.send(v);
     next( );
     
@@ -271,7 +272,12 @@ function createServer (opts) {
   server.post('/environs/:name/env/:field', function (req, res, next) {
     var file = path.resolve(master.env.WORKER_ENV, path.basename(req.params.name + '.env'));
     var env = master.read(file);
-    env[req.params.field] = req.params[req.params.field] || req.body;
+
+    if (fs.existsSync(file)) {
+      fs.unlinkSync(file);
+    }
+    var field = req.params.field;
+    env[req.params.field] = req.params[req.params.field] || req.body[field] || req.body;
     var tmpname = tmp.tmpNameSync( );
     var out = fs.createWriteStream(tmpname);
     out.on('close', function (ev) {
@@ -286,10 +292,6 @@ function createServer (opts) {
 
     for (x in env) {
       text.push([x, env[x] ].join('='));
-    }
-
-    if (fs.existsSync(file)) {
-      fs.unlinkSync(file);
     }
 
     out.write(text.join("\n"));
@@ -338,9 +340,7 @@ function createServer (opts) {
     var text = [ ];
     var item = { };
     var out = fs.createWriteStream(tmpname);
-    if (fs.existsSync(file)) {
-      fs.unlinkSync(file);
-    }
+    // if (fs.existsSync(file)) { fs.unlinkSync(file); }
     out.on('close', function (ev) {
       mv(tmpname, file, function (err) {
         res.send(item);

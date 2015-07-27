@@ -10,6 +10,7 @@ var shlex = require('shell-quote');
 var Server = require('./server');
 var debounce = require('debounce');
 var dotenv = require('dotenv/lib/main').parse;
+var touch = require('touch');
 
 var work_dir = process.env.WORKER_DIR || '../cgm-remote-monitor';
 var work_env = process.env.WORKER_ENV || './envs';
@@ -78,7 +79,8 @@ function fork (env) {
     });
     worker.on('error', console.log.bind(console, 'ERROR'));
     watch.createMonitor(path.dirname(env.envfile), { filter: function (ff, stat) {
-        return ff == env.envfile;
+        console.log('changing', path.basename(ff), path.basename(env.envfile));
+        return path.basename(ff) === path.basename(env.envfile);
         if (worker.remove && worker.suicide) {
         } else {
         }
@@ -89,6 +91,8 @@ function fork (env) {
         scan(create.env, f, function iter (err, environs) {
 
           env = environs[0];
+          console.log('recreating', env);
+          worker.custom_env = env;
           worker.kill( );
         });
       });
@@ -162,8 +166,13 @@ if (!module.parent) {
     console.log(env);
     scan(env, function iter (err, environs) {
       var master = create(env);
-      environs.forEach(function map (env) {
-        fork(env);
+      environs.forEach(function map (env, i) {
+        console.log('i', i);
+        setTimeout(function ( ) {
+          console.log('starting', 'i', i);
+          fork(env);
+
+        }, i*4*1000);
       });
     });
 
@@ -175,9 +184,10 @@ if (!module.parent) {
   function (event, file) {
     // new file
     var f = path.resolve(env.WORKER_ENV, file);
+    console.log('changed', file, event);
+    var worker = create.handlers[f] ? create.handlers[f].worker : { state: 'missing' };
+    var valid = [null, 'listening', 'online'];
     if (event == 'rename' && fs.existsSync(f)) {
-      var worker = create.handlers[f] ? create.handlers[f].worker : { state: 'missing' };
-      var valid = [null, 'listening', 'online'];
       if (valid.indexOf(worker.state) < 1) {
         if (worker.failures) { worker.failures = 0; }
         scan(env, f, function iter (err, environs) {
@@ -185,6 +195,13 @@ if (!module.parent) {
             fork(env);
           });
         });
+      }
+    } else {
+      if (fs.existsSync(f)) {
+        console.log("KILLING IT", worker.state);
+        if (valid.indexOf(worker.state) < 1) {
+          worker.suicide( );
+        }
       }
     }
   }
