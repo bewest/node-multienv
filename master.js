@@ -10,7 +10,6 @@ var shlex = require('shell-quote');
 var Server = require('./server');
 var debounce = require('debounce');
 var dotenv = require('dotenv/lib/main').parse;
-var touch = require('touch');
 
 var work_dir = process.env.WORKER_DIR || '../cgm-remote-monitor';
 var work_env = process.env.WORKER_ENV || './envs';
