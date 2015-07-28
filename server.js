@@ -273,9 +273,7 @@ function createServer (opts) {
     var file = path.resolve(master.env.WORKER_ENV, path.basename(req.params.name + '.env'));
     var env = master.read(file);
 
-    if (fs.existsSync(file)) {
-      fs.unlinkSync(file);
-    }
+    // if (fs.existsSync(file)) { fs.unlinkSync(file); }
     var field = req.params.field;
     env[req.params.field] = req.params[req.params.field] || req.body[field] || req.body;
     var tmpname = tmp.tmpNameSync( );

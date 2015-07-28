@@ -73,13 +73,27 @@ function fork (env) {
         console.log('quitting FAILURES', worker.failures);
       } else {
         if (!worker.remove) {
+          // worker = start(worker.suicide ? worker.failures : worker.failures+1);
+          console.log('INNER PRE recreating', env);
+          var refreshed = read(env.envfile);
+          env = merge(env, refreshed);
+          worker.custom_env = env;
           worker = start(worker.suicide ? worker.failures : worker.failures+1);
+          /*
+          scan(create.env, env.envfile, function iter (err, environs) {
+
+            env = environs[0];
+            console.log('INNER recreating', env);
+            // worker.kill( );
+            worker = start(worker.suicide ? worker.failures : worker.failures+1);
+          });
+          */
         }
       }
     });
     worker.on('error', console.log.bind(console, 'ERROR'));
     watch.createMonitor(path.dirname(env.envfile), { filter: function (ff, stat) {
-        console.log('changing', path.basename(ff), path.basename(env.envfile));
+        // console.log('changing', path.basename(ff), path.basename(env.envfile));
         return path.basename(ff) === path.basename(env.envfile);
         if (worker.remove && worker.suicide) {
         } else {
@@ -199,7 +213,7 @@ if (!module.parent) {
     } else {
       if (fs.existsSync(f)) {
         console.log("KILLING IT", worker.state);
-        if (valid.indexOf(worker.state) < 1) {
+        if (valid.indexOf(worker.state) > 1) {
           worker.suicide( );
         }
       }
