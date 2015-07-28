@@ -213,7 +213,7 @@ if (!module.parent) {
       if (fs.existsSync(f)) {
         console.log("KILLING IT", worker.state);
         if (valid.indexOf(worker.state) > 1) {
-          worker.suicide( );
+          worker && worker.suicide && worker.suicide.call && worker.suicide( );
         }
       }
     }
