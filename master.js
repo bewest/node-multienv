@@ -10,6 +10,27 @@ var shlex = require('shell-quote');
 var Server = require('./server');
 var debounce = require('debounce');
 var dotenv = require('dotenv/lib/main').parse;
+var bunyan = require('bunyan');
+
+var bsyslog = require('bunyan-syslog');
+
+var LOG_ENV = {
+    level: process.env.LOG_LEVEL || 'info'
+  , type: process.env.LOG_TYPE || 'sys'
+  , facility: process.env.LOG_FACILITY || 'user'
+  , host: process.env.LOG_HOST || '127.0.0.1'
+  , port: parseInt(process.env.LOG_PORT || '514')
+};
+var logger = bunyan.createLogger({ name: 'multienv' , streams: [{
+  level: LOG_ENV.level,
+  type: 'raw',
+  stream: bsyslog.createBunyanStream({
+    type: LOG_ENV.type,
+    facility: bsyslog[LOG_ENV.facility || 'user'],
+    host: LOG_ENV.host,
+    port: LOG_ENV.port
+  })
+}] });
 
 var work_dir = process.env.WORKER_DIR || '../cgm-remote-monitor';
 var work_env = process.env.WORKER_ENV || './envs';
@@ -45,6 +66,7 @@ function create (env) {
   // ctx.last_port = env.HOSTEDPORTS;
   cluster.setupMaster(
     {
+      silent: true,
       exec: 'server.js'
     }
   );
@@ -61,6 +83,16 @@ function fork (env) {
     env.port = port;
     env.PORT = port;
     var worker = cluster.fork(env);
+    worker.logger = logger.child({proc: worker.id, port: port });
+    // worker.logger = new syslog.Syslog(['multienv', 'proc', worker.id, worker.port].join(':'));
+    // worker.logger = new SysLogger({ tag: ['multienv', 'proc', worker.id, worker.port].join(':'), facility: 'user', hostname: '127.0.0.1', port: 514 });
+    worker.process.stdout.on('data', function logstdout (chunk) {
+      // worker.logger.log(syslog.LOG_DAEMON + syslog.LOG_INFO, chunk);
+      worker.logger.info(chunk.toString( ));
+    });
+    worker.process.stderr.on('data', function logstderr (chunk) {
+      worker.logger.error(chunk.toString( ));
+    });
     worker.custom_env = env;
     worker.failures = failures;
     create.handlers[env.envfile] = {worker: worker, env: env, port: env.PORT};

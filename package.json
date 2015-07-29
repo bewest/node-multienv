@@ -12,6 +12,7 @@
   "license": "AGPLv3",
   "dependencies": {
     "bunyan": "^1.4.0",
+    "bunyan-syslog": "^0.3.0",
     "debounce": "^1.0.0",
     "dotenv": "^1.2.0",
     "forever-monitor": "^1.6.0",
