@@ -197,7 +197,7 @@ function createServer (opts) {
         ;
     var port = worker.custom_env.PORT || 80;
     var missing_url = scheme + '://' + hostname + '/';
-    console.log('LIVE WORKER', worker);
+    // console.log('LIVE WORKER', worker);
     console.log('PORT WORKER', port);
     var v = {
       id: worker.id || 'missing'
@@ -234,11 +234,11 @@ function createServer (opts) {
     var file = path.resolve(master.env.WORKER_ENV, path.basename(req.params.name + '.env'));
 
     console.log("DELETING", req.params.name, file);
-    console.log('OK', handler);
     fs.unlink(file, function (ev) {
+      console.log('OK', arguments);
       res.status(204);
       res.send("");
-      next( );
+      // next( );
     });
 
   });
@@ -273,7 +273,7 @@ function createServer (opts) {
     var file = path.resolve(master.env.WORKER_ENV, path.basename(req.params.name + '.env'));
     var env = master.read(file);
 
-    // if (fs.existsSync(file)) { fs.unlinkSync(file); }
+    if (fs.existsSync(file)) { fs.unlinkSync(file); }
     var field = req.params.field;
     env[req.params.field] = req.params[req.params.field] || req.body[field] || req.body;
     var tmpname = tmp.tmpNameSync( );
@@ -338,7 +338,7 @@ function createServer (opts) {
     var text = [ ];
     var item = { };
     var out = fs.createWriteStream(tmpname);
-    // if (fs.existsSync(file)) { fs.unlinkSync(file); }
+    if (fs.existsSync(file)) { fs.unlinkSync(file); }
     out.on('close', function (ev) {
       mv(tmpname, file, function (err) {
         res.send(item);

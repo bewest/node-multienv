@@ -78,11 +78,14 @@ function create (env) {
 function fork (env) {
   console.log('CREATE FORK', ctx.last_port);
   var port = env.PORT = ctx.last_port++;
+  var inner = { };
+  inner.env = env;
 
   function start (failures) {
-    env.port = port;
-    env.PORT = port;
-    var worker = cluster.fork(env);
+    inner.env.port = port;
+    inner.env.PORT = port;
+    var worker = cluster.fork(inner.env);
+    inner.worker = worker;
     worker.logger = logger.child({proc: worker.id, port: port });
     // worker.logger = new syslog.Syslog(['multienv', 'proc', worker.id, worker.port].join(':'));
     // worker.logger = new SysLogger({ tag: ['multienv', 'proc', worker.id, worker.port].join(':'), facility: 'user', hostname: '127.0.0.1', port: 514 });
@@ -93,23 +96,40 @@ function fork (env) {
     worker.process.stderr.on('data', function logstderr (chunk) {
       worker.logger.error(chunk.toString( ));
     });
-    worker.custom_env = env;
+    worker.custom_env = inner.env;
     worker.failures = failures;
-    create.handlers[env.envfile] = {worker: worker, env: env, port: env.PORT};
-    worker.on('disconnect', console.log.bind(console, 'DISCONNECT'));
-    worker.on('exit', console.log.bind(console, 'EXIT'));
-    worker.on('exit', function (ev) {
+    create.handlers[inner.env.envfile] = {worker: worker, env: inner.env, port: inner.env.PORT};
+    inner.worker.once('disconnect', console.log.bind(console, 'DISCONNECT'));
+    inner.worker.once('exit', console.log.bind(console, 'EXIT'));
+    inner.worker.on('request-restart', function (ev) {
+      console.log('REQUEST RESTART');
+      inner.worker.failures = 0;
+      var refreshed = read(inner.env.envfile);
+      inner.env = env = merge(env, refreshed);
+      inner.worker.remove = false;
+      inner.worker.custom_env = inner.env;
+      console.log('worker', worker.state);
+      if (inner.worker.state == 'listening') {
+          // worker && worker.suicide && worker.suicide.call && worker.suicide( );
+        console.log('resettig alive');
+        inner.worker.kill( );
+      } else {
+        console.log('recreating deadsies new');
+        inner.worker = start(0);
+      }
+    });
+    inner.worker.on('exit', function (ev) {
       console.log('EXITED!?', worker.suicide, worker.failures, arguments);
       if (worker.suicide !== true && worker.failures > 3) {
         console.log('quitting FAILURES', worker.failures);
       } else {
-        if (!worker.remove) {
+        if (false && !inner.worker.remove) {
           // worker = start(worker.suicide ? worker.failures : worker.failures+1);
-          console.log('INNER PRE recreating', env);
-          var refreshed = read(env.envfile);
-          env = merge(env, refreshed);
-          worker.custom_env = env;
-          worker = start(worker.suicide ? worker.failures : worker.failures+1);
+          console.log('INNER PRE recreating', inner.env);
+          var refreshed = read(inner.env.envfile);
+          inner.env = merge(inner.env, refreshed);
+          inner.worker.custom_env = inner.env;
+          inner.worker = start(inner.worker.suicide ? worker.failures : worker.failures+1);
           /*
           scan(create.env, env.envfile, function iter (err, environs) {
 
@@ -123,6 +143,7 @@ function fork (env) {
       }
     });
     worker.on('error', console.log.bind(console, 'ERROR'));
+    /*
     watch.createMonitor(path.dirname(env.envfile), { filter: function (ff, stat) {
         // console.log('changing', path.basename(ff), path.basename(env.envfile));
         return path.basename(ff) === path.basename(env.envfile);
@@ -153,6 +174,7 @@ function fork (env) {
         // if (!worker.suicide) { }
       });
     });
+    */
     /*
     */
     return worker;
@@ -232,7 +254,7 @@ if (!module.parent) {
     console.log('changed', file, event);
     var worker = create.handlers[f] ? create.handlers[f].worker : { state: 'missing' };
     var valid = [null, 'listening', 'online'];
-    if (event == 'rename' && fs.existsSync(f)) {
+    if (false && event == 'rename' && fs.existsSync(f)) {
       if (valid.indexOf(worker.state) < 1) {
         if (worker.failures) { worker.failures = 0; }
         scan(env, f, function iter (err, environs) {
@@ -244,8 +266,29 @@ if (!module.parent) {
     } else {
       if (fs.existsSync(f)) {
         console.log("KILLING IT", worker.state);
-        if (valid.indexOf(worker.state) > 1) {
-          worker && worker.suicide && worker.suicide.call && worker.suicide( );
+          worker.remove = false;
+        if (worker && worker.state != 'missing') {
+          worker.remove = false;
+          if (event == 'change') {
+          setTimeout(function ( ) {
+            worker.emit('request-restart');
+          }, 500);
+          }
+        } else {
+          scan(env, f, function iter (err, environs) {
+            environs.forEach(function map (env) {
+              console.log('NEW INSTANCE', env);
+              fork(env);
+            });
+          });
+        }
+        return;
+      } else {
+        console.log('removing');
+        if (worker) {
+          worker.remove = true;
+          worker.emit('remove');
+          worker.kill('SIGTERM');
         }
       }
     }
