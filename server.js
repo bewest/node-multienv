@@ -275,14 +275,16 @@ function createServer (opts) {
 
     if (fs.existsSync(file)) { fs.unlinkSync(file); }
     var field = req.params.field;
-    env[req.params.field] = req.params[req.params.field] || req.body[field] || req.body;
+    env[req.params.field] = req.params[req.params.field] || req.body[field] || '';
     var tmpname = tmp.tmpNameSync( );
     var out = fs.createWriteStream(tmpname);
     out.on('close', function (ev) {
       mv(tmpname, file, function (err) {
         res.status(201);
-        res.send(env[req.params.field]);
-        next(err);
+        setTimeout(function ( ) {
+          res.send(env[req.params.field]);
+          next(err);
+        }, 3000);
       });
     });
 
@@ -341,8 +343,10 @@ function createServer (opts) {
     if (fs.existsSync(file)) { fs.unlinkSync(file); }
     out.on('close', function (ev) {
       mv(tmpname, file, function (err) {
-        res.send(item);
-        next(err);
+        setTimeout(function ( ) {
+          res.send(item);
+          next(err);
+        }, 2500);
       });
     });
 
