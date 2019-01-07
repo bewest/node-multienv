@@ -11,8 +11,14 @@ var Server = require('./server');
 var debounce = require('debounce');
 var dotenv = require('dotenv/lib/main').parse;
 var bunyan = require('bunyan');
+// var RedisCache = require('./lib/storage');
 
 var bsyslog = require('bunyan-syslog');
+
+var REDIS_ENV = { };
+var CONSUL_ENV = {
+    url: process.env.CONSUL || process.env.CONSUL || "consul://consul.service.consul:8500"
+};
 
 var LOG_ENV = {
     level: process.env.LOG_LEVEL || 'info'
@@ -99,6 +105,8 @@ function fork (env) {
     worker.custom_env = inner.env;
     worker.failures = failures;
     create.handlers[inner.env.envfile] = {worker: worker, env: inner.env, port: inner.env.PORT};
+    // inner.worker.once('online', console.log.bind(console, 'WORKER ONLINE', worker));
+    // inner.worker.once('listening', console.log.bind(console, 'WORKER LISTENING', worker));
     inner.worker.once('disconnect', console.log.bind(console, 'DISCONNECT'));
     inner.worker.once('exit', console.log.bind(console, 'EXIT'));
     inner.worker.on('request-restart', function (ev) {
@@ -229,6 +237,7 @@ module.exports = create;
 
 if (!module.parent) {
   process.env.WORKER_DIR = env.WORKER_DIR;
+
   var init = require('./init')(function ready ( ) {
     console.log(env);
     scan(env, function iter (err, environs) {
@@ -296,8 +305,17 @@ if (!module.parent) {
   // ,  10)
   );
 
+
+
+
   var server = Server({cluster: cluster, create:create});
   var port = process.env.INTERNAL_PORT || process.env.PORT || 3434;
-  server.listen(port);
-  server.on('listen', console.log.bind(console, 'port', port));
+  function onConnect ( ) {
+    server.listen(port);
+  }
+  var Consul = require('./lib/consul')(server, cluster);
+  server.on('listening', console.log.bind(console, 'port', port));
+  var cache = new Consul(CONSUL_ENV, onConnect);
+  // cache.subscribe(server, cluster);
+  // onConnect( );
 }
