@@ -1,9 +1,6 @@
 
 var restify = require('restify');
-var fs = require('fs');
-var path = require('path');
-var tmp = require('tmp');
-var mv = require('mv');
+var url = require('url');
 var bunyan = require('bunyan');
 var dns = require('dns');
 
@@ -35,9 +32,16 @@ function createServer (opts) {
     next( );
   };
 
+  function getSplitKey ( ) {
+    var key = opts.service || 'backends';
+    key = '.' + key;
+    return key;
+  }
+
   function set_site_domain (req, res, next) {
     var domain = req.params.host || req.headers('Host');
-    domain.split('.backends').slice(0, -1).slice(0, -1).concat(['.backends.service.consul']).join('' );
+    // domain.split(getSplitKey( )).slice(0, -1).slice(0, -1).concat(['.backends.service.consul']).join('' );
+    domain.split(getSplitKey( )).slice(0, -1).slice(0, -1).concat([ getSitePostFix( ) ]).join('' );
     req.result.domain = domain;
     req.site_domain = domain;
     next( );
@@ -63,7 +67,12 @@ function createServer (opts) {
   }
   function select_backend (req, res, next) {
     // req.result.upstream = 'http://backends.service.consul:' + req.result.port;
-    req.result.upstream = 'http://consul.service.consul:' + req.result.port;
+    // req.result.upstream = 'http://consul.service.consul:' + req.result.port;
+    var u = url.parse(getUpstreamPrefix( ));
+    var o = {protocol: u.protocol, hostname: u.hostname, port: req.result.port};
+    var upstream = url.format(o);
+    // req.result.upstream = 'http://consul.service.consul:' + req.result.port;
+    req.result.upstream = upstream;
     next( );
   }
   function result_is_headers (req, res, next) {
@@ -72,9 +81,20 @@ function createServer (opts) {
 
   };
 
+  function getSitePostFix (hint) {
+    var postfix = opts.postfix;
+    postfix = postfix || ('.' + url.parse(opts.upstream).hostname)
+    return postfix;
+  }
+
+  function getUpstreamPrefix ( ) {
+    var prefix = opts.upstream;
+    return prefix;
+  }
+
   function set_site_host_params (req, res, next) {
     req.result.params = req.params;
-    req.result.internal_name = req.params.site + '.backends.service.consul';
+    req.result.internal_name = req.params.site + getSitePostFix(req.params);
     req.site_domain = req.result.internal_name;
     next( );
   }
@@ -100,6 +120,9 @@ exports = module.exports = createServer;
 if (!module.parent) {
 var CONSUL_ENV = {
     service: 'backends',
+    postfix: process.env.DNS_POSTFIX || '.backends.service.consul',
+    upstream: process.env.UPSTREAM || 'http://consul.service.consul',
+    // upstream: process.env.UPSTREAM || 'http://cluster.service.consul',
     url: process.env.CONSUL || process.env.CONSUL || "consul://consul.service.consul:8500"
 };
   var server = createServer(CONSUL_ENV);
