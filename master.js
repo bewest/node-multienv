@@ -17,6 +17,7 @@ var bsyslog = require('bunyan-syslog');
 
 var REDIS_ENV = { };
 var CONSUL_ENV = {
+    service: 'cluster',
     url: process.env.CONSUL || process.env.CONSUL || "consul://consul.service.consul:8500"
 };
 

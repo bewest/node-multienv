@@ -43,6 +43,7 @@ http {
   # INTERNAL_PORT 
   # PORT
   upstream backends { server localhost:<%= ENV['INTERNAL_PORT'] %>; }
+  upstream redirector { server localhost:<%= ENV['REDIRECTOR_PORT'] %>; }
   server {
     listen      [::]:<%= ENV['PORT'] %>;
     listen      *:<%= ENV['PORT'] %>;
@@ -54,7 +55,8 @@ http {
     # listen      *:443 ssl spdy;
     server_name localhost _;
 
-    resolver 8.8.8.8;
+    # resolver 8.8.8.8;
+    resolver <%= ENV['RESOLVER_IP'] %>;
     keepalive_timeout   70;
     # add_header Alternate-Protocol 443:npn-spdy/2;
 
@@ -72,6 +74,8 @@ http {
       proxy_set_header X-Request-Start $msec;
     }
 
+    location =   /auth {
+    }
     location ~ /xa-redirect/ {
       internal;
     }
@@ -123,9 +127,16 @@ http {
   }
 
   server {
-    server_name ~^(u-(?<cluster_user>.*)\.backends.*);
+    # server_name ~^(u-(?<cluster_user>.*)\.backends.*);
+    server_name ~.((?<cluster_user>.*)\.backends.*);
     listen  *:3535;
+    auth_request /internal/validate_request;
 
+    location = /internal/validate_request {
+      internal;
+      proxy_set_header X-Origin-URI $request_uri;
+      proxy_pass  http://redirector/validate_request/$cluster_user/$http_host;
+    }
     location ~ @proxy/(.*?)/(.*)/ {
         set $backend_port $1;
         set $backend_id $2;
