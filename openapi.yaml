@@ -59,13 +59,13 @@ paths:
         '400':
           description: Invalid ID supplied
         '404':
-          description: Pet not found
+          description: Process not found
       parameters: []
   /history:
     get:
       tags:
-        - pet
-      summary: Find pet by ID
+        - proc
+      summary: Get managed processes.
       description: >-
         Returns description of all processes seen by `multienv`.  Useful to get
         info on processes that may have died and/or been deleted.
@@ -79,10 +79,7 @@ paths:
                 type: array
                 items:
                   $ref: '#/components/schemas/Proc'
-        '400':
-          description: Invalid ID supplied
-        '404':
-          description: Pet not found
+
       parameters: []
   /environs:
     get:
@@ -125,15 +122,15 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/Order'
+                $ref: '#/components/schemas/Proc'
         '400':
           description: Invalid Order
       requestBody:
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/Order'
-        description: order placed for purchasing the pet
+              $ref: '#/components/schemas/Proc/custom_env'
+        description: Environment to run defined process.
         required: true
       parameters: []
     get:
@@ -145,6 +142,12 @@ paths:
       parameters: []
       operationId: ''
       responses:
+        '200':
+          description: successful operation
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Proc'
         default:
           description: Default response
     delete:
@@ -166,7 +169,7 @@ paths:
   '/environs/{name}/env':
     get:
       tags:
-        - proc 
+        - proc
       summary: Get environment variables as a json object.
       description: >-
         `/environs/:name/env`
@@ -177,6 +180,12 @@ paths:
         `.env` extension.
       operationId: getEnvironment
       responses:
+        '200':
+          description: successful operation
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Proc/custom_env'
         '200':
           description: successful operation
           content:
