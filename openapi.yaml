@@ -1,4 +1,4 @@
-openapi: 3.0.0
+openapi: 3.0.1
 servers:
   - url: 'http://m0.internal.diabetes.watch'
 info:
@@ -27,17 +27,14 @@ paths:
         - cluster
       summary: Get list of managed clusters
       description: JSON description of all currently running processes.
-      operationId: getClusterList
-      parameters: []
+      operationId: get_cluster_list
       responses:
         '200':
           description: successful operation
           content:
             application/json:
               schema:
-                type: array
-                items:
-                  $ref: '#/components/schemas/Proc'
+                $ref: '#/components/schemas/Proc'
         '400':
           description: Invalid status value
   '/cluster/{id}':
@@ -46,21 +43,24 @@ paths:
         - proc
       summary: Running proc by id.
       description: Returns details of a process by `id`.
-      operationId: getClusterById
+      operationId: get_cluster_by_id
       responses:
         '200':
           description: successful operation
           content:
             application/json:
               schema:
-                type: array
-                items:
-                  $ref: '#/components/schemas/Proc'
+                $ref: '#/components/schemas/Proc'
         '400':
           description: Invalid ID supplied
         '404':
           description: Process not found
-      parameters: []
+      parameters:
+        - in: path
+          name: id
+          description: "id of cluster."
+          schema:
+            type: string
   /history:
     get:
       tags:
@@ -69,16 +69,14 @@ paths:
       description: >-
         Returns description of all processes seen by `multienv`.  Useful to get
         info on processes that may have died and/or been deleted.
-      operationId: getHistory
+      operationId: get_history
       responses:
         '200':
           description: successful operation
           content:
             application/json:
               schema:
-                type: array
-                items:
-                  $ref: '#/components/schemas/Proc'
+                $ref: '#/components/schemas/Proc'
 
       parameters: []
   /environs:
@@ -87,7 +85,7 @@ paths:
         - env
       summary: Get list of managed environments.
       description: JSON description of all managed environments.
-      operationId: getClusterList
+      operationId: get_environments_list
       parameters: []
       responses:
         '200':
@@ -95,13 +93,16 @@ paths:
           content:
             application/json:
               schema:
-                type: array
-                items:
-                  $ref: '#/components/schemas/Proc'
+                $ref: '#/components/schemas/Proc'
   '/environs/{name}':
+    parameters:
+      - in: path
+        name: name
+        description: "name of managed environment."
+        schema:
+          type: string
     post:
       tags:
-        - store
         - env
       summary: Create new environment
       description: >-
@@ -115,7 +116,7 @@ paths:
         extension.
 
         Returns new environment variables as a json object.
-      operationId: createEnvironment
+      operationId: create_environment
       responses:
         '200':
           description: successful operation
@@ -129,18 +130,18 @@ paths:
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/Proc/custom_env'
+              $ref: '#/components/schemas/Proc/properties/custom_env'
         description: Environment to run defined process.
         required: true
       parameters: []
     get:
-      summary: ''
+      summary: 'Get Named Environment'
       description: >-
         /environs/:name returns a json description of environment by name. This
         is the name of the environment file relative to WORKER_ENV, sans .env
         extension.
       parameters: []
-      operationId: ''
+      operationId: get_environment_by_name
       responses:
         '200':
           description: successful operation
@@ -161,11 +162,10 @@ paths:
 
         extension.
       parameters: []
-      operationId: ''
+      operationId: delete_environment_by_name
       responses:
         default:
           description: Default response
-    description: ''
   '/environs/{name}/env':
     get:
       tags:
@@ -178,28 +178,24 @@ paths:
         sans
 
         `.env` extension.
-      operationId: getEnvironment
+      operationId: get_custom_env_by_name
       responses:
         '200':
           description: successful operation
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/Proc/custom_env'
-        '200':
-          description: successful operation
-          content:
-            application/json:
-              schema:
-                type: object
-                additionalProperties:
-                  type: integer
-                  format: int32
-      parameters: []
+                $ref: '#/components/schemas/Proc/properties/custom_env'
+      parameters:
+        - in: path
+          name: name
+          description: "Name of environment"
+          schema:
+            type: string
   '/environs/{name}/env/{field}':
     get:
       tags:
-        - store
+        - env
       summary: Get value of environment variable of `field`.
       description: >-
         `/environs/:name/env/:field` - retrieve value of a single environment
@@ -211,7 +207,18 @@ paths:
         `.env` extension.
 
         The `field` is the name of the single environment variable.
-      operationId: getEnvironmentVariable
+      operationId: get_environment_variable
+      parameters:
+        - in: path
+          name: name
+          description: "Name of environment."
+          schema:
+            type: string
+        - in: path
+          name: field 
+          description: "Name of environment variable."
+          schema:
+            type: string
       responses:
         '200':
           description: successful operation
@@ -228,18 +235,25 @@ externalDocs:
   url: 'https://mermade.github.io/shins/asyncapi.html'
 components:
   schemas:
+
     Proc:
+      description: Describe a worker process.
       type: object
       properties:
         id:
           type: integer
           format: int64
+          description: id of worker.
         state:
           type: string
-        isDead:
+          description: state of worker.
+        is_dead:
+          name: "isDead"
           type: boolean
+          description: whether or not process is dead.
         custom_env:
           type: object
+          description: Map of environment variables applied to worker.
 
 
   links: {}
