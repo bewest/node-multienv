@@ -13,6 +13,7 @@ EOF
 # apt-get update
 # apt-get install -y nodejs build-essential nginx ruby
 pwd
+mkdir -p /opt/multi/working/{environments,workdir}
 
 echo "getting done with setup"
 
