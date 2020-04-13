@@ -1,4 +1,4 @@
-FROM ubuntu:trusty
+FROM ubuntu:bionic
 MAINTAINER Ben West <bewest@gmail.com>
 
 ENV DEBIAN_FRONTEND noninteractive
@@ -12,6 +12,7 @@ RUN echo "deb-src http://ppa.launchpad.net/nginx/stable/ubuntu trusty main" | te
 RUN apt-key  adv --keyserver keyserver.ubuntu.com --recv-keys C300EE8C
 RUN apt-get update
 RUN apt-get install -y python python-software-properties nodejs build-essential nginx ruby dnsutils
+RUN apt-get install -y mongodb
 RUN npm install -g n
 RUN n 6.16.0
 RUN n prune

@@ -314,10 +314,9 @@ if (!module.parent) {
   function onConnect ( ) {
     server.listen(port);
   }
-  // var Consul = require('./lib/consul')(server, cluster);
+  var Consul = require('./lib/consul')(server, cluster);
   server.on('listening', console.log.bind(console, 'port', port));
-  onConnect( );
-  // var cache = new Consul(CONSUL_ENV, onConnect);
+  var cache = new Consul(CONSUL_ENV, onConnect);
   // cache.subscribe(server, cluster);
   // onConnect( );
 }
