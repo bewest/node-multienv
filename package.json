@@ -17,6 +17,7 @@
     "consul": "^0.34.1",
     "debounce": "^1.0.0",
     "dotenv": "^1.2.0",
+    "foreman": "^3.0.1",
     "forever-monitor": "^1.6.0",
     "glob": "^4.5.3",
     "hashids": "^1.2.2",

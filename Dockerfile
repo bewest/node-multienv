@@ -3,12 +3,13 @@ MAINTAINER Ben West <bewest@gmail.com>
 
 ENV DEBIAN_FRONTEND noninteractive
 
+
 RUN apt-get update -y
 RUN apt-get install -y wget curl git sudo -y
 RUN curl -sL https://deb.nodesource.com/setup_10.x | bash -
 
 RUN apt-get install -y python software-properties-common nodejs build-essential nginx ruby dnsutils
-RUN apt-get install -y mongodb
+RUN apt-get install -y mongodb rsyslog
 RUN npm install -g n
 # RUN n 6.16.0
 RUN n prune
@@ -19,6 +20,8 @@ RUN curl -0 -L https://npmjs.com/install.sh | bash
 RUN npm install -g node-gyp
 
 ADD . /app
+
+# VOLUME ["/etc/nginx", "/app"]
 
 WORKDIR /app
 

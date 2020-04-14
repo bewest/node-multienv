@@ -61,8 +61,10 @@ function createServer (opts) {
 
   function set_outgoing_headers (req, res, next) {
     res.header('X-Worker-Port', req.result.port || "1234");
+    // res.header('X-Accel-Redirect', ['@proxy', req.result.port, '1'].join('/'));
+    res.header('Not-Accel-Redirect', '@app');
     res.header('X-Selected-Backend', req.result.upstream);
-    console.log("X-Selected-Backend", req.result.upstream);
+    console.log("outgoing headers", res.headers( ));
     next( );
   }
   function select_backend (req, res, next) {
@@ -109,8 +111,7 @@ function createServer (opts) {
   server.get('/debug/.*', log_headers_middleware, result_is_headers);
   server.get('/validate_request/.*', log_headers_middleware, result_is_headers);
   server.get('/validate_domain/.*', log_headers_middleware, set_site_domain, get_port, set_outgoing_headers, result_is_headers);
-  server.get('/internal_consul/:site/:host', log_headers_middleware, set_site_domain, set_site_host_params, get_port, select_backend, set_outgoing_headers, result_is_headers);
-
+  server.get('/internal_consul/:site/:host', log_headers_middleware, set_site_domain, set_site_host_params, get_port, select_backend, set_outgoing_headers, result_is_headers); 
 
   return server;
 }

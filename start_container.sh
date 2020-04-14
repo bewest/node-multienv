@@ -7,7 +7,7 @@ env
 ls -alh /etc/nginx
 export INTERNAL_PORT=3434
 export REDIRECTOR_PORT=3636
-export RESOLVER_IP=$(dig +short consul.service.consul | ( read ip; test -z $ip && echo 8.8.8.8 || echo $ip))
+export RESOLVER_IP=$(dig +short consul.service.consul | ( read ip; test -z "$ip" && echo 8.8.8.8 || echo $ip))
 
 export PORT=4545
 
@@ -25,5 +25,6 @@ npm cache clean
   
 )
 npm install
-node master.js
+node master.js &
+INTERNAL_PORT=3636 node redirector-server.js
 
