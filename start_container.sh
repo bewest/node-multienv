@@ -19,12 +19,16 @@ rm -rf node_modules
 npm cache clean
 (
   cd $WORKER_DIR
+  mkdir -p tmp
   rm -rf node_modules
-  npm cache clean
+  npm cache verify
   npm install
+  npm cache verify
+
   
 )
 npm install
+npm cache verify
 node master.js &
 INTERNAL_PORT=3636 node redirector-server.js
 
