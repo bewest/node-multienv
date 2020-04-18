@@ -28,7 +28,6 @@ RUN n 10
 # COPY package.json /home/app/package.json
 # RUN cd /home/app && npm install
 
-RUN fallocate -l 5G /swapfile && chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile
 RUN useradd --user-group --create-home \
             --groups adm,sudo,admin \
             --shell /bin/bash       \
@@ -45,7 +44,7 @@ WORKDIR /app
 EXPOSE 4545
 EXPOSE 3434
 
-USER app
+# USER app
 RUN /app/setup_docker_guest.sh
 
 CMD /app/start_container.sh
