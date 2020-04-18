@@ -29,7 +29,7 @@ RUN n 10
 # RUN cd /home/app && npm install
 
 RUN useradd --user-group --create-home \
-            --groups adm,sudo,admin \
+            --groups adm,sudo \
             --shell /bin/bash       \
             --no-log-init --system  \
             app
