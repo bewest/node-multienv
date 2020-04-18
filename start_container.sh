@@ -16,19 +16,19 @@ service nginx restart
 
 # clean things
 rm -rf node_modules
-npm cache clean
+
 (
   cd $WORKER_DIR
-  mkdir -p tmp
+  su app mkdir -p tmp
   rm -rf node_modules
   npm cache verify
-  npm install
+  su app npm install
   npm cache verify
 
   
 )
-npm install
+su app npm install
 npm cache verify
-node master.js &
-INTERNAL_PORT=3636 node redirector-server.js
+su app node master.js &
+INTERNAL_PORT=3636 su app node redirector-server.js
 
