@@ -10,7 +10,7 @@ RUN curl -sL https://deb.nodesource.com/setup_10.x | bash -
 
 RUN apt-get install -y python software-properties-common nodejs build-essential nginx ruby dnsutils
 # forward request and error logs to docker log collector
-RUN ln -sf /dev/stdout /var/log/nginr/access.log
+RUN ln -sf /dev/stdout /var/log/nginx/access.log
 RUN ln -sf /dev/stdout /var/log/nginx/error.log
 
 
