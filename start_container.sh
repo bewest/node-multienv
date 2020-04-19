@@ -19,16 +19,17 @@ rm -rf node_modules
 
 (
   cd $WORKER_DIR
-  su app mkdir -p tmp
+  mkdir -p tmp
   rm -rf node_modules
   npm cache verify
-  su app npm install
+  cat .npmrc || echo "cross fingers"
+  npm install
   npm cache verify
 
   
 )
-su app npm install
+npm install
 npm cache verify
-su app node master.js &
-INTERNAL_PORT=3636 su app node redirector-server.js
+node master.js &
+INTERNAL_PORT=3636 node redirector-server.js
 
