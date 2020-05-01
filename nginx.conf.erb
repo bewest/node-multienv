@@ -148,6 +148,9 @@ http {
       proxy_set_header Host "$cluster_user";
       auth_request_set $backend_port $upstream_http_x_worker_port;
       proxy_pass_request_body off;
+      proxy_set_header Content-Length "";
+      proxy_method GET;
+
     }
 
     location ~ @proxy/(.*?)/(.*) {
