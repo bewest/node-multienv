@@ -284,11 +284,10 @@ function createServer (opts) {
       mv(tmpname, file, function (err) {
         console.error(err);
         if (err) return next(err);
-        setTimeout(function ( ) {
           res.status(201);
           res.header('Location', '/environs/' + req.params.name);
           res.send(env[req.params.field]);
-        }, 800);
+        // setTimeout(function ( ) { }, 800);
       });
     });
 
@@ -347,12 +346,11 @@ function createServer (opts) {
     if (fs.existsSync(file)) { fs.unlinkSync(file); }
     out.on('close', function (ev) {
       mv(tmpname, file, function (err) {
-        setTimeout(function ( ) {
           res.send(item);
           res.status(201);
           res.header('Location', '/environs/' + req.params.name);
           next(err);
-        },  800);
+        // setTimeout(function ( ) { },  800);
       });
     });
 
