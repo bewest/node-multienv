@@ -205,34 +205,7 @@ function merge(a, b) {
   return a;
 }
 
-create.env     = env;
-create.scan    = scan;
-create.read    = read;
-create.fork    = fork;
-create.merge   = merge;
-module.exports = create;
-
-
-if (!module.parent) {
-  process.env.WORKER_DIR = env.WORKER_DIR;
-
-  var init = require('./init')(function ready ( ) {
-    console.log(env);
-    /*
-    scan(env, function iter (err, environs) {
-      environs.forEach(function map (env, i) {
-        console.log('i', i);
-        setTimeout(function ( ) {
-          console.log('starting', 'i', i);
-          fork(env);
-
-        }, i*4*1000);
-      });
-    });
-    */
-
-  });
-
+function createWatcher (env) {
   var master = create(env);
   console.log('MONITOR', env.WORKER_ENV);
   var watcher = chokidar.watch(env.WORKER_ENV, {
@@ -273,72 +246,49 @@ if (!module.parent) {
       worker.kill('SIGTERM');
     }
   });
+  return watcher;
+}
+
+create.env     = env;
+create.scan    = scan;
+create.read    = read;
+create.fork    = fork;
+create.merge   = merge;
+create.watcher = createWatcher;
+module.exports = create;
 
 
-  /*
-  fs.watch(env.WORKER_ENV,
-  // debounce(
-  function (event, file) {
-    // new file
-    var f = path.resolve(env.WORKER_ENV, file);
-    console.log('changed', file, event);
-    var worker = create.handlers[f] ? create.handlers[f].worker : { state: 'missing' };
-    var valid = [null, 'listening', 'online'];
-    if (false && event == 'rename' && fs.existsSync(f)) {
-      if (valid.indexOf(worker.state) < 1) {
-        if (worker.failures) { worker.failures = 0; }
-        scan(env, f, function iter (err, environs) {
-          environs.forEach(function map (env) {
-            fork(env);
-          });
-        });
-      }
-    } else 
-    {
-      if (fs.existsSync(f)) {
-        console.log("KILLING IT", worker.state);
-          worker.remove = false;
-        if (worker && worker.state != 'missing') {
-          worker.remove = false;
-          if (event == 'change') {
-          setTimeout(function ( ) {
-            worker.emit('request-restart');
-          }, 500);
-          }
-        } else {
-          scan(env, f, function iter (err, environs) {
-            environs.forEach(function map (env) {
-              console.log('NEW INSTANCE', env);
-              fork(env);
-            });
-          });
-        }
-        return;
-      } else {
-        console.log('removing');
-        if (worker) {
-          worker.remove = true;
-          worker.emit('remove');
-          worker.kill('SIGTERM');
-        }
-      }
+if (!module.parent) {
+  process.env.WORKER_DIR = env.WORKER_DIR;
+
+  var init = require('./init')(function ready ( ) {
+    console.log(env);
+    var watcher = createWatcher(env);
+    /*
+    scan(env, function iter (err, environs) {
+      environs.forEach(function map (env, i) {
+        console.log('i', i);
+        setTimeout(function ( ) {
+          console.log('starting', 'i', i);
+          fork(env);
+
+        }, i*4*1000);
+      });
+    });
+    */
+    var server = Server({cluster: cluster, create:create, watcher:watcher});
+    var port = process.env.INTERNAL_PORT || process.env.PORT || 3434;
+    function onConnect ( ) {
+      server.listen(port);
     }
-  }
-  // ,  10)
-  );
-  */
+    var Consul = require('./lib/consul')(server, cluster);
+    server.on('listening', console.log.bind(console, 'port', port));
+    var cache = new Consul(CONSUL_ENV, onConnect);
+
+  });
 
 
 
-
-  var server = Server({cluster: cluster, create:create});
-  var port = process.env.INTERNAL_PORT || process.env.PORT || 3434;
-  function onConnect ( ) {
-    server.listen(port);
-  }
-  var Consul = require('./lib/consul')(server, cluster);
-  server.on('listening', console.log.bind(console, 'port', port));
-  var cache = new Consul(CONSUL_ENV, onConnect);
   // cache.subscribe(server, cluster);
   // onConnect( );
 }
