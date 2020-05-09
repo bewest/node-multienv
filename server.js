@@ -279,6 +279,7 @@ function createServer (opts) {
     env[req.params.field] = req.params[req.params.field] || req.body[field] || '';
     var tmpname = tmp.tmpNameSync( );
     var out = fs.createWriteStream(tmpname);
+    if (fs.existsSync(file)) { fs.unlinkSync(file); }
     out.on('close', function (ev) {
       mv(tmpname, file, function (err) {
         console.error(err);
@@ -287,7 +288,7 @@ function createServer (opts) {
           res.status(201);
           res.header('Location', '/environs/' + req.params.name);
           res.send(env[req.params.field]);
-        }, 500);
+        }, 800);
       });
     });
 
@@ -297,7 +298,6 @@ function createServer (opts) {
       text.push([x, env[x] ].join('='));
     }
 
-    if (fs.existsSync(file)) { fs.unlinkSync(file); }
     out.write(text.join("\n"));
     out.write("\n");
     out.end( );
@@ -352,7 +352,7 @@ function createServer (opts) {
           res.status(201);
           res.header('Location', '/environs/' + req.params.name);
           next(err);
-        }, 1500);
+        },  800);
       });
     });
 

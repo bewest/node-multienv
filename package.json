@@ -14,6 +14,7 @@
     "bootevent": "0.0.1",
     "bunyan": "^1.4.0",
     "bunyan-syslog": "^0.3.0",
+    "chokidar": "^3.4.0",
     "consul": "^0.34.1",
     "debounce": "^1.0.0",
     "dotenv": "^1.2.0",

@@ -6,6 +6,7 @@ var path = require('path');
 var glob = require('glob');
 var fs = require('fs');
 var watch = require('watch');
+var chokidar = require('chokidar');
 var shlex = require('shell-quote');
 var Server = require('./server');
 var debounce = require('debounce');
@@ -117,7 +118,13 @@ function fork (env) {
       inner.env = env = merge(env, refreshed);
       inner.worker.remove = false;
       inner.worker.custom_env = inner.env;
-      console.log('worker', worker.state);
+      var old = inner.worker;
+      console.log('worker', worker);
+      inner.worker = start(0).once('online', function ( ) {
+        console.log('replacing', old.id, this.id);
+        old.kill( );
+      });;
+      /*
       if (inner.worker.state == 'listening') {
           // worker && worker.suicide && worker.suicide.call && worker.suicide( );
         console.log('resettig alive');
@@ -126,6 +133,7 @@ function fork (env) {
         console.log('recreating deadsies new');
         inner.worker = start(0);
       }
+      */
     });
     inner.worker.on('exit', function (ev) {
       console.log('EXITED!?', worker.suicide, worker.failures, arguments);
@@ -151,39 +159,8 @@ function fork (env) {
         }
       }
     });
-    worker.on('error', console.log.bind(console, 'ERROR'));
-    /*
-    watch.createMonitor(path.dirname(env.envfile), { filter: function (ff, stat) {
-        // console.log('changing', path.basename(ff), path.basename(env.envfile));
-        return path.basename(ff) === path.basename(env.envfile);
-        if (worker.remove && worker.suicide) {
-        } else {
-        }
-      } }, function (monitor) {
-      monitor.on("changed", function (f, curr, prev) {
-        console.log('killing', f, env.envfile);
-        // env = ;
-        scan(create.env, f, function iter (err, environs) {
+    inner.worker.on('error', console.log.bind(console, 'ERROR'));
 
-          env = environs[0];
-          console.log('recreating', env);
-          worker.custom_env = env;
-          worker.kill( );
-        });
-      });
-      monitor.on("removed", function (f, curr, prev) {
-        console.log('killing', f, env.envfile);
-        worker.remove = true;
-        if (worker.state != 'dead') {
-          worker.kill( );
-        }
-      });
-      worker.on('exit', function (ev) {
-        monitor.stop( );
-        // if (!worker.suicide) { }
-      });
-    });
-    */
     /*
     */
     return worker;
@@ -241,8 +218,8 @@ if (!module.parent) {
 
   var init = require('./init')(function ready ( ) {
     console.log(env);
+    /*
     scan(env, function iter (err, environs) {
-      var master = create(env);
       environs.forEach(function map (env, i) {
         console.log('i', i);
         setTimeout(function ( ) {
@@ -252,10 +229,53 @@ if (!module.parent) {
         }, i*4*1000);
       });
     });
+    */
 
   });
 
+  var master = create(env);
   console.log('MONITOR', env.WORKER_ENV);
+  var watcher = chokidar.watch(env.WORKER_ENV, {
+    persistent: true
+  , atomic: true
+  });
+  // watcher.on('all', console.log.bind(console, 'chokidar *'));
+  watcher.on('error', console.log.bind(console, 'chokidar error'));
+
+  watcher.on('add', function (file, stats) {
+    console.log('adding', file);
+    scan(env, file, function iter (err, environs) {
+      environs.forEach(function map (env) {
+        console.log('NEW INSTANCE', env);
+        fork(env);
+      });
+    });
+  });
+
+  watcher.on('change', function (file, stats) {
+    console.log('changed', file);
+    var worker = create.handlers[file] ? create.handlers[file].worker : { state: 'missing' };
+    worker.remove = false;
+    if (worker && worker.emit) {
+      worker.emit('request-restart');
+    } else {
+      console.log("ERROR WORKER MISSING, scane to recreate?", worker);
+    }
+
+  });
+
+  watcher.on('unlink', function (f, stats) {
+    console.log('removed', f);
+    var worker = create.handlers[f] ? create.handlers[f].worker : null;
+    if (worker) {
+      worker.remove = true;
+      worker.emit('remove');
+      worker.kill('SIGTERM');
+    }
+  });
+
+
+  /*
   fs.watch(env.WORKER_ENV,
   // debounce(
   function (event, file) {
@@ -273,7 +293,8 @@ if (!module.parent) {
           });
         });
       }
-    } else {
+    } else 
+    {
       if (fs.existsSync(f)) {
         console.log("KILLING IT", worker.state);
           worker.remove = false;
@@ -305,6 +326,7 @@ if (!module.parent) {
   }
   // ,  10)
   );
+  */
 
 
 
