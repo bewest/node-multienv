@@ -176,7 +176,7 @@ http {
     location    / {
       auth_request /internal/validate_request;
       auth_request_set $backend_port $upstream_http_x_worker_port;
-      auth_request_set $tenant http://backends.service.consul:$backend_port;
+      auth_request_set $tenant http://$cluster_user.backends.service.consul:$backend_port;
 
       # set $backend_port '$upstream_http_x_worker_port';
       # set $tenant http://my-envs:$backend_port;
