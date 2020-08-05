@@ -282,7 +282,21 @@ if (!module.parent) {
       server.listen(port);
     }
     var Consul = require('./lib/consul')(server, cluster);
-    server.on('listening', console.log.bind(console, 'port', port));
+    server.on('listening', function ( ) {
+      console.log.bind(console, 'port', port);
+      process.on('SIGTERM', function ( ) {
+        watcher.close( ).then(function ( ) {
+          console.log('stopped watching');
+          server.close(function ( ) {
+            console.log("server closed, disconnecting cluster");
+
+            cluster.disconnect(function ( ) {
+              console.log("cluster disconnected");
+            });
+          });
+        });
+      });
+    });
     var cache = new Consul(CONSUL_ENV, onConnect);
 
   });
