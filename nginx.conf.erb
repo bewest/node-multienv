@@ -51,7 +51,7 @@ http {
   # PORT
   upstream backends { server localhost:<%= ENV['INTERNAL_PORT'] %>; }
   upstream redirector { server localhost:<%= ENV['REDIRECTOR_PORT'] %>; }
-  upstream proxy { server backends.service.consul; }
+  # upstream proxy { server backends.service.consul; }
   server {
     listen      [::]:<%= ENV['PORT'] %>;
     listen      *:<%= ENV['PORT'] %>;
