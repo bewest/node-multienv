@@ -30,6 +30,17 @@ rm -rf node_modules
 )
 npm install
 npm cache verify
-node master.js &
-INTERNAL_PORT=3636 node redirector-server.js
 
+trap "finalize" TERM
+
+finalize ( ) {
+echo finalize
+kill -TERM $redirector_pid
+kill -TERM $multienv_pid
+}
+
+INTERNAL_PORT=$REDIRECTOR_PORT node redirector-server.js &
+redirector_pid=$!
+node master.js  &
+multienv_pid=$!
+wait $multienv_pid
