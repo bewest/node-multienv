@@ -47,7 +47,7 @@ function configure (opts) {
     });
   }
 
-  function format_result (res, res, next) {
+  function format_result (req, res, next) {
     res.send(res.result);
     res.end( );
     next( );
