@@ -16,6 +16,8 @@ function configure (opts) {
     }),
     event: 'after'
   }));
+  server.use(restify.plugins.queryParser( ));
+  server.use(restify.plugins.bodyParser( ));
 
   // 
   server.get('/inspect/:name', fetch_config_map, format_result );
@@ -40,11 +42,10 @@ function configure (opts) {
   }
 
   function fetch_config_map (req, res, next) {
-    logger.info("foo");
     k8s.readNamespacedConfigMap(req.params.name, 'default').then(function (result) {
       res.result = result.body;
       next( );
-    });
+    }).catch(next);
   }
 
   function format_result (req, res, next) {
@@ -54,16 +55,32 @@ function configure (opts) {
   }
 
   function create_config_map (req, res, next) {
-    k8s.createNamespacedConfigMap('default', req.configmap).then(function (result) {
-      res.result = result;
-      next( );
+    k8s.readNamespacedConfigMap(req.params.name, 'default').then(function (result) {
+      var body = result.body;
+      body.data = req.configmap.data;
+      console.log("READ before update", req.configmap.data, body);
+      console.log("before update", req.suggestion);
+      k8s.replaceNamespacedConfigMap(body.metadata.name, 'default', body).then(function (result) {
+        res.result = result.body;
+        next( );
+      }).catch(next);
+    }).catch(function (err) {
+      k8s.createNamespacedConfigMap('default', req.configmap).then(function (result) {
+        res.result = result.body;
+        next( );
+      }).catch(next);
     });
   }
 
   server.post('/inspect/:name', suggest, suggest_config_map, create_config_map, format_result);
 
   server.del('/inspect/:name', function (req, res, next) {
-    next( );
+    k8s.deleteNamespacedConfigMap(req.params.name, 'default').then(function (result) {
+      res.json(req.params.name);
+      res.status(204);
+      res.end( );
+      next( );
+    }).catch(next);
   });
   return server;
 }
