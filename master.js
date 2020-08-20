@@ -17,8 +17,12 @@ var bunyan = require('bunyan');
 var bsyslog = require('bunyan-syslog');
 
 var REDIS_ENV = { };
+var CLUSTER_CONSUL_ID = process.env.CLUSTER_CONSUL_ID || false;
+var ALLOW_MULTIPLE_CLUSTER = process.env.ALLOW_MULTIPLE_CLUSTER == '1';
 var CONSUL_ENV = {
     service: 'cluster',
+    allows_mesh: ALLOW_MULTIPLE_CLUSTER,
+    cluster_id: CLUSTER_CONSUL_ID || 'internal:cluster',
     url: process.env.CONSUL || process.env.CONSUL || "consul://consul.service.consul:8500"
 };
 
