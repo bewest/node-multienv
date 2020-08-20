@@ -139,7 +139,7 @@ function configureServer (opts, ctx) {
     next( );
   },
   function (req, res, next) {
-    if (_.isEmpty(res.locals.candidates.length)) {
+    if (_.isEmpty(res.locals.candidates)) {
       // this is a new/non-existing tenant
       res.locals.elected = res.locals.preferred;
     } else {
