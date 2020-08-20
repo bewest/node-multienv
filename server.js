@@ -13,11 +13,12 @@ function createServer (opts) {
     opts.handleUpgrades = true;
   }
   var server = restify.createServer(opts);
-  server.on('after', restify.auditLogger({
+  server.on('after', restify.plugins.auditLogger({
     log: bunyan.createLogger({
       name: 'audit',
       stream: process.stdout
     })
+    , event: 'after'
   }));
 
   server.get('/cluster', function (req, res, next) {
@@ -40,6 +41,16 @@ function createServer (opts) {
     res.send(h);
     next( );
     
+  });
+
+  server.get('/stats/active', function (req, res, next) {
+    var stats = {
+      total: {
+        active: Object.keys(cluster.workers).length
+      }
+    };
+    res.send(stats);
+    next( );
   });
 
   server.get('/resolve/:id', function (req, res, next) {
@@ -220,6 +231,7 @@ function createServer (opts) {
 
   }
 
+  /*
   server.get(/^\/environs\/(.*)\/resolver\/(.*)?$/, resolverA, resolverB);
   server.del(/^\/environs\/(.*)\/resolver\/(.*)?$/, resolverA, resolverB);
   server.post(/^\/environs\/(.*)\/resolver\/(.*)?$/, resolverA, resolverB);
@@ -228,8 +240,9 @@ function createServer (opts) {
   server.opts(/^\/environs\/(.*)\/resolver\/(.*)?$/, resolverA, resolverB);
   server.patch(/^\/environs\/(.*)\/resolver\/(.*)?$/, resolverA, resolverB);
 
-  server.use(restify.queryParser( ));
-  server.use(restify.bodyParser( ));
+  */
+  server.use(restify.plugins.queryParser( ));
+  server.use(restify.plugins.bodyParser( ));
 
 
   server.del('/environs/:name', function (req, res, next) {

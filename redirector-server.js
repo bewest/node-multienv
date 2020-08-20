@@ -13,11 +13,12 @@ function createServer (opts) {
   var server = restify.createServer(opts);
   var Consul = require('./lib/consul')(server, false);
   // var cache = new Consul(CONSUL_ENV, function ( ) { });
-  server.on('after', restify.auditLogger({
+  server.on('after', restify.plugins.auditLogger({
     log: bunyan.createLogger({
       name: 'audit',
       stream: process.stdout
     })
+    , event: 'after'
   }));
 
 
