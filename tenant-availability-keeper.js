@@ -65,8 +65,6 @@ function configureServer (opts, ctx) {
     var uri = url.format({ hostname: runner.ServiceAddress, port: runner.ServicePort, pathname: '/stats/active', protocol: 'http' });
     console.log("fetching", uri);
     got(uri).json( ).then(function (body) {
-      console.log("updating runner", runner);
-      console.log("active health", arguments);
       runner.HealthStatus = body;
       done( );
     }).catch(function (err) {
@@ -107,7 +105,7 @@ function configureServer (opts, ctx) {
 
   server.get('/scheduled/consul/:service/:tenant/:suffix', function (req, res, next) {
     fetch_elected_services(req.params.service, function (services) {
-      console.log("SEARCH CLUSTER RESULTS", arguments);
+      console.log("SEARCH CLUSTER RESULTS", services.length);
       res.locals.services = services;
       res.locals.preferred = elect(services);
       next( );
@@ -119,9 +117,8 @@ function configureServer (opts, ctx) {
     var search  = {service: suffix, tag: req.params.tenant };
     console.log('SEARCH TENANT', search);
     consul.catalog.service.nodes(search, function (err, tenants) {
-      console.log("SEARCH TENANT RESULTS", arguments);
+      console.log("SEARCH TENANT RESULTS", tenants.length);
       if (err) return next(err);
-      console.log("LOOKED UP TENANTS", err, tenants);
       res.locals.tenants = tenants;
       next( );
 
@@ -135,6 +132,7 @@ function configureServer (opts, ctx) {
       return runners;
     }
     var candidates = _.flatten(_.map(tenants, electRunners));
+    console.log("candidates", candidates.length);
     res.locals.candidates = candidates;
     next( );
   },
@@ -146,6 +144,15 @@ function configureServer (opts, ctx) {
       //pre-existing, use a candidate
       res.locals.elected = res.locals.candidates[0];
     }
+    var urlish = { hostname: res.locals.elected.ServiceAddress
+    , port: res.locals.elected.ServicePort
+    , pathname: '/environs/' + req.params.tenant
+    , protocol: 'http'
+    };
+    var uri = url.format(urlish);
+    console.log('elected', uri);
+    res.locals.endpoint = uri;
+    res.header('X-ELECTED-RUNNER', uri);
     next( );
   },
   format_locals
@@ -159,7 +166,6 @@ function configureServer (opts, ctx) {
   },
   function (req, res, next) {
     async.each(res.locals.services, get_health, function finish ( ) {
-      console.log("got map results", arguments);
       res.locals.services = _.sortBy(res.locals.services.filter(function (x) { return x && x.HealthStatus; }), function (x) { return x.HealthStatus.total.active; });
       next( );
     });
