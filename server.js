@@ -272,6 +272,13 @@ function createServer (opts) {
     var file = path.resolve(master.env.WORKER_ENV, path.basename(req.params.name + '.env'));
     var worker = master.handlers[file].worker || { };
 
+    next( );
+  });
+
+  server.get('/environs/:name/env/:field', function (req, res, next) {
+    var file = path.resolve(master.env.WORKER_ENV, path.basename(req.params.name + '.env'));
+    var worker = master.handlers[file].worker || { };
+
     var field = worker.custom_env[req.params.field];
     console.log(req.params.field, field);
     if (typeof field !== 'undefined') {
