@@ -18,11 +18,13 @@ var bsyslog = require('bunyan-syslog');
 
 var REDIS_ENV = { };
 var CLUSTER_CONSUL_ID = process.env.CLUSTER_CONSUL_ID || false;
+var BACKENDS_CONSUL_ID = process.env.BACKENDS_CONSUL_ID || false;
 var ALLOW_MULTIPLE_CLUSTER = process.env.ALLOW_MULTIPLE_CLUSTER == '1';
 var CONSUL_ENV = {
     service: 'cluster',
     allows_mesh: ALLOW_MULTIPLE_CLUSTER,
     cluster_id: CLUSTER_CONSUL_ID || 'internal:cluster',
+    backends_id: BACKENDS_CONSUL_ID || 'internal:cluster',
     url: process.env.CONSUL || process.env.CONSUL || "consul://consul.service.consul:8500"
 };
 
@@ -50,7 +52,7 @@ var env = {
     base: __dirname
   , WORKER_DIR: path.resolve(work_dir)
   , WORKER_ENV: path.resolve(__dirname, work_env)
-  , HOSTEDPORTS: 5000
+  , HOSTEDPORTS: parseInt(process.env.HOSTEDPORTS || '5000')
 };
 var ctx = {
     base: __dirname
@@ -94,8 +96,8 @@ function fork (env) {
   inner.env = env;
 
   function start (failures) {
-    inner.env.port = port;
-    inner.env.PORT = port;
+    inner.env.port = port.toString( );
+    inner.env.PORT = port.toString( );
     var worker = cluster.fork(inner.env);
     inner.worker = worker;
     worker.logger = logger.child({proc: worker.id, port: port });

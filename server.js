@@ -275,7 +275,8 @@ function createServer (opts) {
     var field = worker.custom_env[req.params.field];
     console.log(req.params.field, field);
     if (typeof field !== 'undefined') {
-      res.send(field);
+      res.status(200);
+      res.json(field);
     } else {
       res.status(404);
       res.send({msg: "field unknown", field: req.params.field});
@@ -299,7 +300,7 @@ function createServer (opts) {
         if (err) return next(err);
           res.status(201);
           res.header('Location', '/environs/' + req.params.name);
-          res.send(env[req.params.field]);
+          res.json(env[req.params.field]);
         // setTimeout(function ( ) { }, 800);
       });
     });
@@ -326,7 +327,7 @@ function createServer (opts) {
     out.on('close', function (ev) {
       mv(tmpname, file, function (err) {
         res.status(204);
-        res.send(env[req.params.field]);
+        res.json(env[req.params.field]);
         next(err);
       });
     });
@@ -359,9 +360,9 @@ function createServer (opts) {
     if (fs.existsSync(file)) { fs.unlinkSync(file); }
     out.on('close', function (ev) {
       mv(tmpname, file, function (err) {
-          res.send(item);
           res.status(201);
           res.header('Location', '/environs/' + req.params.name);
+          res.send(item);
           next(err);
         // setTimeout(function ( ) { },  800);
       });
