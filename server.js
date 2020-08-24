@@ -4,6 +4,7 @@ var fs = require('fs');
 var path = require('path');
 var tmp = require('tmp');
 var mv = require('mv');
+var Readable = require('stream').Readable;
 var bunyan = require('bunyan');
 
 function createServer (opts) {
@@ -303,7 +304,7 @@ function createServer (opts) {
     env[req.params.field] = req.params[req.params.field] || req.body[field] || '';
     var tmpname = tmp.tmpNameSync( );
     var out = fs.createWriteStream(tmpname);
-    if (fs.existsSync(file)) { fs.unlinkSync(file); }
+    // if (fs.existsSync(file)) { fs.unlinkSync(file); }
     out.on('close', function (ev) {
       mv(tmpname, file, function (err) {
         console.error(err);
@@ -321,9 +322,12 @@ function createServer (opts) {
       text.push([x, env[x] ].join('='));
     }
 
-    out.write(text.join("\n"));
-    out.write("\n");
-    out.end( );
+    text.push('');
+    Readable.from(text.join("\n")).pipe(out);
+
+    // out.write(text.join("\n"));
+    // out.write("\n");
+    // out.end( );
     // next( );
 
   });
@@ -348,13 +352,14 @@ function createServer (opts) {
       text.push([x, env[x] ].join('='));
     }
 
-    if (fs.existsSync(file)) {
-      fs.unlinkSync(file);
-    }
+    text.push('');
+    Readable.from(text.join("\n")).pipe(out);
 
-    out.write(text.join("\n"));
-    out.write("\n");
-    out.end( );
+    // if (fs.existsSync(file)) { fs.unlinkSync(file); }
+
+    // out.write(text.join("\n"));
+    // out.write("\n");
+    // out.end( );
     // res.status(201);
     // res.header('Location', '/environs/' + req.params.name);
     // next( );
@@ -367,7 +372,7 @@ function createServer (opts) {
     var text = [ ];
     var item = { };
     var out = fs.createWriteStream(tmpname);
-    if (fs.existsSync(file)) { fs.unlinkSync(file); }
+    // if (fs.existsSync(file)) { fs.unlinkSync(file); }
     out.on('close', function (ev) {
       mv(tmpname, file, function (err) {
           res.status(201);
@@ -393,10 +398,12 @@ function createServer (opts) {
     }
 
     console.log('writing', file);
-    out.write(text.join("\n"));
+    text.push('');
+    Readable.from(text.join("\n")).pipe(out);
+    // out.write(text.join("\n"));
 
-    out.write("\n");
-    out.end( );
+    // out.write("\n");
+    // out.end( );
   });
 
   return server;
