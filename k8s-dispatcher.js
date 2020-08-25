@@ -3,6 +3,8 @@ var ndjson = require('ndjson');
 var _ = require('underscore');
 var through = require('through2');
 var transform = require('parallel-transform');
+var got = require('got');
+var url = require('url');
 
 var stream = require('stream');
 
@@ -27,11 +29,67 @@ function takesTimeStream (opts) {
   return tr;
 }
 
+function naivePostToGateway (opts) {
+  // each element in the stream describes a tenant
+
+  function operation (update, callback) {
+    var object = update.object;
+    var endpoint = url.parse(opts.gateway);
+    var name = object.metadata.name;
+    var pathname = '/environs/' + name;
+    var api = url.format({hostname: endpoint.hostname, port: endpoint.port, protocol: endpoint.protocol, pathname: pathname });
+    var data = object.data;
+    data.internal_name = name;
+    console.log('posting to gateway', name, api, object.metadata.name, object.metadata.resourceVersion, object.data);
+    got.post(api, {json: data}).json( ).then( function (body) {
+      console.log('SUCCESSFUL POST', name, api, body);
+      update.gateway = {err: null, success: body};
+      callback(null, update);
+    }).catch(function (err) {
+      console.log("ERROR POST", name, api, arguments);
+      update.gateway = {err: err};
+      callback(null, update);
+    });
+  }
+
+  var tr = transform(3, operation);
+  return tr;
+}
+
+function naiveGetFromGateway (opts) {
+  // each element in the stream describes a tenant
+
+  function operation (update, callback) {
+    var object = update.object;
+    var endpoint = url.parse(opts.gateway);
+    var name = object.metadata.name;
+    var pathname = '/environs/' + name;
+    var api = url.format({hostname: endpoint.hostname, protocol: endpoint.protocol, pathname: pathname });
+    var data = object.data;
+    console.log('getting health from gateway', api, object.metadata.name, object.metadata.resourceVersion, object.data);
+    got(api).json( ).then( function (body) {
+      console.log('SUCCESSFUL POST', name, api, body);
+      update.health = {err: null, success: body};
+      callback(null, update);
+    }).catch(function (err) {
+      console.log("ERROR POST", name, api, arguments);
+      update.health = {err: err};
+      callback(null, update);
+    });
+  }
+
+  var tr = transform(3, operation);
+  return tr;
+}
+
+
 function emit_init (s) {
   function emit (data) {
     s.emit('initialized');
+    s.off('data', emitter);
   }
-  s.on('data', _.debounce(emit, 500));
+  var emitter = _.debounce(emit, 500);
+  s.on('data', emitter);
 }
 
 function pre ( ) {
@@ -94,6 +152,9 @@ if (!module.parent) {
   var WATCH_LABELSELECTOR = process.env.WATCH_LABELSELECTOR || '';
   var WATCH_RESOURCEVERSION = process.env.WATCH_RESOURCEVERSION || '';
   var WATCH_CONTINUE = process.env.WATCH_CONTINUE || '';
+  var gateway_opts = {
+    gateway: CLUSTER_GATEWAY
+  };
   var watch_opts = {
     fieldSelector: WATCH_FIELDSELECTOR
   , labelSelector: WATCH_LABELSELECTOR
@@ -118,11 +179,13 @@ if (!module.parent) {
       req.on('end', console.log.bind(console, 'ENDED'));
       var jsonStream = toJSONStream( );
       emit_init(jsonStream);
-      jsonStream.on('initialized', console.log.bind(console, "INITED!!"));
+      jsonStream.once('initialized', console.log.bind(console, "INITED!!"));
       var control = stream.pipeline(req,
         pre( ),
         jsonStream,
-        takesTimeStream( ),
+        // takesTimeStream( ),
+        naivePostToGateway(gateway_opts),
+        naiveGetFromGateway(gateway_opts),
         post( ), console.log.bind(console, 'STREAM ENDED'));
     });
   });
