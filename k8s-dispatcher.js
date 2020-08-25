@@ -56,23 +56,26 @@ function configure (opts) {
   var k8s = opts.k8s;
   var kc = opts.kc;
   var watch = new k8slib.Watch(kc);
-  var greatestResource = 0;
-  var lastSeen = null;
-  return watch.watch('/api/v1/namespaces/default/configmaps', 
-    // optional query parameters can go here.
-    {
-        allowWatchBookmarks: true
-    },
+  // optional query parameters can go here.
+  // fieldSelector
+  // labelSelector
+  // namespace
+  // resourceVersion
+  // continue
+  // allowWatchBookmarks
+  var config = _.pick(opts.watch, 'fieldSelector', 'labelSelector', 'resourceVersion', '_continue');
+  var api_endpoint = opts.watch.endpoint; // '/api/v1/namespaces/default/configmaps'
+  var params = _.extend(config, { allowWatchBookmarks: true });
+  return watch.watch(api_endpoint, params,
     // callback is called for each received object.
     function (type, apiObj, watchObj) {
-      console.log('latest', greatestResource, 'watching OBJ', arguments);
-      if (type == 'ADDED') {
-        var c = parseInt(apiObj.metadata.resourceVersion);
-        if (c >  greatestResource) {
-          console.log('new latest', c);
-          greatestResource = c;
-          lastSeen = apiObj;
-        }
+
+      // just log it as seen for now
+      // most handling and processing is done in streams in order to handle
+      // control flow and instruentation for observability.
+      console.log(type, apiObj.metadata.name, apiObj.metadata.resourceVersion);
+      if (type == 'BOOKMARK') {
+        console.log('BOOKMARK -> _continue', apiObj);
       }
     },
     // done callback is called if the watch terminates normally
@@ -80,10 +83,25 @@ function configure (opts) {
       console.log(err);
     }
   );
+  // function predicate (data) { }
 }
 
 if (!module.parent) {
   var port = parseInt(process.env.PORT || '2929');
+  var CLUSTER_GATEWAY = process.env.CLUSTER_GATEWAY || 'http://localhost:2831';
+  var WATCH_ENDPOINT = process.env.WATCH_ENDPOINT || '/api/v1/namespaces/default/configmaps';
+  var WATCH_FIELDSELECTOR = process.env.WATCH_FIELDSELECTOR || '';
+  var WATCH_LABELSELECTOR = process.env.WATCH_LABELSELECTOR || '';
+  var WATCH_RESOURCEVERSION = process.env.WATCH_RESOURCEVERSION || '';
+  var WATCH_CONTINUE = process.env.WATCH_CONTINUE || '';
+  var watch_opts = {
+    fieldSelector: WATCH_FIELDSELECTOR
+  , labelSelector: WATCH_LABELSELECTOR
+  , resourceVersion: WATCH_RESOURCEVERSION
+  , _continue: WATCH_CONTINUE
+  , endpoint: WATCH_ENDPOINT
+  };
+
   var boot = require('bootevent')( );
   boot.acquire(function k8s (ctx, next) {
     var my = this;
@@ -94,7 +112,7 @@ if (!module.parent) {
     }).catch(my.fail);
   })
   .boot(function booted (ctx) {
-    var monitor = configure({ k8s: ctx.k8s, kc: ctx.kc });
+    var monitor = configure({ k8s: ctx.k8s, kc: ctx.kc, watch: watch_opts });
     monitor.then(function (req) {
       console.log('req', req);
       req.on('end', console.log.bind(console, 'ENDED'));
