@@ -39,6 +39,7 @@ function naivePostToGateway (opts) {
     var pathname = '/environs/' + name;
     var api = url.format({hostname: endpoint.hostname, port: endpoint.port, protocol: endpoint.protocol, pathname: pathname });
     var data = object.data;
+    if (update.type == 'BOOKMARK') return callback(null);
     data.internal_name = name;
     console.log('posting to gateway', name, api, object.metadata.name, object.metadata.resourceVersion, object.data);
     got.post(api, {json: data}).json( ).then( function (body) {
@@ -64,15 +65,15 @@ function naiveGetFromGateway (opts) {
     var endpoint = url.parse(opts.gateway);
     var name = object.metadata.name;
     var pathname = '/environs/' + name;
-    var api = url.format({hostname: endpoint.hostname, protocol: endpoint.protocol, pathname: pathname });
+    var api = url.format({hostname: endpoint.hostname, port: endpoint.port, protocol: endpoint.protocol, pathname: pathname });
     var data = object.data;
     console.log('getting health from gateway', api, object.metadata.name, object.metadata.resourceVersion, object.data);
     got(api).json( ).then( function (body) {
-      console.log('SUCCESSFUL POST', name, api, body);
+      console.log('SUCCESSFUL GET', name, api, body);
       update.health = {err: null, success: body};
       callback(null, update);
     }).catch(function (err) {
-      console.log("ERROR POST", name, api, arguments);
+      console.log("ERROR GET", name, api, arguments);
       update.health = {err: err};
       callback(null, update);
     });
