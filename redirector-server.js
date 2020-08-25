@@ -65,14 +65,14 @@ function createServer (opts) {
     // res.header('X-Accel-Redirect', ['@proxy', req.result.port, '1'].join('/'));
     res.header('Not-Accel-Redirect', '@app');
     res.header('X-Selected-Backend', req.result.upstream);
-    console.log("outgoing headers", res.headers( ));
+    console.log("outgoing headers", res.headers);
     next( );
   }
   function select_backend (req, res, next) {
     // req.result.upstream = 'http://backends.service.consul:' + req.result.port;
     // req.result.upstream = 'http://consul.service.consul:' + req.result.port;
     var u = url.parse(getUpstreamPrefix( ));
-    var o = {protocol: u.protocol, hostname: u.hostname, port: req.result.port};
+    var o = {protocol: u.protocol, hostname: req.site_domain, port: req.result.port};
     var upstream = url.format(o);
     // req.result.upstream = 'http://consul.service.consul:' + req.result.port;
     req.result.upstream = upstream;
