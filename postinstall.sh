@@ -2,7 +2,7 @@
 
 (
   cd $WORKER_DIR
-  npm ls
+  # npm ls
   # npm install
 )
 

@@ -4,6 +4,7 @@ var fs = require('fs');
 var path = require('path');
 var tmp = require('tmp');
 var mv = require('mv');
+var Readable = require('stream').Readable;
 var bunyan = require('bunyan');
 
 function createServer (opts) {
@@ -13,11 +14,12 @@ function createServer (opts) {
     opts.handleUpgrades = true;
   }
   var server = restify.createServer(opts);
-  server.on('after', restify.auditLogger({
+  server.on('after', restify.plugins.auditLogger({
     log: bunyan.createLogger({
       name: 'audit',
       stream: process.stdout
     })
+    , event: 'after'
   }));
 
   server.get('/cluster', function (req, res, next) {
@@ -40,6 +42,16 @@ function createServer (opts) {
     res.send(h);
     next( );
     
+  });
+
+  server.get('/stats/active', function (req, res, next) {
+    var stats = {
+      total: {
+        active: Object.keys(cluster.workers).length
+      }
+    };
+    res.send(stats);
+    next( );
   });
 
   server.get('/resolve/:id', function (req, res, next) {
@@ -220,6 +232,7 @@ function createServer (opts) {
 
   }
 
+  /*
   server.get(/^\/environs\/(.*)\/resolver\/(.*)?$/, resolverA, resolverB);
   server.del(/^\/environs\/(.*)\/resolver\/(.*)?$/, resolverA, resolverB);
   server.post(/^\/environs\/(.*)\/resolver\/(.*)?$/, resolverA, resolverB);
@@ -228,8 +241,9 @@ function createServer (opts) {
   server.opts(/^\/environs\/(.*)\/resolver\/(.*)?$/, resolverA, resolverB);
   server.patch(/^\/environs\/(.*)\/resolver\/(.*)?$/, resolverA, resolverB);
 
-  server.use(restify.queryParser( ));
-  server.use(restify.bodyParser( ));
+  */
+  server.use(restify.plugins.queryParser( ));
+  server.use(restify.plugins.bodyParser( ));
 
 
   server.del('/environs/:name', function (req, res, next) {
@@ -255,6 +269,16 @@ function createServer (opts) {
     
   });
 
+  /*
+  server.get('/environs/:name/worker', function (req, res, next) {
+    var file = path.resolve(master.env.WORKER_ENV, path.basename(req.params.name + '.env'));
+    var worker = master.handlers[file].worker || { };
+    res.json(worker);
+
+    next( );
+  });
+  */
+
   server.get('/environs/:name/env/:field', function (req, res, next) {
     var file = path.resolve(master.env.WORKER_ENV, path.basename(req.params.name + '.env'));
     var worker = master.handlers[file].worker || { };
@@ -262,7 +286,8 @@ function createServer (opts) {
     var field = worker.custom_env[req.params.field];
     console.log(req.params.field, field);
     if (typeof field !== 'undefined') {
-      res.send(field);
+      res.status(200);
+      res.json(field);
     } else {
       res.status(404);
       res.send({msg: "field unknown", field: req.params.field});
@@ -279,14 +304,14 @@ function createServer (opts) {
     env[req.params.field] = req.params[req.params.field] || req.body[field] || '';
     var tmpname = tmp.tmpNameSync( );
     var out = fs.createWriteStream(tmpname);
-    if (fs.existsSync(file)) { fs.unlinkSync(file); }
+    // if (fs.existsSync(file)) { fs.unlinkSync(file); }
     out.on('close', function (ev) {
       mv(tmpname, file, function (err) {
         console.error(err);
         if (err) return next(err);
           res.status(201);
           res.header('Location', '/environs/' + req.params.name);
-          res.send(env[req.params.field]);
+          res.json(env[req.params.field]);
         // setTimeout(function ( ) { }, 800);
       });
     });
@@ -297,9 +322,12 @@ function createServer (opts) {
       text.push([x, env[x] ].join('='));
     }
 
-    out.write(text.join("\n"));
-    out.write("\n");
-    out.end( );
+    text.push('');
+    Readable.from(text.join("\n")).pipe(out);
+
+    // out.write(text.join("\n"));
+    // out.write("\n");
+    // out.end( );
     // next( );
 
   });
@@ -313,7 +341,7 @@ function createServer (opts) {
     out.on('close', function (ev) {
       mv(tmpname, file, function (err) {
         res.status(204);
-        res.send(env[req.params.field]);
+        res.json(env[req.params.field]);
         next(err);
       });
     });
@@ -324,13 +352,14 @@ function createServer (opts) {
       text.push([x, env[x] ].join('='));
     }
 
-    if (fs.existsSync(file)) {
-      fs.unlinkSync(file);
-    }
+    text.push('');
+    Readable.from(text.join("\n")).pipe(out);
 
-    out.write(text.join("\n"));
-    out.write("\n");
-    out.end( );
+    // if (fs.existsSync(file)) { fs.unlinkSync(file); }
+
+    // out.write(text.join("\n"));
+    // out.write("\n");
+    // out.end( );
     // res.status(201);
     // res.header('Location', '/environs/' + req.params.name);
     // next( );
@@ -343,12 +372,12 @@ function createServer (opts) {
     var text = [ ];
     var item = { };
     var out = fs.createWriteStream(tmpname);
-    if (fs.existsSync(file)) { fs.unlinkSync(file); }
+    // if (fs.existsSync(file)) { fs.unlinkSync(file); }
     out.on('close', function (ev) {
       mv(tmpname, file, function (err) {
-          res.send(item);
           res.status(201);
           res.header('Location', '/environs/' + req.params.name);
+          res.send(item);
           next(err);
         // setTimeout(function ( ) { },  800);
       });
@@ -369,10 +398,12 @@ function createServer (opts) {
     }
 
     console.log('writing', file);
-    out.write(text.join("\n"));
+    text.push('');
+    Readable.from(text.join("\n")).pipe(out);
+    // out.write(text.join("\n"));
 
-    out.write("\n");
-    out.end( );
+    // out.write("\n");
+    // out.end( );
   });
 
   return server;

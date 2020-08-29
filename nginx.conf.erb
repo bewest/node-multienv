@@ -51,7 +51,7 @@ http {
   # PORT
   upstream backends { server localhost:<%= ENV['INTERNAL_PORT'] %>; }
   upstream redirector { server localhost:<%= ENV['REDIRECTOR_PORT'] %>; }
-  upstream proxy { server backends.service.consul; }
+  # upstream proxy { server backends.service.consul; }
   server {
     listen      [::]:<%= ENV['PORT'] %>;
     listen      *:<%= ENV['PORT'] %>;
@@ -176,7 +176,7 @@ http {
     location    / {
       auth_request /internal/validate_request;
       auth_request_set $backend_port $upstream_http_x_worker_port;
-      auth_request_set $tenant http://backends.service.consul:$backend_port;
+      auth_request_set $tenant http://$cluster_user.backends.service.consul:$backend_port;
 
       # set $backend_port '$upstream_http_x_worker_port';
       # set $tenant http://my-envs:$backend_port;
