@@ -39,8 +39,12 @@ kill -TERM $redirector_pid
 kill -TERM $multienv_pid
 }
 
-INTERNAL_PORT=$REDIRECTOR_PORT node redirector-server.js &
-redirector_pid=$!
-node master.js  &
-multienv_pid=$!
-wait $multienv_pid
+PM2=./node_modules/.bin/pm2
+INTERNAL_PORT=$REDIRECTOR_PORT $PM2 start --exp-backoff-restart-delay=100 -i 4 redirector-server.js
+exec -a multienv $PM2-runtime master.js
+# INTERNAL_PORT=$REDIRECTOR_PORT node redirector-server.js &
+#redirector_pid=$!
+# node master.js  &
+# multienv_pid=$!
+# wait $multienv_pid
+
