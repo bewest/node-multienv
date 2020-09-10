@@ -52,7 +52,8 @@ function createServer (opts) {
     var domain = req.site_domain;
     console.log('resolve port for domain', domain);
     dns.resolveSrv(domain, function (err, result) {
-      console.log('resolved', domain, result);
+      console.log('resolved', err, domain, result);
+      if (err) return next(err);
       if (result.length) {
         req.result.port = result[0].port;
       }
