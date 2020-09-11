@@ -39,6 +39,8 @@ kill -TERM $redirector_pid
 kill -TERM $multienv_pid
 }
 
+export CLUSTER_CONSUL_ID="cluster:$HOSTNAME"
+export BACKENDS_CONSUL_ID="backend:$HOSTNAME"
 PM2=./node_modules/.bin/pm2
 INTERNAL_PORT=$REDIRECTOR_PORT $PM2 start --exp-backoff-restart-delay=100 -i 4 redirector-server.js
 exec -a multienv $PM2-runtime master.js

@@ -148,7 +148,8 @@ function configure (opts) {
 if (!module.parent) {
   var port = parseInt(process.env.PORT || '2929');
   var CLUSTER_GATEWAY = process.env.CLUSTER_GATEWAY || 'http://localhost:2831';
-  var WATCH_ENDPOINT = process.env.WATCH_ENDPOINT || '/api/v1/namespaces/default/configmaps';
+  var WATCH_NAMESPACE = process.env.MULTIENV_K8S_NAMESPACE || 'default';
+  var WATCH_ENDPOINT = process.env.WATCH_ENDPOINT || ('/api/v1/namespaces/' + WATCH_NAMESPACE + '/configmaps');
   var WATCH_FIELDSELECTOR = process.env.WATCH_FIELDSELECTOR || '';
   var WATCH_LABELSELECTOR = process.env.WATCH_LABELSELECTOR || '';
   var WATCH_RESOURCEVERSION = process.env.WATCH_RESOURCEVERSION || '';
