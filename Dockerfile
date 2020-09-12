@@ -48,4 +48,6 @@ EXPOSE 3434
 # USER app
 RUN /app/setup_docker_guest.sh
 
-CMD /app/start_container.sh
+# CMD /app/start_container.sh
+ENTRYPOINT ["/app/start_container.sh"]
+CMD ["multienv"]
