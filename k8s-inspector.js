@@ -88,16 +88,21 @@ function configure (opts) {
 
 if (!module.parent) {
   var port = parseInt(process.env.PORT || '2828')
+  var k8s_local = process.env.MULTIENV_K8S_AUTH == 'local';
   var config = {
     MULTIENV_K8S_NAMESPACE: process.env.MULTIENV_K8S_NAMESPACE || 'default'
   };
   var boot = require('bootevent')( );
   boot.acquire(function k8s (ctx, next) {
     var my = this;
-    ctx.k8s = require('./lib/k8s')( );
-    ctx.k8s.listNamespace( ).then(function (res) {
+    ctx.k8s = require('./lib/k8s')({cluster: !k8s_local});
+    ctx.k8s.getAPIResources( ).then(function (res) {
+      console.log("CONNECTED", res.body);
       next( );
-    }).catch(my.fail);
+    }).catch(function ( ) {
+      console.log("FAILURE");
+      my.fail( );
+    });
   })
   .boot(function booted (ctx) {
     var server = configure(_.extend(config, { k8s: ctx.k8s }));

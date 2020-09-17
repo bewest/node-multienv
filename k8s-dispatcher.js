@@ -147,6 +147,7 @@ function configure (opts) {
 
 if (!module.parent) {
   var port = parseInt(process.env.PORT || '2929');
+  var k8s_local = process.env.MULTIENV_K8S_AUTH == 'local';
   var CLUSTER_GATEWAY = process.env.CLUSTER_GATEWAY || 'http://localhost:2831';
   var WATCH_NAMESPACE = process.env.MULTIENV_K8S_NAMESPACE || 'default';
   var WATCH_ENDPOINT = process.env.WATCH_ENDPOINT || ('/api/v1/namespaces/' + WATCH_NAMESPACE + '/configmaps');
@@ -168,16 +169,18 @@ if (!module.parent) {
   var boot = require('bootevent')( );
   boot.acquire(function k8s (ctx, next) {
     var my = this;
-    ctx.k8s = require('./lib/k8s')( );
+    ctx.k8s = require('./lib/k8s')({cluster: !k8s_local});
     ctx.kc = require('./lib/k8s').get_kc( );
-    ctx.k8s.listNamespace( ).then(function (res) {
+    ctx.k8s.getAPIResources( ).then(function (res) {
+      console.log("CONNECTED", res.body);
       next( );
     }).catch(my.fail);
   })
   .boot(function booted (ctx) {
     var monitor = configure({ k8s: ctx.k8s, kc: ctx.kc, watch: watch_opts });
     monitor.then(function (req) {
-      console.log('req', req);
+      console.log('started watch', watch_opts, req.url);
+      // console.log('req', req);
       req.on('end', console.log.bind(console, 'ENDED'));
       var jsonStream = toJSONStream( );
       emit_init(jsonStream);
@@ -189,6 +192,8 @@ if (!module.parent) {
         naivePostToGateway(gateway_opts),
         naiveGetFromGateway(gateway_opts),
         post( ), console.log.bind(console, 'STREAM ENDED'));
+    }).catch(function (err) {
+       boot.fail(err);
     });
   });
 }
