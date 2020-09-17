@@ -24,7 +24,7 @@ var CONSUL_ENV = {
     service: 'cluster',
     allows_mesh: ALLOW_MULTIPLE_CLUSTER,
     cluster_id: CLUSTER_CONSUL_ID || 'internal:cluster',
-    backends_id: BACKENDS_CONSUL_ID || 'internal:cluster',
+    backends_id: BACKENDS_CONSUL_ID || 'internal:backend',
     url: process.env.CONSUL || process.env.CONSUL || "consul://consul.service.consul:8500"
 };
 
