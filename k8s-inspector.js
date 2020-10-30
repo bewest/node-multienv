@@ -31,7 +31,7 @@ function configure (opts) {
 
   function template_config_map (data) {
     return { kind: "ConfigMap"
-    , metadata: { name: data.name, labels: { managed: 'multienv', app: 'tenant' } }
+    , metadata: { name: data.WEB_NAME, labels: { managed: 'multienv', app: 'tenant' } }
     , data: data
     };
   }
