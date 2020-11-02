@@ -88,7 +88,10 @@ function configure (opts) {
       k8s.createNamespacedConfigMap(selected_namespace, req.configmap).then(function (result) {
         res.result = result.body;
         next( );
-      }).catch(next);
+      }).catch(function (err) {
+        console.log('error creating config map', err);
+        next(err);
+      });
     });
   }
 
