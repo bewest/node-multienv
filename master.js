@@ -115,8 +115,8 @@ function fork (env) {
     create.handlers[inner.env.envfile] = {worker: worker, env: inner.env, port: inner.env.PORT};
     // inner.worker.once('online', console.log.bind(console, 'WORKER ONLINE', worker));
     // inner.worker.once('listening', console.log.bind(console, 'WORKER LISTENING', worker));
-    inner.worker.once('disconnect', console.log.bind(console, 'DISCONNECT'));
-    inner.worker.once('exit', console.log.bind(console, 'EXIT'));
+    // inner.worker.once('disconnect', console.log.bind(console, 'DISCONNECT'));
+    // inner.worker.once('exit', console.log.bind(console, 'EXIT'));
     inner.worker.on('request-restart', function (ev) {
       console.log('REQUEST RESTART');
       inner.worker.failures = 0;

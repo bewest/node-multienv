@@ -39,11 +39,16 @@ function naivePostToGateway (opts) {
     var pathname = '/environs/' + name;
     var api = url.format({hostname: endpoint.hostname, port: endpoint.port, protocol: endpoint.protocol, pathname: pathname });
     var data = object.data;
-    if (update.type == 'BOOKMARK') return callback(null);
+    if (!data) {
+      console.log('WRONG?!', name, update, data);
+      return callback( );
+      // return callback(null, null);
+    }
+    if (update.type == 'BOOKMARK') return callback( ); // return callback(null, null);
     data.internal_name = name;
-    console.log('posting to gateway', name, api, object.metadata.name, object.metadata.resourceVersion, object.data);
+    console.log('posting to gateway', name, api, object.metadata.name, object.metadata.resourceVersion);
     got.post(api, {json: data}).json( ).then( function (body) {
-      console.log('SUCCESSFUL POST', name, api, body);
+      console.log('SUCCESSFUL POST', name, api);
       update.gateway = {err: null, success: body};
       callback(null, update);
     }).catch(function (err) {
@@ -67,9 +72,9 @@ function naiveGetFromGateway (opts) {
     var pathname = '/environs/' + name;
     var api = url.format({hostname: endpoint.hostname, port: endpoint.port, protocol: endpoint.protocol, pathname: pathname });
     var data = object.data;
-    console.log('getting health from gateway', api, object.metadata.name, object.metadata.resourceVersion, object.data);
+    console.log('getting health from gateway', api, object.metadata.name, object.metadata.resourceVersion, object.data.WEB_NAME);
     got(api).json( ).then( function (body) {
-      console.log('SUCCESSFUL GET', name, api, body);
+      console.log('SUCCESSFUL GET', name, api);
       update.health = {err: null, success: body};
       callback(null, update);
     }).catch(function (err) {
@@ -85,26 +90,45 @@ function naiveGetFromGateway (opts) {
 
 
 function emit_init (s) {
+  var done = false;
   function emit (data) {
-    s.emit('initialized');
-    s.off('data', emitter);
+    if (!done) s.emit('initialized');
+    done = true;
+    // s.off('data', emitter);
   }
   var emitter = _.debounce(emit, 500);
   s.on('data', emitter);
 }
 
 function pre ( ) {
-  var tr = through.obj(function (chunk, enc, callback) {
-    callback(null, chunk);
+  var opts = {
+    highWaterMark: 16000,
+  };
+  var tr = through.obj(opts, function (chunk, enc, callback) {
+    console.log('pre', chunk.type, chunk.object.metadata.name);
+    var self = this;
+    setImmediate(function ( ) {
+      self.push(chunk);
+      callback( );
+    });
+    // callback(null, chunk);
   });
   tr.on('flush', console.log.bind(console, 'flush'));
-  tr.on('drain', console.log.bind(console, 'DRAINED'));
+  tr.on('drain', console.log.bind(console, 'pre DRAINED'));
   return tr;
 }
 
 function post ( ) {
   var tr = through.obj(function (chunk, enc, callback) {
-    callback(null, chunk);
+    console.log('post', chunk.type, chunk.object.metadata.name);
+    var self = this;
+    setImmediate(function ( ) {
+      // This is the destination stream, just drop everything so we don't hog
+      // memory.
+      // self.push(chunk);
+      callback( );
+    });
+    // callback(null, chunk);
   });
   tr.on('flush', console.log.bind(console, 'flush'));
   tr.on('drain', console.log.bind(console, 'DRAINED'));
@@ -156,7 +180,8 @@ if (!module.parent) {
   var WATCH_RESOURCEVERSION = process.env.WATCH_RESOURCEVERSION || '';
   var WATCH_CONTINUE = process.env.WATCH_CONTINUE || '';
   var gateway_opts = {
-    gateway: CLUSTER_GATEWAY
+    gateway: CLUSTER_GATEWAY,
+    highWaterMark: 100,
   };
   var watch_opts = {
     fieldSelector: WATCH_FIELDSELECTOR
@@ -186,8 +211,8 @@ if (!module.parent) {
       emit_init(jsonStream);
       jsonStream.once('initialized', console.log.bind(console, "INITED!!"));
       var control = stream.pipeline(req,
-        pre( ),
         jsonStream,
+        pre( ),
         // takesTimeStream( ),
         naivePostToGateway(gateway_opts),
         naiveGetFromGateway(gateway_opts),

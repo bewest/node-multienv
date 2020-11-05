@@ -269,6 +269,20 @@ function createServer (opts) {
     
   });
 
+  server.get('/environs/:name/assigned/:field/:value', function (req, res, next) {
+    var file = path.resolve(master.env.WORKER_ENV, path.basename(req.params.name + '.env'));
+    var handler = master.handlers[file];
+    var worker = handler ? handler.worker : { custom_env: { } };
+
+    var found = worker.custom_env[req.params.field];
+    var valid = req.params.value == found;
+
+    res.send(valid ? 200 : 500, found);
+    next( );
+    
+  });
+
+
   /*
   server.get('/environs/:name/worker', function (req, res, next) {
     var file = path.resolve(master.env.WORKER_ENV, path.basename(req.params.name + '.env'));
