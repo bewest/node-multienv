@@ -112,8 +112,9 @@ function pre ( ) {
     } else {
       console.log('DROPPING', chunk);
     }
-    callback( );
-    // setImmediate(function ( ) { });
+    setImmediate(function ( ) {
+      callback( );
+    });
   });
   tr.on('flush', console.log.bind(console, 'flush'));
   tr.on('drain', console.log.bind(console, 'pre DRAINED'));
