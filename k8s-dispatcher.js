@@ -11,22 +11,8 @@ var stream = require('stream');
 
 function toJSONStream ( ) {
   var s = ndjson.parse ( );
-  s.on('data', console.log.bind(console, 'parsed'));
+  // s.on('data', console.log.bind(console, 'parsed'));
   return s;
-}
-
-function takesTimeStream (opts) {
-  function operation (update, callback) {
-    var object = update.object;
-    console.log('incoming', object.metadata.name, object.metadata.resourceVersion);
-    setTimeout( function ( ) {
-      console.log('outgoing', object.metadata.name, object.metadata.resourceVersion);
-      callback(null, update);
-    }, Math.random( ) * 1500);
-  }
-
-  var tr = transform(3, operation);
-  return tr;
 }
 
 function naivePostToGateway (opts) {
@@ -42,23 +28,22 @@ function naivePostToGateway (opts) {
     if (!data) {
       console.log('WRONG?!', name, update, data);
       return callback( );
-      // return callback(null, null);
     }
-    if (update.type == 'BOOKMARK') return callback( ); // return callback(null, null);
+
     data.internal_name = name;
-    console.log('posting to gateway', name, api, object.metadata.name, object.metadata.resourceVersion);
+    console.log(name, 'to gateway', name, api, object.metadata.name, object.metadata.resourceVersion);
     got.post(api, {json: data}).json( ).then( function (body) {
-      console.log('SUCCESSFUL POST', name, api);
+      console.log(name, 'SUCCESSFUL', api);
       update.gateway = {err: null, success: body};
       callback(null, update);
     }).catch(function (err) {
-      console.log("ERROR POST", name, api, arguments);
+      console.log(name, "ERROR POST", name, api, arguments);
       update.gateway = {err: err};
       callback(null, update);
     });
   }
 
-  var tr = transform(12, operation);
+  var tr = transform(opts.parallel, operation);
   return tr;
 }
 
@@ -72,19 +57,19 @@ function naiveGetFromGateway (opts) {
     var pathname = '/environs/' + name;
     var api = url.format({hostname: endpoint.hostname, port: endpoint.port, protocol: endpoint.protocol, pathname: pathname });
     var data = object.data;
-    console.log('getting health from gateway', api, object.metadata.name, object.metadata.resourceVersion, object.data.WEB_NAME);
+    console.log(name, 'getting health from gateway', api, object.metadata.resourceVersion, object.data.WEB_NAME);
     got(api).json( ).then( function (body) {
-      console.log('SUCCESSFUL GET', name, api);
+      console.log(name, 'successful GET', api);
       update.health = {err: null, success: body};
       callback(null, update);
     }).catch(function (err) {
-      console.log("ERROR GET", name, api, arguments);
+      console.log(name, "ERROR GET", api, arguments);
       update.health = {err: err};
       callback(null, update);
     });
   }
 
-  var tr = transform(12, operation);
+  var tr = transform(opts.parallel, operation);
   return tr;
 }
 
@@ -105,7 +90,7 @@ function pre ( ) {
     highWaterMark: 32000,
   };
   var tr = through.obj(opts, function (chunk, enc, callback) {
-    console.log('pre', chunk.type, chunk.object.metadata.name);
+    console.log(chunk.object.metadata.name, 'begin', chunk.type);
     var self = this;
     if (chunk.object.data) {
       this.push(chunk);
@@ -116,25 +101,20 @@ function pre ( ) {
       callback( );
     });
   });
-  tr.on('flush', console.log.bind(console, 'flush'));
-  tr.on('drain', console.log.bind(console, 'pre DRAINED'));
   return tr;
 }
 
 function post ( ) {
   var tr = through.obj(function (chunk, enc, callback) {
-    console.log('post', chunk.type, chunk.object.metadata.name);
+    console.log(chunk.object.metadata.name, 'done', chunk.type);
     var self = this;
     setImmediate(function ( ) {
-      // This is the destination stream, just drop everything so we don't hog
-      // memory.
+      // This is the destination stream, just drop everything so 
+      // we don't hog memory.
       // self.push(chunk);
       callback( );
     });
-    // callback(null, chunk);
   });
-  tr.on('flush', console.log.bind(console, 'flush'));
-  tr.on('drain', console.log.bind(console, 'DRAINED'));
   return tr;
 }
 
@@ -159,7 +139,7 @@ function configure (opts) {
       // just log it as seen for now
       // most handling and processing is done in streams in order to handle
       // control flow and instruentation for observability.
-      console.log(type, apiObj.metadata.name, apiObj.metadata.resourceVersion);
+      console.log(apiObj.metadata.name, 'audit', type, apiObj.metadata.resourceVersion);
       if (type == 'BOOKMARK') {
         console.log('BOOKMARK -> _continue', apiObj);
       }
@@ -184,6 +164,7 @@ if (!module.parent) {
   var WATCH_CONTINUE = process.env.WATCH_CONTINUE || '';
   var gateway_opts = {
     gateway: CLUSTER_GATEWAY,
+    parallel: parseInt(process.env.PARALLEL_UPDATES || '12'),
     highWaterMark: 100,
   };
   var watch_opts = {
