@@ -58,7 +58,7 @@ function naivePostToGateway (opts) {
     });
   }
 
-  var tr = transform(3, operation);
+  var tr = transform(12, operation);
   return tr;
 }
 
@@ -84,7 +84,7 @@ function naiveGetFromGateway (opts) {
     });
   }
 
-  var tr = transform(3, operation);
+  var tr = transform(12, operation);
   return tr;
 }
 
@@ -102,16 +102,18 @@ function emit_init (s) {
 
 function pre ( ) {
   var opts = {
-    highWaterMark: 16000,
+    highWaterMark: 32000,
   };
   var tr = through.obj(opts, function (chunk, enc, callback) {
     console.log('pre', chunk.type, chunk.object.metadata.name);
     var self = this;
-    setImmediate(function ( ) {
-      self.push(chunk);
-      callback( );
-    });
-    // callback(null, chunk);
+    if (chunk.object.data) {
+      this.push(chunk);
+    } else {
+      console.log('DROPPING', chunk);
+    }
+    callback( );
+    // setImmediate(function ( ) { });
   });
   tr.on('flush', console.log.bind(console, 'flush'));
   tr.on('drain', console.log.bind(console, 'pre DRAINED'));
@@ -197,7 +199,7 @@ if (!module.parent) {
     ctx.k8s = require('./lib/k8s')({cluster: !k8s_local});
     ctx.kc = require('./lib/k8s').get_kc( );
     ctx.k8s.getAPIResources( ).then(function (res) {
-      console.log("CONNECTED", res.body);
+      console.log("CONNECTED", res.body.resources.length > 0);
       next( );
     }).catch(my.fail);
   })
