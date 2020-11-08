@@ -46,8 +46,11 @@ function createServer (opts) {
 
   server.get('/stats/active', function (req, res, next) {
     var stats = {
+      name: master.stats.name,
       total: {
-        active: Object.keys(cluster.workers).length
+        active: Object.keys(cluster.workers).length,
+        expected: master.stats.expected,
+        max: master.env.MAX_TENANT_LIMIT
       }
     };
     res.send(stats);

@@ -50,6 +50,8 @@ var work_dir = process.env.WORKER_DIR || '../cgm-remote-monitor';
 var work_env = process.env.WORKER_ENV || './envs';
 var env = {
     base: __dirname
+  , cluster_host: process.env.HOSTNAME
+  , MAX_TENANT_LIMIT: process.env.MAX_TENANT_LIMIT
   , WORKER_DIR: path.resolve(work_dir)
   , WORKER_ENV: path.resolve(__dirname, work_env)
   , HOSTEDPORTS: parseInt(process.env.HOSTEDPORTS || '5000')
@@ -77,6 +79,7 @@ function read (config) {
 function create (env) {
   process.chdir(env.WORKER_DIR);
   create.handlers = { };
+  create.stats = { expected: 0, handled: 0, name: CONSUL_ENV.cluster_id };
   // ctx.last_port = env.HOSTEDPORTS;
   cluster.setupMaster(
     {
@@ -213,6 +216,7 @@ function merge(a, b) {
 
 function createWatcher (env) {
   var master = create(env);
+  var max_tenants = parseInt(env.MAX_TENANT_LIMIT);
   console.log('MONITOR', env.WORKER_ENV);
   var watcher = chokidar.watch(env.WORKER_ENV, {
     persistent: true
@@ -222,6 +226,12 @@ function createWatcher (env) {
   watcher.on('error', console.log.bind(console, 'chokidar error'));
 
   watcher.on('add', function (file, stats) {
+    var currently_hosted = create.stats.expected;
+    create.stats.expected++;
+    if (max_tenants && currently_hosted >= max_tenants) {
+      console.log('abandoning, over quota', file);
+      return;
+    }
     console.log('adding', file);
     scan(env, file, function iter (err, environs) {
       environs.forEach(function map (env) {
@@ -245,6 +255,7 @@ function createWatcher (env) {
 
   watcher.on('unlink', function (f, stats) {
     console.log('removed', f);
+    create.stats.expected--;
     var worker = create.handlers[f] ? create.handlers[f].worker : null;
     if (worker) {
       worker.remove = true;
