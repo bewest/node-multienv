@@ -28,14 +28,31 @@ function configureServer (opts, ctx) {
     });
   }
 
-  function fetch_services (service, next) {
+  function fetch_services (service, tenants, next) {
+    if (tenants.call) {
+      next = tenants;
+      tenants = [ ];
+    }
     return get_candidates(service, function (err, clusters) {
+      function filter_runners (tenant) {
+        var runners = _.where(clusters, { ServiceAddress : tenant.ServiceAddress });
+        return runners;
+      }
+      var orig_len = clusters.length;
+      if (tenants.length > 1) {
+        clusters = _.flatten(_.map(tenants, filter_runners));
+        console.log('tenants', tenants.length, 'orig', orig_len, 'filtered', clusters.length);
+      }
       return require_health(clusters, next);
-    })
+    });
   }
 
-  function fetch_elected_services (service, next) {
-    return fetch_services(service, function (err, services) {
+  function fetch_elected_services (service, tenants, next) {
+    if (tenants.call) {
+      next = tenants;
+      tenants = [ ];
+    }
+    return fetch_services(service, tenants, function (err, services) {
       if (err) throw err;
       return next(apply_policies(services));
     });
@@ -103,25 +120,34 @@ function configureServer (opts, ctx) {
   format_locals
   );
 
-  server.get('/scheduled/consul/:service/:tenant/:suffix', function (req, res, next) {
-    fetch_elected_services(req.params.service, function (services) {
-      console.log("SEARCH CLUSTER RESULTS", services.length);
-      res.locals.services = services;
-      res.locals.preferred = elect(services);
-      next( );
-    });
-  },
+  server.get('/scheduled/consul/:service/:tenant/:suffix',
   function (req, res, next) {
     var suffix = req.params.suffix || 'backends';
     var domain = [ req.params.tenant, suffix ].join('.');
     var search  = {service: suffix, tag: req.params.tenant };
     console.log('SEARCH TENANT', search);
     consul.catalog.service.nodes(search, function (err, tenants) {
-      console.log("SEARCH TENANT RESULTS", tenants.length);
+      console.log("SEARCH TENANT RESULTS", err, tenants ? tenants.length : err);
       if (err) return next(err);
       res.locals.tenants = tenants;
       next( );
 
+    });
+  },
+  function (req, res, next) {
+    var search = {service: req.params.service };
+    if (res.locals.tenants.length >= 1) {
+      // res.locals.services = res.locals.tenants;
+      // res.locals.preferred = res.locals.tenants[0];
+      // console.log("skipping CLUSTER search", res.locals.tenants.length);
+      // next( );
+      // return;
+    }
+    fetch_elected_services(req.params.service, res.locals.tenants, function (services) {
+      console.log("SEARCH CLUSTER RESULTS", services.length);
+      res.locals.services = services;
+      res.locals.preferred = elect(services);
+      next( );
     });
   },
   function (req, res, next) {
