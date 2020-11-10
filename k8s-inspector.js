@@ -81,11 +81,13 @@ function configure (opts) {
       console.log("READ before update", req.configmap.data, body);
       console.log("before update", req.suggestion);
       k8s.replaceNamespacedConfigMap(body.metadata.name, selected_namespace, body).then(function (result) {
+        res.header('Location', '/environs/' + body.metadata.name);
         res.result = result.body;
         next( );
       }).catch(next);
     }).catch(function (err) {
       k8s.createNamespacedConfigMap(selected_namespace, req.configmap).then(function (result) {
+        res.header('Location', '/environs/' + body.metadata.name);
         res.result = result.body;
         next( );
       }).catch(function (err) {
