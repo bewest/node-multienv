@@ -39,9 +39,14 @@ function configureServer (opts, ctx) {
         return runners;
       }
       var orig_len = clusters.length;
-      if (tenants.length > 1) {
+      if (1 == tenants.length) {
+        clusters = filter_runners(tenants[0]);
+        console.log('tenants', tenants.length, 'orig', orig_len, 'filtered', clusters.length);
+        return next(err, clusters);
+      } else if (tenants.length > 1) {
         clusters = _.flatten(_.map(tenants, filter_runners));
         console.log('tenants', tenants.length, 'orig', orig_len, 'filtered', clusters.length);
+        return next(err, clusters);
       }
       return require_health(clusters, next);
     });
@@ -54,6 +59,9 @@ function configureServer (opts, ctx) {
     }
     return fetch_services(service, tenants, function (err, services) {
       if (err) throw err;
+      if (tenants.length > 0) {
+        return next(services);
+      }
       return next(apply_policies(services));
     });
   }
@@ -127,8 +135,15 @@ function configureServer (opts, ctx) {
     var search  = {service: suffix, tag: req.params.tenant };
     console.log('SEARCH TENANT', search);
     consul.catalog.service.nodes(search, function (err, tenants) {
-      console.log("SEARCH TENANT RESULTS", err, tenants ? tenants.length : err);
-      if (err) return next(err);
+      if (err) {
+        console.log(err);
+        return next(err);
+      }
+
+      var orig_num_tenants = tenants ? tenants.length : 0;
+      tenants = _.uniq(tenants, _.iteratee('ServiceAddress'));
+      console.log("SEARCH TENANT RESULTS", err, orig_num_tenants, tenants ? tenants.length : err);
+
       res.locals.tenants = tenants;
       next( );
 
