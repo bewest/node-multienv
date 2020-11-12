@@ -185,6 +185,13 @@ function configureServer (opts, ctx) {
       //pre-existing, use a candidate
       res.locals.elected = res.locals.candidates[0];
     }
+    if (!res.locals.elected) {
+      var fail = { tenant: res.locals.tenants[0], candidates: res.locals.candidates };
+      console.log("FAILED TENANT", fail.tenant);
+      console.log("FAIL NO SUITABLE CANDIDATE", fail);
+      res.send(404, fail);
+      return next(fail);
+    }
     var urlish = { hostname: res.locals.elected.ServiceAddress
     , port: res.locals.elected.ServicePort
     , pathname: '/environs/' + req.params.tenant
