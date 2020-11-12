@@ -69,21 +69,21 @@ case "${1-help}" in
   ;;
   resolver)
     export INTERNAL_PORT=$REDIRECTOR_PORT 
-    exec -a resolver $RUNTIME --no-auto-restart --exp-backoff-restart-delay=100 -i max redirector-server.js
+    exec -a resolver $RUNTIME --no-autorestart --exp-backoff-restart-delay=100 -i max redirector-server.js
   ;;
   runner)
     export CLUSTER_CONSUL_ID="cluster:$HOSTNAME"
     export BACKENDS_CONSUL_ID="backend:$HOSTNAME"
-    exec -a multienv $RUNTIME master.js
+    exec -a multienv $RUNTIME --no-autorestart master.js
   ;;
   inspector)
-    exec -a inspector $RUNTIME --no-auto-restart --exp-backoff-restart-delay=100 -i max k8s-inspector.js
+    exec -a inspector $RUNTIME --no-autorestart --exp-backoff-restart-delay=100 -i max k8s-inspector.js
   ;;
   dispatcher)
-    exec -a dispatcher $RUNTIME --no-auto-restart --exp-backoff-restart-delay=100 k8s-dispatcher.js
+    exec -a dispatcher $RUNTIME --no-autorestart --exp-backoff-restart-delay=100 k8s-dispatcher.js
   ;;
   demuxer)
-    exec -a demuxer $RUNTIME --no-auto-restart --exp-backoff-restart-delay=100 -i max tenant-availability-keeper.js
+    exec -a demuxer $RUNTIME --no-autorestart --exp-backoff-restart-delay=100 -i max tenant-availability-keeper.js
   ;;
   env)
     env
