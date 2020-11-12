@@ -56,6 +56,7 @@ function configure (opts) {
 
   function format_multienv_compatible_result (req, res, next) {
     res.result.custom_env = res.result.data;
+    res.result.state = 'persisted';
     delete res.result.data;
     /*
     var v = {
