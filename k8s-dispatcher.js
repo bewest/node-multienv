@@ -24,6 +24,7 @@ function naivePostToGateway (opts) {
     var name = object.metadata.name;
     var pathname = '/environs/' + name;
     var api = url.format({hostname: endpoint.hostname, port: endpoint.port, protocol: endpoint.protocol, pathname: pathname });
+    var method = update.type == 'DELETED' ?  got.delete : got.post;
     var data = object.data;
     if (!data) {
       console.log('WRONG?!', name, update, data);
@@ -32,7 +33,7 @@ function naivePostToGateway (opts) {
 
     data.internal_name = name;
     console.log(name, 'to gateway', name, api, object.metadata.name, object.metadata.resourceVersion);
-    got.post(api, {json: data}).json( ).then( function (body) {
+    method(api, {json: data}).json( ).then( function (body) {
       console.log(name, 'SUCCESSFUL', api);
       update.gateway = {err: null, success: body};
       callback(null, update);
