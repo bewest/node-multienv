@@ -72,7 +72,11 @@ function configure (opts) {
   }
 
   function create_config_map (req, res, next) {
+    var msg = {status: 'create or update starting' };
     k8s.readNamespacedConfigMap(req.params.name, selected_namespace).then(function (result) {
+      msg.status = "readNamespacedConfigMap result"
+      msg.result = result;
+      console.log("replace or create", msg);
       var body = result.body;
       if (req.params.field && req.configmap.data[req.params.field]) {
         body.data[req.params.field] = req.configmap.data[req.params.field];
@@ -82,14 +86,22 @@ function configure (opts) {
       console.log("READ before update", req.configmap.data, body);
       console.log("before update", req.suggestion);
       k8s.replaceNamespacedConfigMap(body.metadata.name, selected_namespace, body).then(function (result) {
+        msg.status = "replaceNamespacedConfigMap result"
+        msg.result = result;
+        console.log("replace or create", msg);
         res.header('Location', '/environs/' + body.metadata.name);
-        res.result = result.body;
+        res.result = result.body.data;
         next( );
       }).catch(next);
     }).catch(function (err) {
+      console.log('first time creating?', err);
       k8s.createNamespacedConfigMap(selected_namespace, req.configmap).then(function (result) {
+        msg.status = "createNamespacedConfigMap result"
+        msg.result = result;
+        console.log("replace or create", msg);
+        var body = result.body;
         res.header('Location', '/environs/' + body.metadata.name);
-        res.result = result.body;
+        res.result = result.body.data;
         next( );
       }).catch(function (err) {
         console.log('error creating config map', err);
@@ -98,6 +110,11 @@ function configure (opts) {
     });
   }
 
+  function select_data_field (req, res, next) {
+    var doc = res.result;
+    res.result = doc[req.params.field];
+    next( );
+  }
 
   function select_field (req, res, next) {
     var doc = res.result;
@@ -134,7 +151,7 @@ function configure (opts) {
   server.post('/environs/:name', suggest, suggest_config_map, create_config_map, format_multienv_compatible_result, format_result);
   server.get('/environs/:name/env/:field', fetch_config_map, select_field, format_result );
   server.get('/environs/:name/env', fetch_config_map, select_env, format_result );
-  server.post('/environs/:name/env/:field', suggest, suggest_config_map, create_config_map, select_field, format_result );
+  server.post('/environs/:name/env/:field', suggest, suggest_config_map, create_config_map, select_data_field, format_result );
   server.del('/environs/:name', delete_configmap);
 
   return server;
