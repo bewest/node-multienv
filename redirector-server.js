@@ -55,7 +55,19 @@ function createServer (opts) {
       console.log('resolved', err, domain, result);
       if (err) return next(err);
       if (result.length) {
+        req.result.service_for_port = result[0].name;
         req.result.port = result[0].port;
+      }
+      next( );
+    });
+  }
+
+  function resolve_service_for_port (req, res, next) {
+    var domain = req.result.service_for_port;
+    dns.resolve(domain, function resolved (err, ips) {
+      if (err) return next(err);
+      if (ips.length) {
+        req.result.service_for_port = ips[0];
       }
       next( );
     });
@@ -73,7 +85,7 @@ function createServer (opts) {
     // req.result.upstream = 'http://backends.service.consul:' + req.result.port;
     // req.result.upstream = 'http://consul.service.consul:' + req.result.port;
     var u = url.parse(getUpstreamPrefix( ));
-    var o = {protocol: u.protocol, hostname: req.site_domain, port: req.result.port};
+    var o = {protocol: u.protocol, hostname: req.result.service_for_port || req.site_domain, port: req.result.port};
     var upstream = url.format(o);
     // req.result.upstream = 'http://consul.service.consul:' + req.result.port;
     req.result.upstream = upstream;
@@ -112,8 +124,8 @@ function createServer (opts) {
   server.get('/auth/.*', log_headers_middleware, result_is_headers);
   server.get('/debug/.*', log_headers_middleware, result_is_headers);
   server.get('/validate_request/.*', log_headers_middleware, result_is_headers);
-  server.get('/validate_domain/.*', log_headers_middleware, set_site_domain, get_port, set_outgoing_headers, result_is_headers);
-  server.get('/internal_consul/:site/:host', log_headers_middleware, set_site_domain, set_site_host_params, get_port, select_backend, set_outgoing_headers, result_is_headers); 
+  server.get('/validate_domain/.*', log_headers_middleware, set_site_domain, get_port, resolve_service_for_port, set_outgoing_headers, result_is_headers);
+  server.get('/internal_consul/:site/:host', log_headers_middleware, set_site_domain, set_site_host_params, get_port, resolve_service_for_port, select_backend, set_outgoing_headers, result_is_headers);
 
   return server;
 }
