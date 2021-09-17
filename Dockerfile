@@ -36,6 +36,7 @@ RUN useradd --user-group --create-home \
 
 RUN mkdir -p /opt/multi && chown app /opt/multi
 ADD . /app
+ADD errors/5xx.html /usr/share/nginx/html/5xx.html
 
 # VOLUME ["/etc/nginx", "/app"]
 
