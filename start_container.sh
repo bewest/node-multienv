@@ -9,6 +9,9 @@ ls -alh /etc/nginx
 export INTERNAL_PORT=3434
 export REDIRECTOR_PORT=3636
 export RESOLVER_IP=$(dig +short consul.service.consul | ( read ip; test -z "$ip" && echo 8.8.8.8 || echo $ip:8600))
+SUGGESTED_MAX=$(awk '/MemFree/ { printf "%.3f \n", $2/1024/1024/0.050 }' /proc/meminfo)
+export MAX_TENANT_LIMIT=${MAX_TENANT_LIMIT-$SUGGESTED_MAX}
+
 
 export PORT=4545
 

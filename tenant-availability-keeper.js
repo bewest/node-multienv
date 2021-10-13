@@ -18,8 +18,9 @@ function configureServer (opts, ctx) {
 
   function apply_policies (services) {
     function byTotalActive (x) { return x.HealthStatus.total.active; }
+    function byCapacityQuotient (x) { return x.HealthStatus.total.expected / x.HealthStatus.total.max; }
     function hasHealth (x) { return x && x.HealthStatus; }
-    return _.sortBy(services.filter(hasHealth), byTotalActive);
+    return _.sortBy(services.filter(hasHealth), byCapacityQuotient);
   }
 
   function require_health (services, next) {
