@@ -6,6 +6,7 @@ var tmp = require('tmp');
 var mv = require('mv');
 var Readable = require('stream').Readable;
 var bunyan = require('bunyan');
+var shellquote = require('shell-quote').quote;
 
 function createServer (opts) {
   var cluster = opts.cluster;
@@ -366,7 +367,7 @@ function createServer (opts) {
     var text = [ ];
 
     for (x in env) {
-      text.push([x, env[x] ].join('='));
+      text.push([x, shellquote([env[x]]) ].join('='));
     }
 
     text.push('');
@@ -406,11 +407,11 @@ function createServer (opts) {
     text.push(['WEB_NAME', req.params.name ].join('='));
     item['WEB_NAME'] = req.params.name;
     for (x in req.query) {
-      text.push([x, req.query[x] ].join('='));
+      text.push([x, shellquote([req.query[x]]) ].join('='));
       item[x] = req.query[x];
     }
     for (x in req.body) {
-      text.push([x, req.body[x] ].join('='));
+      text.push([x, shellquote([req.body[x]]) ].join('='));
       item[x] = req.body[x];
     }
 
