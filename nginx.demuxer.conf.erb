@@ -22,7 +22,8 @@
       internal;
       proxy_http_version 1.1;
       proxy_set_header X-Origin-URI $request_uri;
-      proxy_pass  http://subrequest/scheduled/consul/cluster/$tenant/;
+      proxy_pass  http://subrequest/scheduled/consul/<%= ENV['CLUSTER_SERVICE_NAME'] %>/$tenant/;
+      # proxy_pass  http://subrequest/scheduled/consul/cluster/$tenant/;
       proxy_set_header Host "$tenant";
       proxy_pass_request_body off;
       proxy_set_header Content-Length "";

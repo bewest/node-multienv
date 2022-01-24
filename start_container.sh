@@ -105,6 +105,7 @@ case "${1-help}" in
       demuxer)
         export NGINX_PORT=$PORT
         export UPSTREAM_SUBREQUEST=${DEMUXER_SERVICE_URI-http://demuxers:3000}
+        export CLUSTER_SERVICE_NAME=${CLUSTER_SERVICE_NAME-'cluster'}
         # eg 169.254.1.1
         # eg kube-dns.kube-system.svc.cluster.local
         export RESOLVER_IP
