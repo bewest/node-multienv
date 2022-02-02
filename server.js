@@ -6,7 +6,8 @@ var tmp = require('tmp');
 var mv = require('mv');
 var Readable = require('stream').Readable;
 var bunyan = require('bunyan');
-var shellquote = require('shell-quote').quote;
+var escapeshell = require('shell-escape');
+var shellquote = escapeshell;
 
 function createServer (opts) {
   var cluster = opts.cluster;
