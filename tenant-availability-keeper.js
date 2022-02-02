@@ -39,11 +39,12 @@ function configureServer (opts, ctx) {
         var runners = _.where(clusters, { ServiceAddress : tenant.ServiceAddress });
         return runners;
       }
+      var candidates = [ ]
       var orig_len = clusters.length;
       if (1 == tenants.length) {
-        clusters = filter_runners(tenants[0]);
-        console.log('tenants', tenants.length, 'orig', orig_len, 'filtered', clusters.length);
-        return next(err, clusters);
+        candidates = filter_runners(tenants[0]);
+        console.log('tenants', tenants.length, 'orig', orig_len, 'filtered', candidates.length);
+        return next(err, candidates.length == 1 ? candidates : clusters);
       } else if (tenants.length > 1) {
         clusters = _.flatten(_.map(tenants, filter_runners));
         console.log('tenants', tenants.length, 'orig', orig_len, 'filtered', clusters.length);
