@@ -19,7 +19,7 @@
     "chokidar": "^3.4.0",
     "consul": "^0.34.1",
     "debounce": "^1.0.0",
-    "dotenv": "^1.2.0",
+    "dotenv": "github:motdotla/dotenv#838e89e",
     "foreman": "^3.0.1",
     "forever-monitor": "^1.6.0",
     "glob": "^4.5.3",
@@ -31,7 +31,8 @@
     "pm2": "^4.4.0",
     "redis": "^2.8.0",
     "restify": "^8.5.1",
-    "shell-quote": "^1.4.3",
+    "shell-escape": "^0.2.0",
+    "shell-quote": "^1.7.3",
     "tmp": "0.0.26",
     "watch": "^0.16.0"
   },

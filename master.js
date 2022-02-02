@@ -10,7 +10,7 @@ var chokidar = require('chokidar');
 var shlex = require('shell-quote');
 var Server = require('./server');
 var debounce = require('debounce');
-var dotenv = require('dotenv/lib/main').parse;
+var dotenv = require('dotenv').parse;
 var bunyan = require('bunyan');
 // var RedisCache = require('./lib/storage');
 
@@ -20,8 +20,9 @@ var REDIS_ENV = { };
 var CLUSTER_CONSUL_ID = process.env.CLUSTER_CONSUL_ID || false;
 var BACKENDS_CONSUL_ID = process.env.BACKENDS_CONSUL_ID || false;
 var ALLOW_MULTIPLE_CLUSTER = process.env.ALLOW_MULTIPLE_CLUSTER == '1';
+var CLUSTER_SERVICE_NAME = process.env.CLUSTER_SERVICE_NAME || 'cluster';
 var CONSUL_ENV = {
-    service: 'cluster',
+    service: CLUSTER_SERVICE_NAME,
     allows_mesh: ALLOW_MULTIPLE_CLUSTER,
     cluster_id: CLUSTER_CONSUL_ID || 'internal:cluster',
     backends_id: BACKENDS_CONSUL_ID || 'internal:backend',
@@ -63,7 +64,7 @@ var ctx = {
 
 function read (config) {
   var lines = fs.readFileSync(path.resolve(env.WORKER_ENV, config));
-  var e = dotenv(lines);
+  var e = dotenv(lines, { multiline: true });
   return e;
   var e = { };
   lines.toString( ).split('\n').forEach(function (line) {
