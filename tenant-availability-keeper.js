@@ -44,7 +44,9 @@ function configureServer (opts, ctx) {
       if (1 == tenants.length) {
         candidates = filter_runners(tenants[0]);
         console.log('tenants', tenants.length, 'orig', orig_len, 'filtered', candidates.length);
-        return next(err, candidates.length == 1 ? candidates : clusters);
+        if (candidates.length == 1) {
+          return next(err, candidates);
+        }
       } else if (tenants.length > 1) {
         clusters = _.flatten(_.map(tenants, filter_runners));
         console.log('tenants', tenants.length, 'orig', orig_len, 'filtered', clusters.length);
