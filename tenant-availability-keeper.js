@@ -39,7 +39,7 @@ function configureServer (opts, ctx) {
         var runners = _.where(clusters, { ServiceAddress : tenant.ServiceAddress });
         return runners;
       }
-      var candidates = [ ]
+      var candidates = [ ];
       var orig_len = clusters.length;
       if (1 == tenants.length) {
         candidates = filter_runners(tenants[0]);
@@ -48,11 +48,19 @@ function configureServer (opts, ctx) {
           return next(err, candidates);
         }
       } else if (tenants.length > 1) {
-        clusters = _.flatten(_.map(tenants, filter_runners));
-        console.log('tenants', tenants.length, 'orig', orig_len, 'filtered', clusters.length);
-        return next(err, clusters);
+        candidates = _.flatten(_.map(tenants, filter_runners));
+        console.log('tenants', tenants.length, 'orig', orig_len, 'filtered', candidates.length);
+        if (candidates.length > 0) {
+          return next(err, candidates);
+        }
       }
-      return require_health(clusters, next);
+      // return require_health(clusters, next);
+      return require_health(clusters, function (err, services) {
+        if (err) { throw err; }
+        var ordered = apply_policies(services);
+        console.log('ordered policies, no matching candidates for tenant');
+        return next(err, ordered);
+      });
     });
   }
 
