@@ -64,6 +64,15 @@ function createServer (opts) {
 
   function resolve_service_for_port (req, res, next) {
     var domain = req.result.service_for_port;
+    var pieces = domain.split('.');
+    var hexip = pieces[0];
+    if (pieces[1] == 'addr' && pieces[3] == 'consul') {
+      var octets = [ [ 0, 2 ], [ 2, 4 ], [ 4, 6 ], [ 6, 8 ] ];
+      req.result.service_for_port = octets.map(function (spec) {
+        return parseInt(hexip.slice.apply(hexip, spec), 16);
+      }).join('.');
+      return next( );
+    }
     dns.resolve(domain, function resolved (err, ips) {
       if (err) return next(err);
       if (ips.length) {
