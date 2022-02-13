@@ -17,7 +17,7 @@ RUN ln -sf /dev/stdout /var/log/nginx/error.log
 RUN apt-get install -y mongodb rsyslog
 RUN npm install -g n
 RUN n prune
-RUN n 10
+RUN n 16
 
 # RUN npm cache-clean -g npm
 # RUN npm install -g npm
