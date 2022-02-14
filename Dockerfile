@@ -6,7 +6,7 @@ ENV DEBIAN_FRONTEND noninteractive
 
 RUN apt-get update -y
 RUN apt-get install -y wget curl git sudo -y
-RUN curl -sL https://deb.nodesource.com/setup_10.x | bash -
+RUN curl -sL https://deb.nodesource.com/setup_12.x | bash -
 
 RUN apt-get install -y python software-properties-common nodejs build-essential nginx ruby dnsutils
 # forward request and error logs to docker log collector
@@ -17,7 +17,7 @@ RUN ln -sf /dev/stdout /var/log/nginx/error.log
 RUN apt-get install -y mongodb rsyslog
 RUN npm install -g n
 RUN n prune
-RUN n 16
+RUN n 12
 
 # RUN npm cache-clean -g npm
 # RUN npm install -g npm
