@@ -144,7 +144,10 @@ function configureServer (opts, ctx) {
   function (req, res, next) {
     var suffix = req.params.suffix || 'backends';
     var domain = [ req.params.tenant, suffix ].join('.');
-    var search  = {service: suffix, tag: req.params.tenant };
+    // var search  = {service: suffix, tag: req.params.tenant };
+    var additional_tag = opts.SEARCH_TENANT_CLUSTER_TAG ? req.params.service : 'tenant';
+    var required_tag = [ req.params.tenant, additional_tag ];
+    var search  = {service: suffix, tag: required_tag };
     console.log('SEARCH TENANT', search);
     consul.catalog.service.nodes(search, function (err, tenants) {
       if (err) {
@@ -154,7 +157,7 @@ function configureServer (opts, ctx) {
 
       var orig_num_tenants = tenants ? tenants.length : 0;
       tenants = _.uniq(tenants, _.iteratee('ServiceAddress'));
-      console.log("SEARCH TENANT RESULTS", err, orig_num_tenants, tenants ? tenants.length : err);
+      console.log("SEARCH TENANT RESULTS", err, orig_num_tenants, tenants ? tenants.length : err, tenants);
 
       res.locals.tenants = tenants;
       next( );
@@ -278,6 +281,7 @@ function configureWatcher (opts) {
 
 if (!module.parent) {
   var port = parseInt(process.env.PORT || '2829')
+  var SEARCH_TENANT_CLUSTER_TAG = process.env.SEARCH_TENANT_CLUSTER_TAG == '1'
   var boot = require('bootevent')( );
   var env = require('./lib/env');
   boot.acquire(function consul_env (ctx, next) {
@@ -289,7 +293,7 @@ if (!module.parent) {
       next( );
     });
   }).acquire(function server_env (ctx, next) {
-    ctx.server = configureServer({ }, ctx);
+    ctx.server = configureServer({SEARCH_TENANT_CLUSTER_TAG: SEARCH_TENANT_CLUSTER_TAG }, ctx);
     next( );
   }).boot(function (ctx) {
     ctx.server.listen(port, function ( ) {
