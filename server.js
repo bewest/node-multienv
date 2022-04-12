@@ -6,6 +6,8 @@ var tmp = require('tmp');
 var mv = require('mv');
 var Readable = require('stream').Readable;
 var bunyan = require('bunyan');
+var escapeshell = require('shell-escape');
+var shellquote = escapeshell;
 
 function createServer (opts) {
   var cluster = opts.cluster;
@@ -46,8 +48,11 @@ function createServer (opts) {
 
   server.get('/stats/active', function (req, res, next) {
     var stats = {
+      name: master.stats.name,
       total: {
-        active: Object.keys(cluster.workers).length
+        active: Object.keys(cluster.workers).length,
+        expected: master.stats.expected,
+        max: master.env.MAX_TENANT_LIMIT
       }
     };
     res.send(stats);
@@ -269,6 +274,20 @@ function createServer (opts) {
     
   });
 
+  server.get('/environs/:name/assigned/:field/:value', function (req, res, next) {
+    var file = path.resolve(master.env.WORKER_ENV, path.basename(req.params.name + '.env'));
+    var handler = master.handlers[file];
+    var worker = handler ? handler.worker : { custom_env: { } };
+
+    var found = worker.custom_env[req.params.field];
+    var valid = req.params.value == found;
+
+    res.send(valid ? 200 : 500, found);
+    next( );
+    
+  });
+
+
   /*
   server.get('/environs/:name/worker', function (req, res, next) {
     var file = path.resolve(master.env.WORKER_ENV, path.basename(req.params.name + '.env'));
@@ -349,7 +368,7 @@ function createServer (opts) {
     var text = [ ];
 
     for (x in env) {
-      text.push([x, env[x] ].join('='));
+      text.push([x, shellquote([env[x]]) ].join('='));
     }
 
     text.push('');
@@ -389,11 +408,11 @@ function createServer (opts) {
     text.push(['WEB_NAME', req.params.name ].join('='));
     item['WEB_NAME'] = req.params.name;
     for (x in req.query) {
-      text.push([x, req.query[x] ].join('='));
+      text.push([x, shellquote([req.query[x]]) ].join('='));
       item[x] = req.query[x];
     }
     for (x in req.body) {
-      text.push([x, req.body[x] ].join('='));
+      text.push([x, shellquote([req.body[x]]) ].join('='));
       item[x] = req.body[x];
     }
 

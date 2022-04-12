@@ -10,7 +10,7 @@ var chokidar = require('chokidar');
 var shlex = require('shell-quote');
 var Server = require('./server');
 var debounce = require('debounce');
-var dotenv = require('dotenv/lib/main').parse;
+var dotenv = require('dotenv').parse;
 var bunyan = require('bunyan');
 // var RedisCache = require('./lib/storage');
 
@@ -20,11 +20,12 @@ var REDIS_ENV = { };
 var CLUSTER_CONSUL_ID = process.env.CLUSTER_CONSUL_ID || false;
 var BACKENDS_CONSUL_ID = process.env.BACKENDS_CONSUL_ID || false;
 var ALLOW_MULTIPLE_CLUSTER = process.env.ALLOW_MULTIPLE_CLUSTER == '1';
+var CLUSTER_SERVICE_NAME = process.env.CLUSTER_SERVICE_NAME || 'cluster';
 var CONSUL_ENV = {
-    service: 'cluster',
+    service: CLUSTER_SERVICE_NAME,
     allows_mesh: ALLOW_MULTIPLE_CLUSTER,
     cluster_id: CLUSTER_CONSUL_ID || 'internal:cluster',
-    backends_id: BACKENDS_CONSUL_ID || 'internal:cluster',
+    backends_id: BACKENDS_CONSUL_ID || 'internal:backend',
     url: process.env.CONSUL || process.env.CONSUL || "consul://consul.service.consul:8500"
 };
 
@@ -50,6 +51,8 @@ var work_dir = process.env.WORKER_DIR || '../cgm-remote-monitor';
 var work_env = process.env.WORKER_ENV || './envs';
 var env = {
     base: __dirname
+  , cluster_host: process.env.HOSTNAME
+  , MAX_TENANT_LIMIT: process.env.MAX_TENANT_LIMIT
   , WORKER_DIR: path.resolve(work_dir)
   , WORKER_ENV: path.resolve(__dirname, work_env)
   , HOSTEDPORTS: parseInt(process.env.HOSTEDPORTS || '5000')
@@ -61,7 +64,7 @@ var ctx = {
 
 function read (config) {
   var lines = fs.readFileSync(path.resolve(env.WORKER_ENV, config));
-  var e = dotenv(lines);
+  var e = dotenv(lines, { multiline: true });
   return e;
   var e = { };
   lines.toString( ).split('\n').forEach(function (line) {
@@ -77,6 +80,7 @@ function read (config) {
 function create (env) {
   process.chdir(env.WORKER_DIR);
   create.handlers = { };
+  create.stats = { expected: 0, handled: 0, name: CONSUL_ENV.cluster_id };
   // ctx.last_port = env.HOSTEDPORTS;
   cluster.setupMaster(
     {
@@ -115,8 +119,8 @@ function fork (env) {
     create.handlers[inner.env.envfile] = {worker: worker, env: inner.env, port: inner.env.PORT};
     // inner.worker.once('online', console.log.bind(console, 'WORKER ONLINE', worker));
     // inner.worker.once('listening', console.log.bind(console, 'WORKER LISTENING', worker));
-    inner.worker.once('disconnect', console.log.bind(console, 'DISCONNECT'));
-    inner.worker.once('exit', console.log.bind(console, 'EXIT'));
+    // inner.worker.once('disconnect', console.log.bind(console, 'DISCONNECT'));
+    // inner.worker.once('exit', console.log.bind(console, 'EXIT'));
     inner.worker.on('request-restart', function (ev) {
       console.log('REQUEST RESTART');
       inner.worker.failures = 0;
@@ -213,6 +217,7 @@ function merge(a, b) {
 
 function createWatcher (env) {
   var master = create(env);
+  var max_tenants = parseInt(env.MAX_TENANT_LIMIT);
   console.log('MONITOR', env.WORKER_ENV);
   var watcher = chokidar.watch(env.WORKER_ENV, {
     persistent: true
@@ -222,6 +227,12 @@ function createWatcher (env) {
   watcher.on('error', console.log.bind(console, 'chokidar error'));
 
   watcher.on('add', function (file, stats) {
+    var currently_hosted = create.stats.expected;
+    create.stats.expected++;
+    if (max_tenants && currently_hosted >= max_tenants) {
+      console.log('abandoning, over quota', file);
+      return;
+    }
     console.log('adding', file);
     scan(env, file, function iter (err, environs) {
       environs.forEach(function map (env) {
@@ -245,6 +256,7 @@ function createWatcher (env) {
 
   watcher.on('unlink', function (f, stats) {
     console.log('removed', f);
+    create.stats.expected--;
     var worker = create.handlers[f] ? create.handlers[f].worker : null;
     if (worker) {
       worker.remove = true;
