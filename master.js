@@ -6,13 +6,28 @@ var path = require('path');
 var glob = require('glob');
 var fs = require('fs');
 var watch = require('watch');
+var chokidar = require('chokidar');
 var shlex = require('shell-quote');
 var Server = require('./server');
 var debounce = require('debounce');
-var dotenv = require('dotenv/lib/main').parse;
+var dotenv = require('dotenv').parse;
 var bunyan = require('bunyan');
+// var RedisCache = require('./lib/storage');
 
 var bsyslog = require('bunyan-syslog');
+
+var REDIS_ENV = { };
+var CLUSTER_CONSUL_ID = process.env.CLUSTER_CONSUL_ID || false;
+var BACKENDS_CONSUL_ID = process.env.BACKENDS_CONSUL_ID || false;
+var ALLOW_MULTIPLE_CLUSTER = process.env.ALLOW_MULTIPLE_CLUSTER == '1';
+var CLUSTER_SERVICE_NAME = process.env.CLUSTER_SERVICE_NAME || 'cluster';
+var CONSUL_ENV = {
+    service: CLUSTER_SERVICE_NAME,
+    allows_mesh: ALLOW_MULTIPLE_CLUSTER,
+    cluster_id: CLUSTER_CONSUL_ID || 'internal:cluster',
+    backends_id: BACKENDS_CONSUL_ID || 'internal:backend',
+    url: process.env.CONSUL || process.env.CONSUL || "consul://consul.service.consul:8500"
+};
 
 var LOG_ENV = {
     level: process.env.LOG_LEVEL || 'info'
@@ -36,9 +51,11 @@ var work_dir = process.env.WORKER_DIR || '../cgm-remote-monitor';
 var work_env = process.env.WORKER_ENV || './envs';
 var env = {
     base: __dirname
+  , cluster_host: process.env.HOSTNAME
+  , MAX_TENANT_LIMIT: process.env.MAX_TENANT_LIMIT
   , WORKER_DIR: path.resolve(work_dir)
   , WORKER_ENV: path.resolve(__dirname, work_env)
-  , HOSTEDPORTS: 5000
+  , HOSTEDPORTS: parseInt(process.env.HOSTEDPORTS || '5000')
 };
 var ctx = {
     base: __dirname
@@ -47,7 +64,7 @@ var ctx = {
 
 function read (config) {
   var lines = fs.readFileSync(path.resolve(env.WORKER_ENV, config));
-  var e = dotenv(lines);
+  var e = dotenv(lines, { multiline: true });
   return e;
   var e = { };
   lines.toString( ).split('\n').forEach(function (line) {
@@ -63,6 +80,7 @@ function read (config) {
 function create (env) {
   process.chdir(env.WORKER_DIR);
   create.handlers = { };
+  create.stats = { expected: 0, handled: 0, name: CONSUL_ENV.cluster_id };
   // ctx.last_port = env.HOSTEDPORTS;
   cluster.setupMaster(
     {
@@ -82,8 +100,8 @@ function fork (env) {
   inner.env = env;
 
   function start (failures) {
-    inner.env.port = port;
-    inner.env.PORT = port;
+    inner.env.port = port.toString( );
+    inner.env.PORT = port.toString( );
     var worker = cluster.fork(inner.env);
     inner.worker = worker;
     worker.logger = logger.child({proc: worker.id, port: port });
@@ -99,8 +117,10 @@ function fork (env) {
     worker.custom_env = inner.env;
     worker.failures = failures;
     create.handlers[inner.env.envfile] = {worker: worker, env: inner.env, port: inner.env.PORT};
-    inner.worker.once('disconnect', console.log.bind(console, 'DISCONNECT'));
-    inner.worker.once('exit', console.log.bind(console, 'EXIT'));
+    // inner.worker.once('online', console.log.bind(console, 'WORKER ONLINE', worker));
+    // inner.worker.once('listening', console.log.bind(console, 'WORKER LISTENING', worker));
+    // inner.worker.once('disconnect', console.log.bind(console, 'DISCONNECT'));
+    // inner.worker.once('exit', console.log.bind(console, 'EXIT'));
     inner.worker.on('request-restart', function (ev) {
       console.log('REQUEST RESTART');
       inner.worker.failures = 0;
@@ -108,7 +128,13 @@ function fork (env) {
       inner.env = env = merge(env, refreshed);
       inner.worker.remove = false;
       inner.worker.custom_env = inner.env;
-      console.log('worker', worker.state);
+      var old = inner.worker;
+      console.log('worker', worker);
+      inner.worker = start(0).once('online', function ( ) {
+        console.log('replacing', old.id, this.id);
+        old.kill( );
+      });;
+      /*
       if (inner.worker.state == 'listening') {
           // worker && worker.suicide && worker.suicide.call && worker.suicide( );
         console.log('resettig alive');
@@ -117,6 +143,7 @@ function fork (env) {
         console.log('recreating deadsies new');
         inner.worker = start(0);
       }
+      */
     });
     inner.worker.on('exit', function (ev) {
       console.log('EXITED!?', worker.suicide, worker.failures, arguments);
@@ -142,39 +169,8 @@ function fork (env) {
         }
       }
     });
-    worker.on('error', console.log.bind(console, 'ERROR'));
-    /*
-    watch.createMonitor(path.dirname(env.envfile), { filter: function (ff, stat) {
-        // console.log('changing', path.basename(ff), path.basename(env.envfile));
-        return path.basename(ff) === path.basename(env.envfile);
-        if (worker.remove && worker.suicide) {
-        } else {
-        }
-      } }, function (monitor) {
-      monitor.on("changed", function (f, curr, prev) {
-        console.log('killing', f, env.envfile);
-        // env = ;
-        scan(create.env, f, function iter (err, environs) {
+    inner.worker.on('error', console.log.bind(console, 'ERROR'));
 
-          env = environs[0];
-          console.log('recreating', env);
-          worker.custom_env = env;
-          worker.kill( );
-        });
-      });
-      monitor.on("removed", function (f, curr, prev) {
-        console.log('killing', f, env.envfile);
-        worker.remove = true;
-        if (worker.state != 'dead') {
-          worker.kill( );
-        }
-      });
-      worker.on('exit', function (ev) {
-        monitor.stop( );
-        // if (!worker.suicide) { }
-      });
-    });
-    */
     /*
     */
     return worker;
@@ -219,20 +215,75 @@ function merge(a, b) {
   return a;
 }
 
+function createWatcher (env) {
+  var master = create(env);
+  var max_tenants = parseInt(env.MAX_TENANT_LIMIT);
+  console.log('MONITOR', env.WORKER_ENV);
+  var watcher = chokidar.watch(env.WORKER_ENV, {
+    persistent: true
+  , atomic: true
+  });
+  // watcher.on('all', console.log.bind(console, 'chokidar *'));
+  watcher.on('error', console.log.bind(console, 'chokidar error'));
+
+  watcher.on('add', function (file, stats) {
+    var currently_hosted = create.stats.expected;
+    create.stats.expected++;
+    if (max_tenants && currently_hosted >= max_tenants) {
+      console.log('abandoning, over quota', file);
+      return;
+    }
+    console.log('adding', file);
+    scan(env, file, function iter (err, environs) {
+      environs.forEach(function map (env) {
+        console.log('NEW INSTANCE', env);
+        fork(env);
+      });
+    });
+  });
+
+  watcher.on('change', function (file, stats) {
+    console.log('changed', file);
+    var worker = create.handlers[file] ? create.handlers[file].worker : { state: 'missing' };
+    worker.remove = false;
+    if (worker && worker.emit) {
+      worker.emit('request-restart');
+    } else {
+      console.log("ERROR WORKER MISSING, scane to recreate?", worker);
+    }
+
+  });
+
+  watcher.on('unlink', function (f, stats) {
+    console.log('removed', f);
+    create.stats.expected--;
+    var worker = create.handlers[f] ? create.handlers[f].worker : null;
+    if (worker) {
+      worker.remove = true;
+      worker.emit('remove');
+      worker.kill('SIGTERM');
+    }
+  });
+  return watcher;
+}
+
 create.env     = env;
 create.scan    = scan;
 create.read    = read;
 create.fork    = fork;
 create.merge   = merge;
+create.watcher = createWatcher;
 module.exports = create;
 
 
 if (!module.parent) {
   process.env.WORKER_DIR = env.WORKER_DIR;
+
   var init = require('./init')(function ready ( ) {
     console.log(env);
+    var watcher = createWatcher(env);
+    /*
     scan(env, function iter (err, environs) {
-      var master = create(env);
       environs.forEach(function map (env, i) {
         console.log('i', i);
         setTimeout(function ( ) {
@@ -242,62 +293,34 @@ if (!module.parent) {
         }, i*4*1000);
       });
     });
+    */
+    var server = Server({cluster: cluster, create:create, watcher:watcher});
+    var port = process.env.INTERNAL_PORT || process.env.PORT || 3434;
+    function onConnect ( ) {
+      server.listen(port);
+    }
+    var Consul = require('./lib/consul')(server, cluster);
+    server.on('listening', function ( ) {
+      console.log.bind(console, 'port', port);
+      process.on('SIGTERM', function ( ) {
+        watcher.close( ).then(function ( ) {
+          console.log('stopped watching');
+          server.close(function ( ) {
+            console.log("server closed, disconnecting cluster");
+
+            cluster.disconnect(function ( ) {
+              console.log("cluster disconnected");
+            });
+          });
+        });
+      });
+    });
+    var cache = new Consul(CONSUL_ENV, onConnect);
 
   });
 
-  console.log('MONITOR', env.WORKER_ENV);
-  fs.watch(env.WORKER_ENV,
-  // debounce(
-  function (event, file) {
-    // new file
-    var f = path.resolve(env.WORKER_ENV, file);
-    console.log('changed', file, event);
-    var worker = create.handlers[f] ? create.handlers[f].worker : { state: 'missing' };
-    var valid = [null, 'listening', 'online'];
-    if (false && event == 'rename' && fs.existsSync(f)) {
-      if (valid.indexOf(worker.state) < 1) {
-        if (worker.failures) { worker.failures = 0; }
-        scan(env, f, function iter (err, environs) {
-          environs.forEach(function map (env) {
-            fork(env);
-          });
-        });
-      }
-    } else {
-      if (fs.existsSync(f)) {
-        console.log("KILLING IT", worker.state);
-          worker.remove = false;
-        if (worker && worker.state != 'missing') {
-          worker.remove = false;
-          if (event == 'change') {
-          setTimeout(function ( ) {
-            worker.emit('request-restart');
-          }, 500);
-          }
-        } else {
-          scan(env, f, function iter (err, environs) {
-            environs.forEach(function map (env) {
-              console.log('NEW INSTANCE', env);
-              fork(env);
-            });
-          });
-        }
-        return;
-      } else {
-        console.log('removing');
-        if (worker) {
-          worker.remove = true;
-          worker.emit('remove');
-          worker.kill('SIGTERM');
-        }
-      }
-    }
-  }
-  // ,  10)
-  );
 
-  var server = Server({cluster: cluster, create:create});
-  var port = process.env.INTERNAL_PORT || process.env.PORT || 3434;
-  server.listen(port);
-  server.on('listen', console.log.bind(console, 'port', port));
+
+  // cache.subscribe(server, cluster);
+  // onConnect( );
 }

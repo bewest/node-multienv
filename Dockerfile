@@ -1,27 +1,53 @@
-FROM ubuntu:trusty
+FROM ubuntu:bionic
 MAINTAINER Ben West <bewest@gmail.com>
 
 ENV DEBIAN_FRONTEND noninteractive
 
+
 RUN apt-get update -y
-RUN apt-get install -y wget curl git -y
-RUN curl -sL https://deb.nodesource.com/setup_dev | sudo bash -
+RUN apt-get install -y wget curl git sudo -y
+RUN curl -sL https://deb.nodesource.com/setup_12.x | bash -
 
-RUN echo "deb http://ppa.launchpad.net/nginx/stable/ubuntu trusty main" | tee /etc/apt/sources.list.d/nginx.list
-RUN echo "deb-src http://ppa.launchpad.net/nginx/stable/ubuntu trusty main" | tee /etc/apt/sources.list.d/nginx.list
-RUN apt-key  adv --keyserver keyserver.ubuntu.com --recv-keys C300EE8C
-RUN apt-get update
-RUN apt-get install -y python python-software-properties nodejs build-essential nginx ruby
-RUN npm install -g node-gyp
+RUN apt-get install -y python software-properties-common nodejs build-essential nginx ruby dnsutils
+# forward request and error logs to docker log collector
+RUN ln -sf /dev/stdout /var/log/nginx/access.log
+RUN ln -sf /dev/stdout /var/log/nginx/error.log
 
+
+RUN apt-get install -y mongodb rsyslog
+RUN npm install -g n
+RUN n prune
+RUN n 12
+
+# RUN npm cache-clean -g npm
+# RUN npm install -g npm
+# RUN npm update -g npm
+# RUN curl -0 -L https://npmjs.com/install.sh | bash
+# RUN npm install -g node-gyp
+
+# COPY package.json /home/app/package.json
+# RUN cd /home/app && npm install
+
+RUN useradd --user-group --create-home \
+            --groups adm,sudo \
+            --shell /bin/bash       \
+            --no-log-init --system  \
+            app
+
+RUN mkdir -p /opt/multi && chown app /opt/multi
 ADD . /app
+
+# VOLUME ["/etc/nginx", "/app"]
 
 WORKDIR /app
 
 EXPOSE 4545
+EXPOSE 3535
 EXPOSE 3434
+
+# USER app
 RUN /app/setup_docker_guest.sh
-# forward request and error logs to docker log collector
-RUN ln -sf /dev/stdout /var/log/nginx/access.log
-RUN ln -sf /dev/stderr /var/log/nginx/error.log
-CMD /app/start_container.sh
+
+# CMD /app/start_container.sh
+ENTRYPOINT ["/app/start_container.sh"]
+CMD ["multienv"]

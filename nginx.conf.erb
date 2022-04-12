@@ -38,11 +38,20 @@ http {
 	##
 
 	access_log /var/log/nginx/access.log;
-	error_log /var/log/nginx/error.log;
+	error_log /var/log/nginx/error.log notice;
+
+
+		# map
+    map $http_upgrade $connection_upgrade {
+        default upgrade;
+        '' close;
+    }
 
   # INTERNAL_PORT 
   # PORT
   upstream backends { server localhost:<%= ENV['INTERNAL_PORT'] %>; }
+  upstream redirector { server localhost:<%= ENV['REDIRECTOR_PORT'] %>; }
+  # upstream proxy { server backends.service.consul; }
   server {
     listen      [::]:<%= ENV['PORT'] %>;
     listen      *:<%= ENV['PORT'] %>;
@@ -54,7 +63,8 @@ http {
     # listen      *:443 ssl spdy;
     server_name localhost _;
 
-    resolver 8.8.8.8;
+    # resolver 8.8.8.8;
+    resolver <%= ENV['RESOLVER_IP'] %>;
     keepalive_timeout   70;
     # add_header Alternate-Protocol 443:npn-spdy/2;
 
@@ -72,6 +82,8 @@ http {
       proxy_set_header X-Request-Start $msec;
     }
 
+    location =   /auth {
+    }
     location ~ /xa-redirect/ {
       internal;
     }
@@ -123,31 +135,81 @@ http {
   }
 
   server {
-    server_name ~^(u-(?<cluster_user>.*)\.backends.*);
+    resolver <%= ENV['RESOLVER_IP'] %>;
+    # server_name ~^(u-(?<cluster_user>.*)\.backends.*);
+    server_name ~^((?<cluster_user>.*)\.backends.*);
     listen  *:3535;
 
-    location ~ @proxy/(.*?)/(.*)/ {
+    location = /internal/validate_request {
+      internal;
+      proxy_set_header X-Origin-URI $request_uri;
+      # proxy_pass  http://redirector/validate_request/$cluster_user/$http_host;
+      proxy_pass  http://redirector/internal_consul/$cluster_user/$http_host;
+      proxy_set_header Host "$cluster_user";
+      auth_request_set $backend_port $upstream_http_x_worker_port;
+      proxy_pass_request_body off;
+      proxy_set_header Content-Length "";
+      proxy_method GET;
+
+    }
+
+    location ~ @proxy/(.*?)/(.*) {
+        internal;
         set $backend_port $1;
         set $backend_id $2;
-        rewrite ^@proxy/(.*)/([0-9]+)/ $request_uri break;
+        # rewrite ^@proxy/(.*)/([0-9]+)/ $request_uri break;
         # proxy_pass http://127.0.0.1:$backend_port$uri$is_args$args;
         proxy_pass http://127.0.0.1:$backend_port$request_uri;
     }
 
+    location @app {
+      set $backend_port $upstream_http_x_worker_port;
+      set $tenant 'http://localhost:$backend_port';
+      # proxy_pass  http://redirector/debug/$tenant$request_uri;
+      # proxy_pass http://127.0.0.1:$backend_port$request_uri;
+      # proxy_pass $tenant$request_uri;
+      proxy_pass http://localhost:5001;
+      # proxy_pass http://127.0.0.1:$backend_port;
+    }
+
+
     location    / {
-      proxy_pass  http://127.0.0.1:3434/environs/$cluster_user/resolver$request_uri;
+      auth_request /internal/validate_request;
+      auth_request_set $backend_port $upstream_http_x_worker_port;
+      # auth_request_set $tenant http://$cluster_user.backends.service.consul:$backend_port;
+      auth_request_set $tenant $upstream_http_x_selected_backend;
+
+      # set $backend_port '$upstream_http_x_worker_port';
+      # set $tenant http://my-envs:$backend_port;
+      # /debug/$backend_port/$upstream_http_x_worker_port$uri;
+      #proxy_pass  http://127.0.0.1:3434/environs/$cluster_user/resolver$request_uri;
       # $request_uri;
-      # proxy_redirect http://login.diabetes.watch:5000/ https://login.diabetes.watch/;
-      # proxy_redirect $INTERNAL_PORT https://login.diabetes.watch/;
       proxy_http_version 1.1;
+      # proxy_set_header Upgrade $http_upgrade;
       proxy_set_header Upgrade $http_upgrade;
-      proxy_set_header Connection "upgrade";
-      # proxy_set_header Host $http_host;
+      proxy_set_header Connection $connection_upgrade;
+      proxy_set_header Host $host;
       # proxy_set_header Host "backends.diabetes.watch";
       proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-      proxy_set_header X-Forwarded-Proto $scheme;
-      proxy_set_header X-Forwarded-Port $server_port;
+      # proxy_set_header X-Forwarded-Proto $scheme;
+      # proxy_set_header X-Forwarded-Port $server_port;
       proxy_set_header X-Request-Start $msec;
+      proxy_set_header X-Origin-URI $request_uri;
+
+      # proxy_method GET;
+      # proxy_pass_request_body off;
+      # proxy_set_header Content-Length "";
+
+      # proxy_pass  http://redirector/internal_consul/$cluster_user/$http_host;
+      # proxy_pass  http://redirector/debug/$tenant$backend_port$request_uri;
+      # proxy_pass  http://my-envs:5001;
+      # proxy_pass  http://my-envs:$backend_port$uri$is_args$args;
+      # proxy_pass  http://my-envs:$backend_port$request_uri;
+      # proxy_pass http://127.0.0.1:$backend_port$uri$is_args$args;
+      # rewrite ^ @proxy/$backend_port/1/ last;
+      # proxy_pass  http://127.0.0.1:$backend_port$request_uri;
+      # proxy_pass  http://backends.service.consul:$backend_port$request_uri;
+      proxy_pass $tenant$request_uri;
 
     }
   }
