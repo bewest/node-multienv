@@ -212,5 +212,11 @@ http {
       proxy_pass $tenant$request_uri;
 
     }
+    #Handle 5xx errors with sorry page
+    error_page 500 502 503 504 /5xx.html;
+    location = /5xx.html {
+      root /usr/share/nginx/html;
+      internal;
+    }
   }
 }
