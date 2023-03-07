@@ -15,6 +15,30 @@ function toJSONStream ( ) {
   return s;
 }
 
+function slowRateStream (opts) {
+
+  var min = opts.randomMin || 0;
+  var max = opts.randomMax || 300;
+  var default_delay = opts.delay || 500;
+  function operation (update, callback) {
+
+    var time_to_take = default_delay;
+    if (opts.random) {
+      time_to_take += randomRange(min, max);
+    }
+    function operate ( ) {
+      callback(null, update);
+    }
+    if (default_delay) {
+      return setTimeout(operate, time_to_take);
+    }
+    return operate( );
+  }
+
+  var tr = transform(opts.parallel, operation);
+  return tr;
+}
+
 function naivePostToGateway (opts) {
   // each element in the stream describes a tenant
 
@@ -176,6 +200,15 @@ if (!module.parent) {
   , endpoint: WATCH_ENDPOINT
   };
 
+  var delay_opts = {
+  , parallel: parseInt(process.env.DELAY_CROWD_PARALLEL || '1')
+  , random: process.env.DELAY_CROWD_NO_RANDOM_EXTRA == '1' ? false : true
+  , randomMin: parseInt(process.env.DELAY_CROWD_EXTRA_MIN || '0')
+  , randomMax: parseInt(process.env.DELAY_CROWD_EXTRA_MAX || '300')
+  , delay: parseInt(process.env.DELAY_CROWD_INTERVAL_MS || '666')
+
+  };
+
   var boot = require('bootevent')( );
   boot.acquire(function k8s (ctx, next) {
     var my = this;
@@ -199,6 +232,7 @@ if (!module.parent) {
         jsonStream,
         pre( ),
         // takesTimeStream( ),
+        slowRateStream(delay_opts),
         naivePostToGateway(gateway_opts),
         naiveGetFromGateway(gateway_opts),
         post( ), console.log.bind(console, 'STREAM ENDED'));
