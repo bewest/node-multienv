@@ -201,7 +201,7 @@ if (!module.parent) {
   };
 
   var delay_opts = {
-  , parallel: parseInt(process.env.DELAY_CROWD_PARALLEL || '1')
+    parallel: parseInt(process.env.DELAY_CROWD_PARALLEL || '1')
   , random: process.env.DELAY_CROWD_NO_RANDOM_EXTRA == '1' ? false : true
   , randomMin: parseInt(process.env.DELAY_CROWD_EXTRA_MIN || '0')
   , randomMax: parseInt(process.env.DELAY_CROWD_EXTRA_MAX || '300')
