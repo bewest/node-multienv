@@ -8,6 +8,7 @@ var url = require('url');
 
 var stream = require('stream');
 
+const randomRange = (min, max) => Math.floor(Math.random() * (max - min)) + min;
 
 function toJSONStream ( ) {
   var s = ndjson.parse ( );
