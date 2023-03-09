@@ -111,6 +111,67 @@ function emit_init (s) {
   s.on('data', emitter);
 }
 
+function saveBookMark (opts, k8s) {
+  var tr_opts = {
+    highWaterMark: 32000,
+  };
+  var bookmarkName = opts.bookmarkName;
+  var bookmarkNamespace = opts.bookmarkNamespace;
+
+  var tr = through.obj(tr_opts, function (chunk, enc, callback) {
+    if (chunk.type != 'BOOKMARK') {
+      this.push(chunk);
+      return callback( );
+    }
+
+    console.log(chunk);
+    console.log("SAVING BOOKMARK");
+    var patch = {
+      data: {
+        resourceVersion: chunk.object.metadata.resourceVersion
+      }
+
+    };
+    k8s.readNamespacedConfigMap(bookmarkName, bookmarkNamespace, patch).then(function (result) {
+      var body = result.body;
+      console.log("OLD BOOKMARK", body);
+      body.data.resourceVersion = chunk.object.metadata.resourceVersion;
+      return k8s.replaceNamespacedConfigMap(bookmarkName, bookmarkNamespace, body).then(function (result) {
+        console.log("SAVED NEW BOOKMARK", bookmarkName, bookmarkNamespace, result.body);
+        return callback( );
+      });
+    }).catch(function (err) {
+      console.log("BOOKMARK DOES NOT EXIST, WILL CREATE");
+      var body = {
+        kind: 'ConfigMap',
+        metadata: {
+          name: bookmark_config.bookmarkName,
+          labels: {
+            app: 'dispatcher',
+            config: 'bookmark'
+          },
+          type: 'BOOKMARK'
+        },
+        data: {
+          resourceVersion: watch_opts.resourceVersion || '0'
+        }
+
+      };
+      k8s.createNamespacedConfigMap(bookmark_config.bookmarkNamespace, body).then(function (res) {
+        console.log("CREATED BOOKMARK CONFIGMAP", res.body);
+        return callback( );
+      }).catch(function (err) {
+        console.log("COULD NOT CREATE BOOKMARK CONFIGMAP", bookmark_config, err);
+        return callback( );
+
+      });
+    });
+
+  });
+  return tr;
+}
+
+
 function pre ( ) {
   var opts = {
     highWaterMark: 32000,
@@ -210,6 +271,12 @@ if (!module.parent) {
 
   };
 
+  var bookmark_config = {
+    bookmarkName: process.env.BOOKMARK_NAME || 'dispatcher-bookmark'
+  , bookmarkNamespace: process.env.BOOKMARK_NAMESPACE || 'default'
+
+  }
+
   var boot = require('bootevent')( );
   boot.acquire(function k8s (ctx, next) {
     var my = this;
@@ -231,6 +298,7 @@ if (!module.parent) {
       jsonStream.once('initialized', console.log.bind(console, "INITED!!"));
       var control = stream.pipeline(req,
         jsonStream,
+        saveBookMark(bookmark_config, ctx.k8s),
         pre( ),
         // takesTimeStream( ),
         slowRateStream(delay_opts),
