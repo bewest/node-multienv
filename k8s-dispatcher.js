@@ -124,15 +124,8 @@ function saveBookMark (opts, k8s) {
       return callback( );
     }
 
-    console.log(chunk);
-    console.log("SAVING BOOKMARK");
-    var patch = {
-      data: {
-        resourceVersion: chunk.object.metadata.resourceVersion
-      }
-
-    };
-    k8s.readNamespacedConfigMap(bookmarkName, bookmarkNamespace, patch).then(function (result) {
+    console.log("SAVING BOOKMARK", chunk);
+    k8s.readNamespacedConfigMap(bookmarkName, bookmarkNamespace).then(function (result) {
       var body = result.body;
       console.log("OLD BOOKMARK", body);
       body.data.resourceVersion = chunk.object.metadata.resourceVersion;
