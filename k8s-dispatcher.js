@@ -136,6 +136,7 @@ function saveBookMark (opts, k8s) {
       var body = result.body;
       console.log("OLD BOOKMARK", body);
       body.data.resourceVersion = chunk.object.metadata.resourceVersion;
+      body.data.WATCH_RESOURCEVERSION = chunk.object.metadata.resourceVersion;
       return k8s.replaceNamespacedConfigMap(bookmarkName, bookmarkNamespace, body).then(function (result) {
         console.log("SAVED NEW BOOKMARK", bookmarkName, bookmarkNamespace, result.body);
         return callback( );
@@ -153,7 +154,8 @@ function saveBookMark (opts, k8s) {
           type: 'BOOKMARK'
         },
         data: {
-          resourceVersion: watch_opts.resourceVersion || '0'
+          resourceVersion: chunk.object.metadata.resourceVersion
+        , WATCH_RESOURCEVERSION:  chunk.object.metadata.resourceVersion
         }
 
       };
@@ -246,7 +248,7 @@ if (!module.parent) {
   var WATCH_NAMESPACE = process.env.MULTIENV_K8S_NAMESPACE || 'default';
   var WATCH_ENDPOINT = process.env.WATCH_ENDPOINT || ('/api/v1/namespaces/' + WATCH_NAMESPACE + '/configmaps');
   var WATCH_FIELDSELECTOR = process.env.WATCH_FIELDSELECTOR || '';
-  var WATCH_LABELSELECTOR = process.env.WATCH_LABELSELECTOR || '';
+  var WATCH_LABELSELECTOR = process.env.WATCH_LABELSELECTOR || 'app=tenant,managed=multienv';
   var WATCH_RESOURCEVERSION = process.env.WATCH_RESOURCEVERSION || '';
   var WATCH_CONTINUE = process.env.WATCH_CONTINUE || '';
   var gateway_opts = {
