@@ -83,7 +83,7 @@ case "${1-help}" in
     exec -a inspector $RUNTIME --no-autorestart --exp-backoff-restart-delay=100 -i max k8s-inspector.js
   ;;
   dispatcher)
-    exec -a dispatcher $RUNTIME --no-autorestart --exp-backoff-restart-delay=100 k8s-dispatcher.js
+    exec -a dispatcher node k8s-dispatcher.js
   ;;
   demuxer)
     exec -a demuxer $RUNTIME --no-autorestart --exp-backoff-restart-delay=100 -i max tenant-availability-keeper.js
