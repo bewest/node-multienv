@@ -275,7 +275,7 @@ if (!module.parent) {
 
   var bookmark_config = {
     bookmarkName: process.env.BOOKMARK_NAME || 'dispatcher-bookmark'
-  , bookmarkNamespace: process.env.BOOKMARK_NAMESPACE || 'default'
+  , bookmarkNamespace: WATCH_NAMESPACE
 
   }
 
