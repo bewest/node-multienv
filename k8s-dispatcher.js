@@ -301,7 +301,7 @@ if (!module.parent) {
         naiveGetFromGateway(gateway_opts),
         post( ), console.log.bind(console, 'STREAM ENDED'));
     }).catch(function (err) {
-       boot.fail(err);
+      boot.fail(err);
     });
   });
 }
