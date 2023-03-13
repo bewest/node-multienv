@@ -362,11 +362,11 @@ if (!module.parent) {
                 watch_opts.resourceVersion = '';
                 bookmark_config.resourceVersion = '';
                 console.log("Retrying without resourceVersion", watch_opts);
+                errors.push(err);
+                console.log('restarting...');
+                return start(retried + 1, max, errors);
               }
-              errors.push(err);
             }
-            console.log('restarting...');
-            return start(retried + 1, max, errors);
           }
           );
       }).catch(function (err) {
