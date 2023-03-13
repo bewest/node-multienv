@@ -132,7 +132,6 @@ function inspectBookmarks (opts, k8s) {
       console.log("EXPIRED resourceVersion", chunk);
       return k8s.readNamespacedConfigMap(bookmarkName, bookmarkNamespace).then(function (result) {
         console.log('EXISTING BOOKMARK equivalent?', opts, opts.resourceVersion, result.body.data.resourceVersion, opts.resourceVersion == result.body.data.resourceVersion);
-        var err.bookmark = result.body;
         console.log('EXISTING BOOKMARK', result.body);
         if (deleteStaleBookmark) {
           return k8s.deleteNamespacedConfigMap(bookmarkName, bookmarkNamespace).then(function (result) {
