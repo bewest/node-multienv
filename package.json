@@ -29,6 +29,7 @@
     "pm2": "^4.4.0",
     "restify": "^8.5.1",
     "shell-escape": "^0.2.0",
+    "shell-quote": "^1.8.0",
     "tmp": "0.0.26"
   },
   "repository": {
