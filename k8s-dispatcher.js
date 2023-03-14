@@ -111,6 +111,107 @@ function emit_init (s) {
   s.on('data', emitter);
 }
 
+function inspectBookmarks (opts, k8s) {
+  var tr_opts = {
+    highWaterMark: 32000
+  };
+  var bookmarkName = opts.bookmarkName;
+  var bookmarkNamespace = opts.bookmarkNamespace;
+  var deleteStaleBookmark = opts.deleteStaleBookmark;
+
+  function iterate (chunk, callback) {
+    if (chunk.type != 'ERROR') {
+      this.push(chunk);
+      return setImmediate(function ( ) {
+        callback( );
+      });
+    }
+
+    var err = chunk;
+    if ('Failure' == chunk.object.status && 'Expired' == chunk.object.reason) {
+      console.log("EXPIRED resourceVersion", chunk);
+      return k8s.readNamespacedConfigMap(bookmarkName, bookmarkNamespace).then(function (result) {
+        console.log('EXISTING BOOKMARK equivalent?', opts, opts.resourceVersion, result.body.data.resourceVersion, opts.resourceVersion == result.body.data.resourceVersion);
+        console.log('EXISTING BOOKMARK', result.body);
+        if (deleteStaleBookmark) {
+          return k8s.deleteNamespacedConfigMap(bookmarkName, bookmarkNamespace).then(function (result) {
+            console.log('REMOVED BOOKMARK', result.body);
+            callback(err);
+          });
+        }
+        return callback(err);
+      }).catch(function (missing) {
+        console.log('NO EXISTING BOOKMARK', bookmarkName, bookmarkNamespace, missing);
+        callback(err);
+      });
+
+    }
+    console.log("UNRECOGNIZED ERROR", err)
+    callback(err);
+
+  };
+  var tr = transform(opts.parallel || 16, tr_opts, iterate);
+  return tr;
+}
+
+function saveBookMark (opts, k8s) {
+  var tr_opts = {
+    highWaterMark: 32000,
+  };
+  var bookmarkName = opts.bookmarkName;
+  var bookmarkNamespace = opts.bookmarkNamespace;
+
+  var tr = through.obj(tr_opts, function (chunk, enc, callback) {
+    if (chunk.type != 'BOOKMARK') {
+      this.push(chunk);
+      return setImmediate(function ( ) {
+        callback( );
+      });
+    }
+
+    console.log("SAVING BOOKMARK", chunk);
+    k8s.readNamespacedConfigMap(bookmarkName, bookmarkNamespace).then(function (result) {
+      var body = result.body;
+      console.log("OLD BOOKMARK", body);
+      body.data.resourceVersion = chunk.object.metadata.resourceVersion;
+      body.data.WATCH_RESOURCEVERSION = chunk.object.metadata.resourceVersion;
+      return k8s.replaceNamespacedConfigMap(bookmarkName, bookmarkNamespace, body).then(function (result) {
+        console.log("SAVED NEW BOOKMARK", bookmarkName, bookmarkNamespace, result.body);
+        return callback( );
+      });
+    }).catch(function (err) {
+      console.log("BOOKMARK DOES NOT EXIST, WILL CREATE");
+      var body = {
+        kind: 'ConfigMap',
+        metadata: {
+          name: bookmark_config.bookmarkName,
+          labels: {
+            app: 'dispatcher',
+            config: 'bookmark'
+          },
+          type: 'BOOKMARK'
+        },
+        data: {
+          resourceVersion: chunk.object.metadata.resourceVersion
+        , WATCH_RESOURCEVERSION:  chunk.object.metadata.resourceVersion
+        }
+
+      };
+      k8s.createNamespacedConfigMap(bookmark_config.bookmarkNamespace, body).then(function (res) {
+        console.log("CREATED BOOKMARK CONFIGMAP", res.body);
+        return callback( );
+      }).catch(function (err) {
+        console.log("COULD NOT CREATE BOOKMARK CONFIGMAP", bookmark_config, err);
+        return callback( );
+
+      });
+    });
+
+  });
+  return tr;
+}
+
+
 function pre ( ) {
   var opts = {
     highWaterMark: 32000,
@@ -185,7 +286,7 @@ if (!module.parent) {
   var WATCH_NAMESPACE = process.env.MULTIENV_K8S_NAMESPACE || 'default';
   var WATCH_ENDPOINT = process.env.WATCH_ENDPOINT || ('/api/v1/namespaces/' + WATCH_NAMESPACE + '/configmaps');
   var WATCH_FIELDSELECTOR = process.env.WATCH_FIELDSELECTOR || '';
-  var WATCH_LABELSELECTOR = process.env.WATCH_LABELSELECTOR || '';
+  var WATCH_LABELSELECTOR = process.env.WATCH_LABELSELECTOR || 'app=tenant,managed=multienv';
   var WATCH_RESOURCEVERSION = process.env.WATCH_RESOURCEVERSION || '';
   var WATCH_CONTINUE = process.env.WATCH_CONTINUE || '';
   var gateway_opts = {
@@ -210,35 +311,68 @@ if (!module.parent) {
 
   };
 
-  var boot = require('bootevent')( );
-  boot.acquire(function k8s (ctx, next) {
-    var my = this;
-    ctx.k8s = require('./lib/k8s')({cluster: !k8s_local});
-    ctx.kc = require('./lib/k8s').get_kc( );
-    ctx.k8s.getAPIResources( ).then(function (res) {
-      console.log("CONNECTED", res.body.resources.length > 0);
-      next( );
-    }).catch(my.fail);
-  })
-  .boot(function booted (ctx) {
-    var monitor = configure({ k8s: ctx.k8s, kc: ctx.kc, watch: watch_opts });
-    monitor.then(function (req) {
-      console.log('started watch', watch_opts, req.url);
-      // console.log('req', req);
-      req.on('end', console.log.bind(console, 'ENDED'));
-      var jsonStream = toJSONStream( );
-      emit_init(jsonStream);
-      jsonStream.once('initialized', console.log.bind(console, "INITED!!"));
-      var control = stream.pipeline(req,
-        jsonStream,
-        pre( ),
-        // takesTimeStream( ),
-        slowRateStream(delay_opts),
-        naivePostToGateway(gateway_opts),
-        naiveGetFromGateway(gateway_opts),
-        post( ), console.log.bind(console, 'STREAM ENDED'));
-    }).catch(function (err) {
-       boot.fail(err);
+  var bookmark_config = {
+    bookmarkName: process.env.BOOKMARK_NAME || 'dispatcher-bookmark'
+  , bookmarkNamespace: WATCH_NAMESPACE
+  , resourceVersion: watch_opts.resourceVersion
+
+  }
+
+  function start (retried, max, errors) {
+    if (retried >= max) {
+      console.log("EXITING AFTER ERRORS", retried, errors);
+      return process.exit(1);
+    }
+    if (retried) {
+      console.log("RETRYING AFTER ERROR", retried, errors);
+    }
+    var boot = require('bootevent')( );
+    boot.acquire(function k8s (ctx, next) {
+      var my = this;
+      ctx.k8s = require('./lib/k8s')({cluster: !k8s_local});
+      ctx.kc = require('./lib/k8s').get_kc( );
+      ctx.k8s.getAPIResources( ).then(function (res) {
+        console.log("CONNECTED", res.body.resources.length > 0);
+        next( );
+      }).catch(my.fail);
+    })
+    .boot(function booted (ctx) {
+      var monitor = configure({ k8s: ctx.k8s, kc: ctx.kc, watch: watch_opts });
+      monitor.then(function (req) {
+        console.log('started watch', watch_opts, req.url);
+        // console.log('req', req);
+        req.on('end', console.log.bind(console, 'ENDED'));
+        var jsonStream = toJSONStream( );
+        emit_init(jsonStream);
+        jsonStream.once('initialized', console.log.bind(console, "INITED!!"));
+        var control = stream.pipeline(req,
+          jsonStream,
+          inspectBookmarks(bookmark_config, ctx.k8s),
+          saveBookMark(bookmark_config, ctx.k8s),
+          pre( ),
+          // takesTimeStream( ),
+          slowRateStream(delay_opts),
+          naivePostToGateway(gateway_opts),
+          naiveGetFromGateway(gateway_opts),
+          post( ),
+          function ended (err) {
+            console.log('STREAM ENDED', err)
+            if (err) {
+              if (err.type == 'ERROR' && err.object.reason == 'Expired' && watch_opts.resourceVersion != '') {
+                watch_opts.resourceVersion = '';
+                bookmark_config.resourceVersion = '';
+                console.log("Retrying without resourceVersion", watch_opts);
+                errors.push(err);
+                console.log('restarting...');
+                return start(retried + 1, max, errors);
+              }
+            }
+          }
+          );
+      }).catch(function (err) {
+        boot.fail(err);
+      });
     });
-  });
+  }
+  start(0, 2, []);
 }

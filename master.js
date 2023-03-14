@@ -5,7 +5,6 @@ var cluster = require('cluster');
 var path = require('path');
 var glob = require('glob');
 var fs = require('fs');
-var watch = require('watch');
 var chokidar = require('chokidar');
 var shlex = require('shell-quote');
 var Server = require('./server');
