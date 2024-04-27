@@ -11,7 +11,7 @@
   "author": "Ben West <bewest@gmail.com>",
   "license": "AGPLv3",
   "dependencies": {
-    "@kubernetes/client-node": "^0.18.1",
+    "@kubernetes/client-node": "^0.19.0",
     "async": "^3.2.0",
     "bootevent": "0.0.1",
     "bunyan": "^1.4.0",
@@ -30,7 +30,8 @@
     "restify": "^8.5.1",
     "shell-escape": "^0.2.0",
     "shell-quote": "^1.8.0",
-    "tmp": "0.0.26"
+    "tmp": "0.0.26",
+    "underscore": "^1.13.6"
   },
   "repository": {
     "type": "git",
