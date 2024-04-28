@@ -58,6 +58,10 @@ function naivePostToGateway (opts) {
 
     data.internal_name = name;
     console.log(name, 'to gateway', name, api, object.metadata.name, object.metadata.resourceVersion);
+    if (update.type != 'MODIFIED') {
+      console.log("SKIPPED", name, update.type);
+      return callback(null, update);
+    }
     method(api, {json: data}).json( ).then( function (body) {
       console.log(name, 'SUCCESSFUL', api);
       update.gateway = {err: null, success: body};
@@ -211,6 +215,27 @@ function saveBookMark (opts, k8s) {
   return tr;
 }
 
+function ignoreBookMark (opts, k8s) {
+  var tr_opts = {
+    highWaterMark: 32000,
+  };
+  var bookmarkName = opts.bookmarkName;
+  var bookmarkNamespace = opts.bookmarkNamespace;
+
+  var tr = through.obj(tr_opts, function (chunk, enc, callback) {
+    if (chunk.type != 'BOOKMARK') {
+      this.push(chunk);
+    } else {
+      console.log("IGNORING BOOKMARK", chunk);
+    }
+    return setImmediate(function ( ) {
+      callback( );
+    });
+
+  });
+  return tr;
+}
+
 
 function pre ( ) {
   var opts = {
@@ -300,6 +325,9 @@ if (!module.parent) {
   , resourceVersion: WATCH_RESOURCEVERSION
   , _continue: WATCH_CONTINUE
   , endpoint: WATCH_ENDPOINT
+  , sendInitialEvents: true
+  , watch: WATCH_RESOURCEVERSION
+  , allowWatchBookmarks: true
   };
 
   var delay_opts = {
@@ -307,7 +335,7 @@ if (!module.parent) {
   , random: process.env.DELAY_CROWD_NO_RANDOM_EXTRA == '1' ? false : true
   , randomMin: parseInt(process.env.DELAY_CROWD_EXTRA_MIN || '0')
   , randomMax: parseInt(process.env.DELAY_CROWD_EXTRA_MAX || '300')
-  , delay: parseInt(process.env.DELAY_CROWD_INTERVAL_MS || '666')
+  , delay: parseInt(process.env.DELAY_CROWD_INTERVAL_MS || '100')
 
   };
 
@@ -336,6 +364,15 @@ if (!module.parent) {
         next( );
       }).catch(my.fail);
     })
+    .acquire(async function describe_latest_resource_version (ctx, next) {
+
+      // Get latest resourceVersion, along with a count of active changes
+      const stream = await ctx.k8s.listNamespacedConfigMap(WATCH_NAMESPACE, false, false, undefined, WATCH_FIELDSELECTOR, WATCH_LABELSELECTOR, 1, undefined, undefined, undefined,  undefined, undefined, {});
+      console.log("FOUND LATEST", stream.body, stream.body.metadata.resourceVersion);
+      watch_opts.resourceVersion = stream.body.metadata.resourceVersion;
+      next( );
+      
+    })
     .boot(function booted (ctx) {
       var monitor = configure({ k8s: ctx.k8s, kc: ctx.kc, watch: watch_opts });
       monitor.then(function (req) {
@@ -347,10 +384,10 @@ if (!module.parent) {
         jsonStream.once('initialized', console.log.bind(console, "INITED!!"));
         var control = stream.pipeline(req,
           jsonStream,
-          inspectBookmarks(bookmark_config, ctx.k8s),
-          saveBookMark(bookmark_config, ctx.k8s),
+          // inspectBookmarks(bookmark_config, ctx.k8s),
+          // saveBookMark(bookmark_config, ctx.k8s),
+          ignoreBookMark(bookmark_config, ctx.k8s),
           pre( ),
-          // takesTimeStream( ),
           slowRateStream(delay_opts),
           naivePostToGateway(gateway_opts),
           naiveGetFromGateway(gateway_opts),
