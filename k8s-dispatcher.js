@@ -58,10 +58,6 @@ function naivePostToGateway (opts) {
 
     data.internal_name = name;
     console.log(name, 'to gateway', name, api, object.metadata.name, object.metadata.resourceVersion);
-    if (update.type != 'MODIFIED') {
-      console.log("SKIPPED", name, update.type);
-      return callback(null, update);
-    }
     method(api, {json: data}).json( ).then( function (body) {
       console.log(name, 'SUCCESSFUL', api);
       update.gateway = {err: null, success: body};
