@@ -310,6 +310,7 @@ if (!module.parent) {
   var WATCH_LABELSELECTOR = process.env.WATCH_LABELSELECTOR || 'app=tenant,managed=multienv';
   var WATCH_RESOURCEVERSION = process.env.WATCH_RESOURCEVERSION || '';
   var WATCH_CONTINUE = process.env.WATCH_CONTINUE || '';
+  var INIT_WITH_FULL_AUDIT = process.env.INIT_WITH_FULL_AUDIT == '1';
   var gateway_opts = {
     gateway: CLUSTER_GATEWAY,
     parallel: parseInt(process.env.PARALLEL_UPDATES || '12'),
@@ -365,7 +366,9 @@ if (!module.parent) {
       // Get latest resourceVersion, along with a count of active changes
       const stream = await ctx.k8s.listNamespacedConfigMap(WATCH_NAMESPACE, false, false, undefined, WATCH_FIELDSELECTOR, WATCH_LABELSELECTOR, 1, undefined, undefined, undefined,  undefined, undefined, {});
       console.log("FOUND LATEST", stream.body, stream.body.metadata.resourceVersion);
-      watch_opts.resourceVersion = stream.body.metadata.resourceVersion;
+      if (!INIT_WITH_FULL_AUDIT) {
+        watch_opts.resourceVersion = stream.body.metadata.resourceVersion;
+      }
       next( );
       
     })
