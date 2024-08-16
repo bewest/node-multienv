@@ -119,19 +119,21 @@ function configure (opts) {
       msg.result = result;
       console.log("replace or create", msg);
       var body = result.body;
+      /*
       if (req.params.field && req.deployment.data[req.params.field]) {
         body.data[req.params.field] = req.deployment.data[req.params.field];
       } else {
         body.data = req.deployment.data;
       }
-      console.log("READ before update", req.deployment.data, body);
+      */
+      // console.log("READ before update", req.deployment.data, body);
       console.log("before update", req.suggestion);
       appsApi.replaceNamespacedDeployment(body.metadata.name, selected_namespace, body).then(function (result) {
         msg.status = "replaceNamespacedDeployment result"
         msg.result = result;
         console.log("replace or create", msg);
         res.header('Location', '/environs/' + body.metadata.name);
-        res.result = result.body.data;
+        res.result = result.body;
         next( );
       }).catch(next);
     }).catch(function (err) {
@@ -142,7 +144,8 @@ function configure (opts) {
         console.log("replace or create", msg);
         var body = result.body;
         res.header('Location', '/environs/' + body.metadata.name);
-        res.result = result.body.data;
+        res.deployment = result.body;
+        // res.result = result.body.data;
         next( );
       }).catch(function (err) {
         console.log('error creating config map', err);
