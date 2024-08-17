@@ -35,6 +35,9 @@ function configure (opts) {
       kind: "Deployment"
     , metadata: {
       name: data.WEB_NAME,
+      annotations: {
+        'managed-by': 'multienv/k8s-deployment-controller'
+      },
       labels: {
         managed: 'multienv', app: 'tenant',
         internal_name: data.WEB_NAME
@@ -51,6 +54,9 @@ function configure (opts) {
       template: {
         metadata: {
           name: data.WEB_NAME,
+          annotations: {
+            'managed-by': 'multienv/k8s-deployment-controller'
+          },
           labels: {
             internal_name: data.WEB_NAME,
             tenant: data.WEB_NAME,
@@ -59,6 +65,8 @@ function configure (opts) {
 
         },
         spec: {
+          hostname: `${data.WEB_NAME}`,
+          subdomain: "backends",
           containers: [ {
             name: 'nightscout',
             image: 'nightscout/cgm-remote-monitor:latest',
@@ -181,26 +189,71 @@ function configure (opts) {
     }).catch(next);
   }
 
+  function suggest_deployment_template_params (req, res, next) {
+    console.log("INCOMING UPDATE", req.body);
+    // TODO: inspect annotations and/or labels to see if this configmap or
+    // secret should be added.
+    // or if the deployment should be restarted.
+    // TODO: inspect annotation or labels to determine the tenant's name if
+    // this is a supplementary secret or configmap.
+    var data = _.extend({ WEB_NAME: req.body.object.metadata.name }, req.query);
+    data = _.extend(data, req.body);
+    req.suggestion = data;
+    next( );
+
+  }
+
   function handle_sync_addition (req, res, next) {
+    const deploymentName = req.deployment.metadata.name;
+
     appsApi.createNamespacedDeployment(selected_namespace, req.deployment).then(function (result) {
       res.result = result;
       return next( );
     }).catch((err) => {
-      console.error("Error creating deployment", err);
-      next(err);
+      // maybe previously existed but we are adding a new type of config or are
+      // transitioning configmaps in or out of labels configured for different
+      // watches to facilitate a hybrid or migrating environment.
+      // TODO: consider creating a list of patches to add or remove configmaps
+      // based on inspected labels and annotations to help support migrations
+      // or hybrid environments.
+      const patch = [{
+        op: "add",
+        path: "/spec/template/metadata/annotations/updated-at",
+        // path: "/spec/template/metadata/annotations",
+        // path: "/metadata/annotations/updated-at",
+        // value: { "updated-at": new Date().toISOString() }
+        value: new Date().toISOString()
+      }];
+      console.log("ATTEMPT TO PATCH DEPLOYMENT THAT COULD NOT BE CREATED", deploymentName, req.deployment, patch, err.response.body);
+     // Perform the patch operation
+     var options = { headers: { "Content-Type": "application/json-patch+json" } };
+     appsApi.patchNamespacedDeployment(deploymentName, selected_namespace, patch, undefined, undefined, undefined, undefined, undefined, options)
+       .then((result) => {
+				console.log(`deployment ${req.deployment.metadata.name} updated for rolling restart`);
+        // res.result = deployment
+        res.result = result;
+        next( );
+      }).catch((err) => {
+        console.error("Error updating deployment that couldn't be added.", err);
+        next(err);
+      });
     });
   }
 
 
   function handle_sync_updates (req, res, next) {
-    var targetDeployment = req.body.metadata.annotations['tenant'];
+    console.log("INCOMING UPDATE", req.body);
+    var annotations = req.body.object.metadata.annotations || { };
+    var targetDeployment = annotations['tenant'] || req.body.object.metadata.name;
 		appsApi.readNamespacedDeployment(targetDeployment, selected_namespace).then((deployment) => {
-			const patch = [{
+      const patch = [{
 				op: "add",
 				path: "/spec/template/metadata/annotations/updated-at",
 				value: new Date().toISOString()
 			}];
-			k8s.patchNamespacedDeployment(deployment.body.metadata.name, selected_namespace, patch).then((result) => {
+      var options = { headers: { "Content-Type": "application/json-patch+json" } };
+      appsApi.patchNamespacedDeployment(targetDeployment, selected_namespace, patch, undefined, undefined, undefined, undefined, undefined, options)
+      .then((result) => {
 				console.log(`deployment ${targetDeployment} updated for rolling restart`);
         // res.result = deployment
         res.result = result;
@@ -213,7 +266,9 @@ function configure (opts) {
   }
 
   function handle_sync_deletion (req, res, next) {
-    appsApi.deleteNamespacedDeployment(req.params.name, selected_namespace).then(function (result) {
+    var annotations = req.body.object.metadata.annotations || { };
+    var targetDeployment = annotations['tenant'] || req.body.object.metadata.name;
+    appsApi.deleteNamespacedDeployment(targetDeployment, selected_namespace).then(function (result) {
       res.json(req.params.name);
       res.status(204);
       res.end( );
@@ -343,9 +398,9 @@ function configure (opts) {
   server.del('/deployments/:name', delete_deployment);
   server.get('/deployments', list_deployments, format_result);
 
-  server.post('/sync/additions', handle_sync_addition, format_result);
+  server.post('/sync/additions', suggest_deployment_template_params, suggest_deployment, handle_sync_addition, format_result);
   server.post('/sync/updates', handle_sync_updates, format_result);
-  server.post('/sync/deletions', handle_sync_deletion, format_result);
+  server.post('/sync/deletions', handle_sync_deletion);
 
   server.get('/configmaps/:name', fetch_config_map, format_multienv_compatible_result, format_result );
   server.post('/configmaps/:name', suggest, suggest_config_map, create_or_update_configmap, format_multienv_compatible_result, format_result);
@@ -356,7 +411,7 @@ function configure (opts) {
   server.get('/configmaps', list_configmaps, format_result);
 
   server.get('/environs/:name', fetch_deployment, fetch_config_map, format_multienv_compatible_result, format_result );
-  server.post('/environs/:name', suggest, suggest_config_map, create_or_update_configmap, suggest_deployment, create_deployment, format_multienv_compatible_result, format_result);
+  server.post('/environs/:name', suggest, suggest_config_map, create_or_update_configmap, format_multienv_compatible_result, format_result);
   server.get('/environs/:name/env/:field', fetch_config_map, select_field, format_result );
   server.get('/environs/:name/env', fetch_config_map, select_env, format_result );
   server.post('/environs/:name/env/:field', suggest, suggest_config_map, create_or_update_configmap, select_data_field, format_result );
