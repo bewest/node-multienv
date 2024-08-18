@@ -36,10 +36,12 @@ function configure (opts) {
     , metadata: {
       name: data.WEB_NAME,
       annotations: {
-        'managed-by': 'multienv/k8s-deployment-controller'
+        ...opts.default.deployment.annotations
+        // 'managed-by': 'multienv/k8s-deployment-controller'
       },
       labels: {
-        managed: 'multienv', app: 'tenant',
+        ...opts.default.deployment.labels,
+        // managed: 'multienv', app: 'tenant',
         internal_name: data.WEB_NAME
       }
     }
@@ -55,12 +57,14 @@ function configure (opts) {
         metadata: {
           name: data.WEB_NAME,
           annotations: {
-            'managed-by': 'multienv/k8s-deployment-controller'
+            ...opts.default.deployment.annotations
+            // 'managed-by': 'multienv/k8s-deployment-controller'
           },
           labels: {
+            ...opts.default.deployment.labels,
             internal_name: data.WEB_NAME,
             tenant: data.WEB_NAME,
-            app: 'tenant'
+            // app: 'tenant'
           }
 
         },
@@ -306,7 +310,16 @@ function configure (opts) {
 
   function template_config_map (data) {
     return { kind: "ConfigMap"
-    , metadata: { name: data.WEB_NAME, labels: { managed: 'multienv', app: 'tenant' } }
+    , metadata: { name: data.WEB_NAME,
+      annotations: {
+        ...opts.default.configmap.annotations
+        // 'managed-by': 'multienv/k8s-deployment-controller'
+      },
+      labels: {
+        ...opts.default.configmap.labels
+        // managed: 'multienv', app: 'tenant'
+      }
+    }
     , data: data
     };
   }
@@ -341,6 +354,8 @@ function configure (opts) {
       } else {
         body.data = req.configmap.data;
       }
+      body.metadata.annotations = _.extend(body.metadata.annotations, opts.default.configmap.annotations);
+      body.metadata.labels = _.extend(body.metadata.labels, opts.default.configmap.labels);
       console.log("READ before update", req.configmap.data, body);
       console.log("before update", req.suggestion);
       k8s.replaceNamespacedConfigMap(body.metadata.name, selected_namespace, body).then(function (result) {
@@ -422,8 +437,31 @@ function configure (opts) {
 if (!module.parent) {
   var port = parseInt(process.env.PORT || '2828')
   var k8s_local = process.env.MULTIENV_K8S_AUTH == 'local';
+  var MULTIENV_MANAGED_BY = process.env.MULTIENV_MANAGED_BY || 'multienv/k8s-deployment-controller';
+  var MULTIENV_DEFAULT_COMPONENT_LABEL = process.env.MULTIENV_DEFAULT_COMPONENT_LABEL || 'config';
+  var MULTIENV_DEFAULT_CONFIG_ROLE = process.env.MULTIENV_DEFAULT_CONFIG_ROLE || 'config-as-deploy';
   var config = {
     MULTIENV_K8S_NAMESPACE: process.env.MULTIENV_K8S_NAMESPACE || 'default'
+  , default: {
+    deployment: {
+      annotations: {
+        'managed-by': MULTIENV_MANAGED_BY,
+      },
+      labels: {
+        managed: 'multienv', app: 'tenant',
+      }
+    }
+  , configmap: {
+      annotations: {
+        'managed-by': MULTIENV_MANAGED_BY,
+      },
+      labels: {
+        managed: 'multienv', app: 'tenant',
+        component: MULTIENV_DEFAULT_COMPONENT_LABEL,
+        role: MULTIENV_DEFAULT_CONFIG_ROLE
+      }
+    }
+  }
   };
   var boot = require('bootevent')( );
   boot.acquire(function k8s (ctx, next) {
