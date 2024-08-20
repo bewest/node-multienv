@@ -102,6 +102,7 @@ function configure (opts) {
 
   function fetch_deployment (req, res, next) {
     appsApi.readNamespacedDeployment(req.params.name, selected_namespace).then(function (result) {
+      res.deployment = result.body;
       res.result = result.body;
       next( );
     }).catch(next);
@@ -169,6 +170,31 @@ function configure (opts) {
   function select_data_field (req, res, next) {
     var doc = res.result;
     res.result = doc[req.params.field];
+    next( );
+  }
+
+  function select_metadata_field (req, res, next) {
+    var doc = res.result;
+    switch (req.params.section) {
+      case 'userdata':
+      case 'data':
+        doc = res.result.data;
+        break;
+      case '':
+      case 'metadata':
+        doc = res.result.metadata;
+        break;
+      case 'annotations':
+      case 'labels':
+        doc = res.result.metadata[req.params.section];
+        break;
+    }
+    if (req.params.field) {
+      res.result = doc[req.params.field];
+    } else {
+      res.result = doc;
+    }
+    // res.result = doc[req.params.section][req.params.field];
     next( );
   }
 
@@ -392,6 +418,40 @@ function configure (opts) {
     }).catch(next);
   }
 
+  function patch_configmap_remove_field (req, res, next) {
+    var targetConfigMap = req.params.name;
+    var patch = { metadata: { } };
+    patch.metadata[req.params.section][req.params.field] = null;
+    var options = { headers: { "Content-Type": "application/merge-patch+json" } };
+    k8s.patchNamespacedConfigMap(targetConfigMap, selected_namespace, patch, undefined, undefined, undefined, undefined, undefined, options)
+    .then(function (result) {
+      // res.result = null;
+      // res.json(req.params.name);
+      res.status(204);
+      next( );
+    }).catch(function (err) {
+      next(err);
+    });
+    next( );
+  }
+
+  function patch_configmap_metadata (req, res, next) {
+    var targetConfigMap = req.params.name;
+    var patch = { metadata: { } };
+    patch.metadata[req.params.section] = req.body;
+    if (req.params.field && req.body[req.params.field]) {
+      patch.metadata[req.params.section][req.params.field] = req.body[req.params.field];
+    }
+    var options = { headers: { "Content-Type": "application/merge-patch+json" } };
+    k8s.patchNamespacedConfigMap(targetConfigMap, selected_namespace, patch, undefined, undefined, undefined, undefined, undefined, options)
+    .then(function (result) {
+      res.result = result;
+      next( );
+    }).catch(function (err) {
+      next(err);
+    });
+  }
+
   server.get('/inspect/:name', fetch_deployment, format_result );
 
   server.post('/inspect/:name', suggest, suggest_deployment, create_deployment, format_result);
@@ -419,6 +479,11 @@ function configure (opts) {
 
   server.get('/configmaps/:name', fetch_config_map, format_multienv_compatible_result, format_result );
   server.post('/configmaps/:name', suggest, suggest_config_map, create_or_update_configmap, format_multienv_compatible_result, format_result);
+  server.get('/configmaps/:name/metadata/:section', fetch_config_map, select_metadata_field, format_result );
+  server.get('/configmaps/:name/metadata/:section/:field', fetch_config_map, select_metadata_field, format_result );
+  server.post('/configmaps/:name/metadata/:section/:field', fetch_config_map, patch_configmap_metadata, format_result );
+  server.del('/configmaps/:name/metadata/:section/:field', fetch_config_map, patch_configmap_remove_field);
+
   server.get('/configmaps/:name/env/:field', fetch_config_map, select_field, format_result );
   server.get('/configmaps/:name/env', fetch_config_map, select_env, format_result );
   server.post('/configmaps/:name/env/:field', suggest, suggest_config_map, create_or_update_configmap, select_data_field, format_result );
