@@ -5,6 +5,7 @@ var through = require('through2');
 var transform = require('parallel-transform');
 var got = require('got');
 var url = require('url');
+var path = require('path');
 
 var stream = require('stream');
 
@@ -73,23 +74,25 @@ function naivePostToGateway (opts) {
   return tr;
 }
 
+
 function syncPostToController (opts) {
   function operation (update, callback) {
     var object = update.object;
     var endpoint = url.parse(opts.gateway);
+    var url_prefix = endpoint.pathname;
     var name = object.metadata.name;
     // var pathname = '/environs/' + name;
     // Determine the appropriate endpoint based on the update type
     let pathname;
     switch (update.type) {
         case 'ADDED':
-            pathname = '/sync/additions';
+            pathname = path.join(url_prefix, '/sync/additions');
             break;
         case 'MODIFIED':
-            pathname = '/sync/updates';
+            pathname = path.join(url_prefix, '/sync/updates');
             break;
         case 'DELETED':
-            pathname = '/sync/deletions';
+            pathname = path.join(url_prefix, '/sync/deletions');
             break;
         default:
             console.error('Unknown update type:', update.type);
@@ -97,13 +100,7 @@ function syncPostToController (opts) {
     }
     var api = url.format({hostname: endpoint.hostname, port: endpoint.port, protocol: endpoint.protocol, pathname: pathname });
     // var method = update.type == 'DELETED' ?  got.delete : got.post;
-    var data = object.data;
-    if (!data) {
-      console.log('WRONG?!', name, update, data);
-      return callback( );
-    }
 
-    data.internal_name = name;
     console.log(name, 'to gateway', name, api, object.metadata.name, object.metadata.resourceVersion);
     got.post(api, {json: update}).json( ).then( function (body) {
       console.log(name, 'SUCCESSFUL', api);
@@ -280,14 +277,14 @@ function ignoreBookMark (opts, k8s) {
 }
 
 
-function pre ( ) {
+function pre (options) {
   var opts = {
     highWaterMark: 32000,
   };
   var tr = through.obj(opts, function (chunk, enc, callback) {
     console.log(chunk.object.metadata.name, 'begin', chunk.type);
     var self = this;
-    if (chunk.object.data) {
+    if (options.filter_none || chunk.object.data) {
       this.push(chunk);
     } else {
       console.log('DROPPING', chunk);
@@ -358,6 +355,7 @@ if (!module.parent) {
   var WATCH_RESOURCEVERSION = process.env.WATCH_RESOURCEVERSION || '';
   var WATCH_CONTINUE = process.env.WATCH_CONTINUE || '';
   var INIT_WITH_FULL_AUDIT = process.env.INIT_WITH_FULL_AUDIT == '1';
+  var SYNC_CONTROLLER = process.env.SYNC_CONTROLLER || 'runner'; // default, deployment, consul
   var SYNC_DEPLOYMENT_CONTROLLER = process.env.SYNC_DEPLOYMENT_CONTROLLER == '1';
   var gateway_opts = {
     gateway: CLUSTER_GATEWAY,
@@ -390,6 +388,10 @@ if (!module.parent) {
   , resourceVersion: watch_opts.resourceVersion
 
   }
+
+  var filter_opts = {
+    filter_none: process.env.FILTER_NONE == '1'
+  };
 
   function start (retried, max, errors) {
     if (retried >= max) {
@@ -428,17 +430,29 @@ if (!module.parent) {
         req.on('end', console.log.bind(console, 'ENDED'));
         var jsonStream = toJSONStream( );
         emit_init(jsonStream);
-        var businessStreams = SYNC_DEPLOYMENT_CONTROLLER
-          ? [ syncPostToController(gateway_opts) ]
-          : [ naivePostToGateway(gateway_opts), naiveGetFromGateway(gateway_opts) ]
-          ;
+        var businessStreams;
+        switch(SYNC_CONTROLLER) {
+          case 'deployment':
+            businessStreams = [ syncPostToController(gateway_opts) ];
+            break;
+          case 'consul':
+            // businessStreams = [ syncDeploymentToConsul(gateway_opts) ];
+            businessStreams = [ syncPostToController(gateway_opts) ];
+            break;
+          case 'default':
+          case 'runner':
+          default:
+            businessStreams = [ naivePostToGateway(gateway_opts), naiveGetFromGateway(gateway_opts) ];
+            break;
+        }
+
         jsonStream.once('initialized', console.log.bind(console, "INITED!!"));
         var control = stream.pipeline(req,
           jsonStream,
           // inspectBookmarks(bookmark_config, ctx.k8s),
           // saveBookMark(bookmark_config, ctx.k8s),
           ignoreBookMark(bookmark_config, ctx.k8s),
-          pre( ),
+          pre(filter_opts),
           slowRateStream(delay_opts),
           ...businessStreams,
           // naivePostToGateway(gateway_opts),

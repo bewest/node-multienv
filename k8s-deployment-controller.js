@@ -2,11 +2,14 @@
 var restify = require('restify');
 var bunyan = require('bunyan');
 var _ = require('lodash');
+var Consul = require('consul');
+var url = require('url');
 
 function configure (opts) {
 
   var k8s = opts.k8s;
   var appsApi = opts.appsApi;
+  var consul = opts.consul;
   var selected_namespace = opts.MULTIENV_K8S_NAMESPACE;
 
   var server = restify.createServer(opts);
@@ -438,9 +441,10 @@ function configure (opts) {
   function patch_configmap_metadata (req, res, next) {
     var targetConfigMap = req.params.name;
     var patch = { metadata: { } };
-    patch.metadata[req.params.section] = req.body;
     if (req.params.field && req.body[req.params.field]) {
       patch.metadata[req.params.section][req.params.field] = req.body[req.params.field];
+    } else {
+      patch.metadata[req.params.section] = req.body;
     }
     var options = { headers: { "Content-Type": "application/merge-patch+json" } };
     k8s.patchNamespacedConfigMap(targetConfigMap, selected_namespace, patch, undefined, undefined, undefined, undefined, undefined, options)
@@ -477,6 +481,84 @@ function configure (opts) {
   server.post('/sync/updates', handle_sync_updates, format_result);
   server.post('/sync/deletions', handle_sync_deletion);
 
+  server.post('/consul/sync/additions', sync_consul_update, format_result);
+  server.post('/consul/sync/updates', sync_consul_update, format_result);
+  server.post('/consul/sync/deletions', sync_consul_deletion);
+
+  function sync_consul_addition (req, res, next) {
+
+    console.log("NOTHING TO DO WITH CONSUL SINCE POD IS NOT RUNNING", req.body);
+    next( );
+  }
+
+  function sync_consul_update (req, res, next) {
+		const serviceData = req.body.object;
+    if (serviceData.status.phase != 'Running') {
+      console.log("NOTHING TO DO SINCE POD IS NOT RUNNING", req.body);
+      return next( );
+    }
+		const tenantName = serviceData.metadata.labels.tenant;
+		const serviceID = `${tenantName}-${serviceData.metadata.namespace}`;
+    var id = serviceData.metadata.uid;
+    var host = serviceData.status.podIP;
+    var port = 1337;
+		var insert = {
+			name: 'backends',
+			address: host,
+			port: port,
+			id: id,
+			tags: [ serviceID, tenantName, 'tenant', 'backend' ],
+			checks: [
+        {
+				name: "EndpointAvailable",
+				ttl: '30s',
+				interval: '15s',
+				http: url.format({protocol: 'http', hostname: host, port: port,  pathname: '/api/v1/status.txt'}),
+				deregister_critical_service_after: '30s'
+			},
+			/*
+			{
+				name: "ValidExpectedName",
+				ttl: '10s',
+				interval: '5s',
+				http: url.format({protocol: 'http', hostname: host, port: multienv.port,  pathname: ('/environs/' + name + '/assigned/WEB_NAME/' + name)}),
+				failures_before_critical: 1,
+				deregister_critical_service_after: '1m'
+			},
+			{
+				name: "ValidExpectedPort",
+				ttl: '10s',
+				interval: '5s',
+				http: url.format({protocol: 'http', hostname: host, port: multienv.port,  pathname: ('/environs/' + name + '/assigned/PORT/' + port)}),
+				failures_before_critical: 1,
+				deregister_critical_service_after: '1m'
+			},
+			*/
+			]
+		};
+    consul.agent.service.register(insert, function (err, body, resp) {
+      console.log("CREATED BACKEND SITE IN CONSUL", err, body);
+      if (err) {
+        return next(err);
+      }
+      res.result = body;
+      next( );
+    });
+  }
+
+  function sync_consul_deletion (req, res, next) {
+		const serviceData = req.body.object;
+
+		const tenantName = serviceData.metadata.tenant;
+    var id = serviceData.metadata.uid;
+    consul.agent.service.deregister(id, function (err, body, resp) {
+      console.log("REMOVED BACKEND SITE FROM CONSUL", id, err, body);
+      res.status(204);
+      res.end( );
+      next( );
+    });
+  }
+
   server.get('/configmaps/:name', fetch_config_map, format_multienv_compatible_result, format_result );
   server.post('/configmaps/:name', suggest, suggest_config_map, create_or_update_configmap, format_multienv_compatible_result, format_result);
   server.get('/configmaps/:name/metadata/:section', fetch_config_map, select_metadata_field, format_result );
@@ -505,6 +587,7 @@ if (!module.parent) {
   var MULTIENV_MANAGED_BY = process.env.MULTIENV_MANAGED_BY || 'multienv/k8s-deployment-controller';
   var MULTIENV_DEFAULT_COMPONENT_LABEL = process.env.MULTIENV_DEFAULT_COMPONENT_LABEL || 'config';
   var MULTIENV_DEFAULT_CONFIG_ROLE = process.env.MULTIENV_DEFAULT_CONFIG_ROLE || 'config-as-deploy';
+  var CONSUL = process.env.CONSUL || 'http://consul.service.consul';
   var config = {
     MULTIENV_K8S_NAMESPACE: process.env.MULTIENV_K8S_NAMESPACE || 'default'
   , default: {
@@ -541,8 +624,19 @@ if (!module.parent) {
       process.exit(1);
     });
   })
+  .acquire(function k8s (ctx, next) {
+    ctx.consul = new Consul(url.parse(CONSUL));
+    ctx.consul.agent.self(function (err, body, response) {
+      if (err) {
+        console.log("COULD NOT CONNECT TO CONSUL", err);
+        process.exit(1);
+      }
+      console.log("CONNECTED TO CONSUL", body);
+      next( );
+    });
+  })
   .boot(function booted (ctx) {
-    var server = configure(_.extend(config, { k8s: ctx.k8s, appsApi: ctx.appsApi }));
+    var server = configure(_.extend(config, { k8s: ctx.k8s, appsApi: ctx.appsApi, consul: ctx.consul }));
     server.listen(port, function ( ) {
       console.log('listening', this.address( ));
     });
