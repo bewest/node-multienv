@@ -82,6 +82,12 @@ case "${1-help}" in
   inspector)
     exec -a inspector $RUNTIME --no-autorestart --exp-backoff-restart-delay=100 -i max k8s-inspector.js
   ;;
+  deployment-controller)
+    exec -a deployment-controller $RUNTIME --no-autorestart --exp-backoff-restart-delay=100 -i max k8s-deployment-controller.js
+  ;;
+  deployment-operator)
+    SYNC_CONTROLLER="deployment" exec -a deployment-operator node k8s-dispatcher.js
+  ;;
   dispatcher)
     exec -a dispatcher node k8s-dispatcher.js
   ;;
