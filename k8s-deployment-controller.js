@@ -424,18 +424,19 @@ function configure (opts) {
   function patch_configmap_remove_field (req, res, next) {
     var targetConfigMap = req.params.name;
     var patch = { metadata: { } };
-    patch.metadata[req.params.section][req.params.field] = null;
+    patch.metadata[req.params.section] = { [req.params.field]:  null };
     var options = { headers: { "Content-Type": "application/merge-patch+json" } };
     k8s.patchNamespacedConfigMap(targetConfigMap, selected_namespace, patch, undefined, undefined, undefined, undefined, undefined, options)
     .then(function (result) {
       // res.result = null;
-      // res.json(req.params.name);
+
       res.status(204);
+      res.end( );
       next( );
     }).catch(function (err) {
+      console.log("ERROR PATCHING", err, err.response);
       next(err);
     });
-    next( );
   }
 
   function patch_configmap_metadata (req, res, next) {
@@ -597,6 +598,7 @@ if (!module.parent) {
       },
       labels: {
         managed: 'multienv', app: 'tenant',
+        role: MULTIENV_DEFAULT_CONFIG_ROLE
       }
     }
   , configmap: {
