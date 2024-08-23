@@ -442,7 +442,7 @@ function configure (opts) {
     var targetConfigMap = req.params.name;
     var patch = { metadata: { } };
     if (req.params.field && req.body[req.params.field]) {
-      patch.metadata[req.params.section][req.params.field] = req.body[req.params.field];
+      patch.metadata[req.params.section] = _.extend(patch.metadata[req.params.section], { [req.params.field]:  req.body[req.params.field] });
     } else {
       patch.metadata[req.params.section] = req.body;
     }
