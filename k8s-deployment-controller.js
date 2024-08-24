@@ -34,7 +34,7 @@ function configure (opts) {
   }
 
   function template_deployment (data) {
-    return {
+    var template = {
       kind: "Deployment"
     , metadata: {
       name: data.WEB_NAME,
@@ -90,12 +90,35 @@ function configure (opts) {
                 , optional: true
                 }
               }
-            ]
+            ],
+            resources: {
+              ...(opts.MULTIENV_TENANT_REQUESTS_ENABLE ? {
+                requests: opts.requests
+              } : { }),
+              ...(opts.MULTIENV_TENANT_LIMITS_ENABLE ? {
+                limits: opts.limits
+              } : { }),
+            }
           } ]
+          /*
+          // Add nodeSelector to target specific node pool
+          nodeSelector: {
+            'doks.digitalocean.com/node-pool': 'bigger-tenant-runners'
+          }
+          */
+
         }
       }
     }
     };
+
+    if (opts.MULTIENV_TENANT_NODEPOOL_TARGET) {
+      template.spec.template.spec.nodeSelector = {
+        'doks.digitalocean.com/node-pool': opts.MULTIENV_TENANT_NODEPOOL_TARGET
+      };
+    }
+
+    return template;
   }
 
   function suggest_deployment (req, res, next) {
@@ -590,7 +613,18 @@ if (!module.parent) {
   var MULTIENV_DEFAULT_CONFIG_ROLE = process.env.MULTIENV_DEFAULT_CONFIG_ROLE || 'config-as-deploy';
   var CONSUL = process.env.CONSUL || 'http://consul.service.consul';
   var config = {
-    MULTIENV_K8S_NAMESPACE: process.env.MULTIENV_K8S_NAMESPACE || 'default'
+    MULTIENV_K8S_NAMESPACE: process.env.MULTIENV_K8S_NAMESPACE || 'default',
+    MULTIENV_TENANT_NODEPOOL_TARGET: process.env.MULTIENV_TENANT_NODEPOOL_TARGET || 'bigger-tenant-runners',
+    MULTIENV_TENANT_REQUESTS_ENABLE: (process.env.MULTIENV_TENANT_REQUESTS_ENABLE ||'1') != 'false',
+    MULTIENV_TENANT_LIMITS_ENABLE: (process.env.MULTIENV_TENANT_LIMITS_ENABLE ||'1') != 'false',
+    requests: {
+      cpu: process.env.MULTIENV_TENANT_REQUESTS_CPU || '5m',
+      memory: process.env.MULTIENV_TENANT_REQUESTS_MEMORY || '120Mi'
+    },
+    limits: {
+      cpu: process.env.MULTIENV_TENANT_LIMITS_CPU || '500m',
+      memory: process.env.MULTIENV_TENANT_LIMITS_MEMORY || '500Mi'
+    }
   , default: {
     deployment: {
       annotations: {
