@@ -5,6 +5,7 @@ var through = require('through2');
 var transform = require('parallel-transform');
 var got = require('got');
 var url = require('url');
+var path = require('path');
 
 var stream = require('stream');
 
@@ -59,6 +60,49 @@ function naivePostToGateway (opts) {
     data.internal_name = name;
     console.log(name, 'to gateway', name, api, object.metadata.name, object.metadata.resourceVersion);
     method(api, {json: data}).json( ).then( function (body) {
+      console.log(name, 'SUCCESSFUL', api);
+      update.gateway = {err: null, success: body};
+      callback(null, update);
+    }).catch(function (err) {
+      console.log(name, "ERROR POST", name, api, arguments);
+      update.gateway = {err: err};
+      callback(null, update);
+    });
+  }
+
+  var tr = transform(opts.parallel, operation);
+  return tr;
+}
+
+
+function syncPostToController (opts) {
+  function operation (update, callback) {
+    var object = update.object;
+    var endpoint = url.parse(opts.gateway);
+    var url_prefix = endpoint.pathname;
+    var name = object.metadata.name;
+    // var pathname = '/environs/' + name;
+    // Determine the appropriate endpoint based on the update type
+    let pathname;
+    switch (update.type) {
+        case 'ADDED':
+            pathname = path.join(url_prefix, '/sync/additions');
+            break;
+        case 'MODIFIED':
+            pathname = path.join(url_prefix, '/sync/updates');
+            break;
+        case 'DELETED':
+            pathname = path.join(url_prefix, '/sync/deletions');
+            break;
+        default:
+            console.error('Unknown update type:', update.type);
+            return callback(); // Skip processing for unknown types
+    }
+    var api = url.format({hostname: endpoint.hostname, port: endpoint.port, protocol: endpoint.protocol, pathname: pathname });
+    // var method = update.type == 'DELETED' ?  got.delete : got.post;
+
+    console.log(name, 'to gateway', name, api, object.metadata.name, object.metadata.resourceVersion);
+    got.post(api, {json: update}).json( ).then( function (body) {
       console.log(name, 'SUCCESSFUL', api);
       update.gateway = {err: null, success: body};
       callback(null, update);
@@ -233,14 +277,14 @@ function ignoreBookMark (opts, k8s) {
 }
 
 
-function pre ( ) {
+function pre (options) {
   var opts = {
     highWaterMark: 32000,
   };
   var tr = through.obj(opts, function (chunk, enc, callback) {
     console.log(chunk.object.metadata.name, 'begin', chunk.type);
     var self = this;
-    if (chunk.object.data) {
+    if (options.filter_none || chunk.object.data) {
       this.push(chunk);
     } else {
       console.log('DROPPING', chunk);
@@ -310,6 +354,9 @@ if (!module.parent) {
   var WATCH_LABELSELECTOR = process.env.WATCH_LABELSELECTOR || 'app=tenant,managed=multienv';
   var WATCH_RESOURCEVERSION = process.env.WATCH_RESOURCEVERSION || '';
   var WATCH_CONTINUE = process.env.WATCH_CONTINUE || '';
+  var INIT_WITH_FULL_AUDIT = process.env.INIT_WITH_FULL_AUDIT == '1';
+  var SYNC_CONTROLLER = process.env.SYNC_CONTROLLER || 'runner'; // default, deployment, consul
+  var SYNC_DEPLOYMENT_CONTROLLER = process.env.SYNC_DEPLOYMENT_CONTROLLER == '1';
   var gateway_opts = {
     gateway: CLUSTER_GATEWAY,
     parallel: parseInt(process.env.PARALLEL_UPDATES || '12'),
@@ -342,6 +389,10 @@ if (!module.parent) {
 
   }
 
+  var filter_opts = {
+    filter_none: process.env.FILTER_NONE == '1'
+  };
+
   function start (retried, max, errors) {
     if (retried >= max) {
       console.log("EXITING AFTER ERRORS", retried, errors);
@@ -365,7 +416,9 @@ if (!module.parent) {
       // Get latest resourceVersion, along with a count of active changes
       const stream = await ctx.k8s.listNamespacedConfigMap(WATCH_NAMESPACE, false, false, undefined, WATCH_FIELDSELECTOR, WATCH_LABELSELECTOR, 1, undefined, undefined, undefined,  undefined, undefined, {});
       console.log("FOUND LATEST", stream.body, stream.body.metadata.resourceVersion);
-      watch_opts.resourceVersion = stream.body.metadata.resourceVersion;
+      if (!INIT_WITH_FULL_AUDIT) {
+        watch_opts.resourceVersion = stream.body.metadata.resourceVersion;
+      }
       next( );
       
     })
@@ -377,16 +430,33 @@ if (!module.parent) {
         req.on('end', console.log.bind(console, 'ENDED'));
         var jsonStream = toJSONStream( );
         emit_init(jsonStream);
+        var businessStreams;
+        switch(SYNC_CONTROLLER) {
+          case 'deployment':
+            businessStreams = [ syncPostToController(gateway_opts) ];
+            break;
+          case 'consul':
+            // businessStreams = [ syncDeploymentToConsul(gateway_opts) ];
+            businessStreams = [ syncPostToController(gateway_opts) ];
+            break;
+          case 'default':
+          case 'runner':
+          default:
+            businessStreams = [ naivePostToGateway(gateway_opts), naiveGetFromGateway(gateway_opts) ];
+            break;
+        }
+
         jsonStream.once('initialized', console.log.bind(console, "INITED!!"));
         var control = stream.pipeline(req,
           jsonStream,
           // inspectBookmarks(bookmark_config, ctx.k8s),
           // saveBookMark(bookmark_config, ctx.k8s),
           ignoreBookMark(bookmark_config, ctx.k8s),
-          pre( ),
+          pre(filter_opts),
           slowRateStream(delay_opts),
-          naivePostToGateway(gateway_opts),
-          naiveGetFromGateway(gateway_opts),
+          ...businessStreams,
+          // naivePostToGateway(gateway_opts),
+          // naiveGetFromGateway(gateway_opts),
           post( ),
           function ended (err) {
             console.log('STREAM ENDED', err)
