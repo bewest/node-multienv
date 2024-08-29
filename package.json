@@ -11,7 +11,7 @@
   "author": "Ben West <bewest@gmail.com>",
   "license": "AGPLv3",
   "dependencies": {
-    "@kubernetes/client-node": "^0.19.0",
+    "@kubernetes/client-node": "^0.20.0",
     "async": "^3.2.0",
     "bootevent": "0.0.1",
     "bunyan": "^1.4.0",
