@@ -637,6 +637,7 @@ if (!module.parent) {
   var MULTIENV_MANAGED_BY = process.env.MULTIENV_MANAGED_BY || 'multienv/k8s-deployment-controller';
   var MULTIENV_DEFAULT_COMPONENT_LABEL = process.env.MULTIENV_DEFAULT_COMPONENT_LABEL || 'config';
   var MULTIENV_DEFAULT_CONFIG_ROLE = process.env.MULTIENV_DEFAULT_CONFIG_ROLE || 'config-as-deploy';
+  var MULTIENV_DEFAULT_APP_LABEL = (process.env.MULTIENV_DEFAULT_APP_LABEL || 'app');
   var CONSUL = process.env.CONSUL || 'http://consul.service.consul';
   var config = {
     MULTIENV_K8S_NAMESPACE: process.env.MULTIENV_K8S_NAMESPACE || 'default',
@@ -658,7 +659,7 @@ if (!module.parent) {
         'managed-by': MULTIENV_MANAGED_BY,
       },
       labels: {
-        managed: 'multienv', app: 'tenant',
+        managed: 'multienv', app: MULTIENV_DEFAULT_APP_LABEL, // 'tenant',
         role: MULTIENV_DEFAULT_CONFIG_ROLE
       }
     }
@@ -667,7 +668,7 @@ if (!module.parent) {
         'managed-by': MULTIENV_MANAGED_BY,
       },
       labels: {
-        managed: 'multienv', app: 'tenant',
+        managed: 'multienv', app: MULTIENV_DEFAULT_APP_LABEL, // 'tenant',
         component: MULTIENV_DEFAULT_COMPONENT_LABEL,
         role: MULTIENV_DEFAULT_CONFIG_ROLE
       }
