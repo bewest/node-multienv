@@ -4,6 +4,7 @@ var bunyan = require('bunyan');
 var _ = require('lodash');
 var Consul = require('consul');
 var url = require('url');
+var dns = require('dns');
 
 function configure (opts) {
 
@@ -515,6 +516,27 @@ function configure (opts) {
     next( );
   }
 
+  function assigned_ip_name_health_check (req, res, next) {
+    var expectedIp = req.params.ip;
+    var tenantName = req.params.name;
+    var domain = `${tenantName}.backends.${selected_namespace}.svc.cluster.local`;
+    dns.resolve(domain, function (err, result) {
+      console.log('resolved', err, domain, result);
+      if (err) return next(err);
+      if (result.length) {
+        if (result.indexOf(expectedIp) > -1 ) {
+          res.json({ ok: true, status: 'ok' });
+        } else {
+          res.status(404);
+          res.json({ ok: false, status: 'BAD', result } );
+        }
+      } else {
+        res.status(404);
+      }
+      next( );
+    });
+  }
+
   function sync_consul_update (req, res, next) {
 		const serviceData = req.body.object;
     if (serviceData.status.phase != 'Running') {
@@ -525,30 +547,32 @@ function configure (opts) {
 		const serviceID = `${tenantName}-${serviceData.metadata.namespace}`;
     var id = serviceData.metadata.uid;
     var host = serviceData.status.podIP;
+    var healthCheckService = url.parse(opts.MULTIENV_HEALTH_CHECK_SERVICE);
+    var validPodCheckUrl = url.format({ protocol: healthCheckService.protocol, hostname: healthCheckService.hostname, port: healthCheckService.port,  pathname: ('/healthchecks/pod/' + tenantName + '/assigned/podIP/' + host)});
     var port = 1337;
 		var insert = {
 			name: 'backends',
 			address: host,
 			port: port,
 			id: id,
-			tags: [ serviceID, tenantName, 'tenant', 'backend' ],
+			tags: [ tenantName, serviceID, 'tenant', 'backend' ],
 			checks: [
         {
 				name: "EndpointAvailable",
 				ttl: '30s',
-				interval: '15s',
+				interval: '10s',
 				http: url.format({protocol: 'http', hostname: host, port: port,  pathname: '/api/v1/status.txt'}),
-				deregister_critical_service_after: '30s'
+				deregister_critical_service_after: '20s'
 			},
-			/*
 			{
-				name: "ValidExpectedName",
+				name: "ValidPodName",
 				ttl: '10s',
 				interval: '5s',
-				http: url.format({protocol: 'http', hostname: host, port: multienv.port,  pathname: ('/environs/' + name + '/assigned/WEB_NAME/' + name)}),
+				http: validPodCheckUrl,
 				failures_before_critical: 1,
-				deregister_critical_service_after: '1m'
+				deregister_critical_service_after: '5s'
 			},
+			/*
 			{
 				name: "ValidExpectedPort",
 				ttl: '10s',
@@ -561,7 +585,7 @@ function configure (opts) {
 			]
 		};
     consul.agent.service.register(insert, function (err, body, resp) {
-      console.log("CREATED BACKEND SITE IN CONSUL", err, body);
+      console.log("CREATED BACKEND SITE IN CONSUL", err, insert);
       if (err) {
         return next(err);
       }
@@ -602,6 +626,8 @@ function configure (opts) {
   server.get('/environs/:name/env', fetch_config_map, select_env, format_result );
   server.post('/environs/:name/env/:field', suggest, suggest_config_map, create_or_update_configmap, select_data_field, format_result );
   server.del('/environs/:name', delete_configmap);
+
+  server.get('/healthchecks/pod/:name/assigned/podIP/:ip', assigned_ip_name_health_check);
   return server;
 }
 
@@ -617,6 +643,7 @@ if (!module.parent) {
     MULTIENV_TENANT_NODEPOOL_TARGET: process.env.MULTIENV_TENANT_NODEPOOL_TARGET || 'bigger-tenant-runners',
     MULTIENV_TENANT_REQUESTS_ENABLE: (process.env.MULTIENV_TENANT_REQUESTS_ENABLE ||'1') != 'false',
     MULTIENV_TENANT_LIMITS_ENABLE: (process.env.MULTIENV_TENANT_LIMITS_ENABLE ||'1') != 'false',
+    MULTIENV_HEALTH_CHECK_SERVICE: (process.env.MULTIENV_HEALTH_CHECK_SERVICE || 'http://multienv-deployment-controller:3000'),
     requests: {
       cpu: process.env.MULTIENV_TENANT_REQUESTS_CPU || '5m',
       memory: process.env.MULTIENV_TENANT_REQUESTS_MEMORY || '120Mi'
