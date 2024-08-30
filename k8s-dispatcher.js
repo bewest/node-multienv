@@ -427,7 +427,10 @@ if (!module.parent) {
       monitor.then(function (req) {
         console.log('started watch', watch_opts, req.url);
         // console.log('req', req);
-        req.on('end', console.log.bind(console, 'ENDED'));
+        req.on('end', function (err) {
+          console.log("ENDED", err);
+          process.exit(0);
+        });
         var jsonStream = toJSONStream( );
         emit_init(jsonStream);
         var businessStreams;
