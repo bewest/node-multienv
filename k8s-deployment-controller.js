@@ -75,32 +75,66 @@ function configure (opts) {
         spec: {
           hostname: `${data.WEB_NAME}`,
           subdomain: "backends",
-          containers: [ {
-            name: 'nightscout',
-            image: 'nightscout/cgm-remote-monitor:latest',
-            envFrom: [
-              {
-                secretRef: {
-                  name: `${data.WEB_NAME}-secrets`
-                , optional: true
+          volumes: [
+            {
+              name: "mongodb-data",
+              emptyDir: {}
+            }
+          ],
+          containers: [
+            {
+              name: 'nightscout',
+              image: 'nightscout/cgm-remote-monitor:latest',
+              envFrom: [
+                {
+                  secretRef: {
+                    name: `${data.WEB_NAME}-secrets`
+                  , optional: true
+                  },
                 },
-              },
-              {
-                configMapRef: {
-                  name: data.WEB_NAME
-                , optional: true
+                {
+                  configMapRef: {
+                    name: data.WEB_NAME
+                  , optional: true
+                  }
+                }
+              ],
+              env: [
+                {
+                  name: 'MONGODB_URI',
+                  value: `mongodb://localhost:27017/${data.WEB_NAME}`
+                }
+              ],
+              resources: {
+                ...(opts.MULTIENV_TENANT_REQUESTS_ENABLE ? {
+                  requests: opts.requests
+                } : { }),
+                ...(opts.MULTIENV_TENANT_LIMITS_ENABLE ? {
+                  limits: opts.limits
+                } : { }),
+              }
+            },
+            {
+              name: 'mongodb',
+              image: 'mongo:4.4',
+              volumeMounts: [
+                {
+                  name: "mongodb-data",
+                  mountPath: "/data/db"
+                }
+              ],
+              resources: {
+                requests: {
+                  cpu: '100m',
+                  memory: '256Mi'
+                },
+                limits: {
+                  cpu: '500m',
+                  memory: '512Mi'
                 }
               }
-            ],
-            resources: {
-              ...(opts.MULTIENV_TENANT_REQUESTS_ENABLE ? {
-                requests: opts.requests
-              } : { }),
-              ...(opts.MULTIENV_TENANT_LIMITS_ENABLE ? {
-                limits: opts.limits
-              } : { }),
             }
-          } ]
+          ]
           /*
           // Add nodeSelector to target specific node pool
           nodeSelector: {
