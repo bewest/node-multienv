@@ -27,6 +27,29 @@ function configure (opts) {
 
   // 
 
+
+function template_persistent_volume_claim(data) {
+  return {
+    apiVersion: 'v1',
+    kind: 'PersistentVolumeClaim',
+    metadata: {
+      name: `${data.WEB_NAME}-mongodb-data`,
+      labels: {
+        app: 'tenant',
+        tenant: data.WEB_NAME
+      }
+    },
+    spec: {
+      accessModes: ['ReadWriteOnce'],
+      resources: {
+        requests: {
+          storage: '1Gi'
+        }
+      }
+    }
+  };
+}
+
   function suggest (req, res, next) {
     var data = _.extend({ WEB_NAME: req.params.name }, req.query);
     data = _.extend(data, req.body);
@@ -78,7 +101,9 @@ function configure (opts) {
           volumes: [
             {
               name: "mongodb-data",
-              emptyDir: {}
+              persistentVolumeClaim: {
+                claimName: `${data.WEB_NAME}-mongodb-data`
+              }
             }
           ],
           containers: [
@@ -188,6 +213,16 @@ function configure (opts) {
 
   function create_deployment (req, res, next) {
     var msg = {status: 'create or update starting' };
+    
+    // Create PVC first
+    k8s.createNamespacedPersistentVolumeClaim(
+      selected_namespace,
+      template_persistent_volume_claim(req.suggestion)
+    ).catch(function(err) {
+      if (err.statusCode !== 409) { // Ignore if PVC already exists
+        console.log('Error creating PVC:', err);
+      }
+    });
     appsApi.readNamespacedDeployment(req.params.name, selected_namespace).then(function (result) {
       msg.status = "readNamespacedDeployment result"
       msg.result = result;
