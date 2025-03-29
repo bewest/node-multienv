@@ -31,7 +31,7 @@ spec:
                       description: "The unique name for this Nightscout instance"
                     storageSize:
                       type: string
-                      default: "1Gi"
+                      default: "2Gi"
                       description: "Size of persistent storage for MongoDB"
                   required:
                     - WEB_NAME

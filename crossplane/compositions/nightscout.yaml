@@ -22,7 +22,7 @@ spec:
               accessModes: ["ReadWriteOnce"]
               resources:
                 requests:
-                  storage: 1Gi
+                  storage: 2Gi
           patches:
             - fromFieldPath: spec.parameters.WEB_NAME
               toFieldPath: metadata.name
