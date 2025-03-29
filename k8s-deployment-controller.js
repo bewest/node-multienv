@@ -57,6 +57,50 @@ function template_persistent_volume_claim(data) {
     next( );
   }
 
+  function template_mongodb_service(data) {
+    return {
+      apiVersion: 'v1',
+      kind: 'Service',
+      metadata: {
+        name: `${data.WEB_NAME}-mongodb`,
+        labels: {
+          app: 'tenant',
+          tenant: data.WEB_NAME
+        }
+      },
+      spec: {
+        selector: {
+          app: `${data.WEB_NAME}-mongodb`
+        },
+        ports: [{
+          port: 27017,
+          targetPort: 27017
+        }]
+      }
+    };
+  }
+
+  function create_nightscout_instance(req, res, next) {
+    // Create MongoDB resources first
+    k8s.createNamespacedPersistentVolumeClaim(
+      selected_namespace,
+      template_persistent_volume_claim(req.suggestion)
+    ).then(() => {
+      return k8s.createNamespacedService(
+        selected_namespace, 
+        template_mongodb_service(req.suggestion)
+      );
+    }).then(() => {
+      return appsApi.createNamespacedStatefulSet(
+        selected_namespace,
+        template_mongodb_statefulset(req.suggestion)
+      );
+    }).then(() => {
+      // Create CGM Remote Monitor deployment
+      return create_deployment(req, res, next);
+    }).catch(next);
+  }
+
   function template_deployment (data) {
     var template = {
       kind: "Deployment"
