@@ -57,6 +57,55 @@ function template_persistent_volume_claim(data) {
     next( );
   }
 
+  function template_provisioner_deployment(data) {
+    return {
+      kind: "Deployment",
+      metadata: {
+        name: `${data.WEB_NAME}-provisioner`,
+        labels: {
+          app: 'tenant',
+          tenant: data.WEB_NAME,
+          component: 'provisioner'
+        }
+      },
+      spec: {
+        replicas: 1,
+        selector: {
+          matchLabels: {
+            app: `${data.WEB_NAME}-provisioner`
+          }
+        },
+        template: {
+          metadata: {
+            labels: {
+              app: `${data.WEB_NAME}-provisioner`
+            }
+          },
+          spec: {
+            containers: [{
+              name: 'provisioner',
+              image: 'nightscout/provisioner:latest',
+              env: [{
+                name: 'MONGODB_URI',
+                value: `mongodb://${data.WEB_NAME}-mongodb:27017/${data.WEB_NAME}`
+              }],
+              resources: {
+                requests: {
+                  cpu: '100m',
+                  memory: '128Mi'
+                },
+                limits: {
+                  cpu: '200m',
+                  memory: '256Mi'
+                }
+              }
+            }]
+          }
+        }
+      }
+    };
+  }
+
   function template_mongodb_service(data) {
     return {
       apiVersion: 'v1',
@@ -94,6 +143,12 @@ function template_persistent_volume_claim(data) {
       return appsApi.createNamespacedStatefulSet(
         selected_namespace,
         template_mongodb_statefulset(req.suggestion)
+      );
+    }).then(() => {
+      // Create Provisioner API deployment
+      return appsApi.createNamespacedDeployment(
+        selected_namespace,
+        template_provisioner_deployment(req.suggestion)
       );
     }).then(() => {
       // Create CGM Remote Monitor deployment
