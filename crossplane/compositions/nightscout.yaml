@@ -96,9 +96,45 @@ spec:
                     resources:
                       requests:
                         storage: 1Gi
-    - step: setup-nightscout
+    - step: setup-mongodb-user
       dependsOn:
         - setup-mongodb
+      resources:
+        - name: mongodb-provisioner-job
+          base:
+            apiVersion: batch/v1
+            kind: Job
+            metadata:
+              labels:
+                app: mongodb-provisioner
+            spec:
+              backoffLimit: 4
+              template:
+                spec:
+                  containers:
+                    - name: provisioner
+                      image: provisioner:latest  # Replace with your actual provisioner image
+                      command: ["mint-user"]
+                      env:
+                        - name: MONGO_ROOT_URI
+                          value: mongodb://$(MONGODB_SERVICE):27017/admin
+                        - name: ASSIGN_MONGO_WEBHOOK
+                          value: http://localhost:3000/provision/complete  # Adjust this URL as needed
+                        - name: TARGET_DATABASE
+                          valueFrom:
+                            fieldPath: spec.parameters.WEB_NAME
+                  restartPolicy: OnFailure
+          patches:
+            - fromFieldPath: spec.parameters.WEB_NAME
+              toFieldPath: metadata.name
+              transforms:
+                - type: string
+                  string:
+                    fmt: "%s-provisioner"
+
+    - step: setup-nightscout
+      dependsOn:
+        - setup-mongodb-user
       resources:
         - name: nightscout-deployment
           base:
