@@ -1,0 +1,78 @@
+
+apiVersion: apiextensions.crossplane.io/v1
+kind: Composition
+metadata:
+  name: nightscout-standard
+  labels:
+    provider: kubernetes
+    deployment: standard
+spec:
+  compositeTypeRef:
+    apiVersion: nightscout.crossplane.io/v1alpha1
+    kind: XNightscoutInstance
+  resources:
+    - name: mongodb-pvc
+      base:
+        apiVersion: v1
+        kind: PersistentVolumeClaim
+        spec:
+          accessModes: ["ReadWriteOnce"]
+          resources:
+            requests:
+              storage: 1Gi
+      patches:
+        - fromFieldPath: spec.parameters.WEB_NAME
+          toFieldPath: metadata.name
+          transforms:
+            - type: string
+              string:
+                fmt: "%s-mongodb-data"
+        - fromFieldPath: spec.parameters.storageSize
+          toFieldPath: spec.resources.requests.storage
+
+    - name: mongodb-service
+      base:
+        apiVersion: v1
+        kind: Service
+        spec:
+          ports:
+            - port: 27017
+              targetPort: 27017
+      patches:
+        - fromFieldPath: spec.parameters.WEB_NAME
+          toFieldPath: metadata.name
+          transforms:
+            - type: string
+              string:
+                fmt: "%s-mongodb"
+
+    - name: nightscout-deployment
+      base:
+        apiVersion: apps/v1
+        kind: Deployment
+        spec:
+          replicas: 1
+          template:
+            spec:
+              containers:
+                - name: nightscout
+                  image: nightscout/cgm-remote-monitor:latest
+                  resources:
+                    requests:
+                      cpu: "5m"
+                      memory: "120Mi"
+                    limits:
+                      cpu: "500m"
+                      memory: "500Mi"
+                - name: mongodb
+                  image: mongo:4.4
+                  resources:
+                    requests:
+                      cpu: "100m"
+                      memory: "256Mi"
+                    limits:
+                      cpu: "500m"
+                      memory: "512Mi"
+      patches:
+        - fromFieldPath: spec.parameters.WEB_NAME
+          toFieldPath: metadata.name
