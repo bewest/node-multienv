@@ -21,4 +21,4 @@ spec:
   hooks:
     sync:
       webhook:
-        url: http://deployment-controller:3000/sync/additions
+        url: http://deployment-controller:3000/metacontroller/sync

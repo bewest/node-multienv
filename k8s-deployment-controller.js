@@ -670,6 +670,125 @@ function template_persistent_volume_claim(data) {
   server.del('/deployments/:name', delete_deployment);
   server.get('/deployments', list_deployments, format_result);
 
+  // MetaController webhook endpoint
+  server.post('/metacontroller/sync', function(req, res, next) {
+    const parent = req.body.parent;
+    const children = req.body.children || {};
+
+    // Create response structure
+    const response = {
+      status: {},
+      children: []
+    };
+
+    // Add MongoDB StatefulSet
+    response.children.push({
+      apiVersion: 'apps/v1',
+      kind: 'StatefulSet',
+      metadata: {
+        name: `${parent.metadata.name}-mongodb`,
+        labels: {
+          app: 'mongodb',
+          instance: parent.metadata.name
+        }
+      },
+      spec: {
+        serviceName: 'mongodb',
+        replicas: 1,
+        selector: {
+          matchLabels: {
+            app: 'mongodb'
+          }
+        },
+        template: {
+          metadata: {
+            labels: {
+              app: 'mongodb'
+            }
+          },
+          spec: {
+            containers: [{
+              name: 'mongodb',
+              image: 'mongo:4.4',
+              ports: [{ containerPort: 27017 }],
+              volumeMounts: [{
+                name: 'mongodb-data',
+                mountPath: '/data/db'
+              }],
+              resources: {
+                requests: {
+                  cpu: '100m',
+                  memory: '256Mi'
+                },
+                limits: {
+                  cpu: '500m',
+                  memory: '512Mi'
+                }
+              }
+            }],
+            volumes: [{
+              name: 'mongodb-data',
+              persistentVolumeClaim: {
+                claimName: `${parent.metadata.name}-mongodb-data`
+              }
+            }]
+          }
+        }
+      }
+    });
+
+    // Add Nightscout Deployment
+    response.children.push({
+      apiVersion: 'apps/v1',
+      kind: 'Deployment',
+      metadata: {
+        name: parent.metadata.name,
+        labels: {
+          app: 'nightscout',
+          instance: parent.metadata.name
+        }
+      },
+      spec: {
+        replicas: 1,
+        selector: {
+          matchLabels: {
+            app: 'nightscout'
+          }
+        },
+        template: {
+          metadata: {
+            labels: {
+              app: 'nightscout'
+            }
+          },
+          spec: {
+            containers: [{
+              name: 'nightscout',
+              image: 'nightscout/cgm-remote-monitor:latest',
+              env: [{
+                name: 'MONGODB_URI',
+                value: `mongodb://${parent.metadata.name}-mongodb:27017/${parent.metadata.name}`
+              }],
+              resources: {
+                requests: {
+                  cpu: '5m',
+                  memory: '120Mi'
+                },
+                limits: {
+                  cpu: '500m',
+                  memory: '500Mi'
+                }
+              }
+            }]
+          }
+        }
+      }
+    });
+
+    res.send(response);
+    next();
+  });
+
   server.post('/sync/additions', suggest_deployment_template_params, suggest_deployment, handle_sync_addition, format_result);
   server.post('/sync/updates', handle_sync_updates, format_result);
   server.post('/sync/deletions', handle_sync_deletion);
