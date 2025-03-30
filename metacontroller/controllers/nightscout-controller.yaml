@@ -1,0 +1,24 @@
+
+apiVersion: metacontroller.k8s.io/v1alpha1
+kind: CompositeController
+metadata:
+  name: nightscout-controller
+spec:
+  generateSelector: true
+  parentResource:
+    apiVersion: nightscout.k8s/v1alpha1
+    resource: nightscoutinstances
+    scope: Namespaced
+  childResources:
+    - apiVersion: apps/v1
+      resource: deployments
+      updateStrategy:
+        method: Recreate
+    - apiVersion: v1
+      resource: services
+    - apiVersion: v1
+      resource: persistentvolumeclaims
+  hooks:
+    sync:
+      webhook:
+        url: http://deployment-controller:3000/sync/additions

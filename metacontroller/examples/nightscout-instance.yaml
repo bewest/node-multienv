@@ -1,0 +1,8 @@
+
+apiVersion: nightscout.k8s/v1alpha1
+kind: NightscoutInstance
+metadata:
+  name: demo-nightscout
+spec:
+  webName: demo
+  storageSize: "2Gi"
