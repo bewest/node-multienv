@@ -684,6 +684,26 @@ function template_persistent_volume_claim(data) {
     }
   });
 
+  server.post('/metacontroller/storage/sync', async function(req, res, next) {
+    try {
+      const response = await webhookHandler.handleStorageSync(req.body.parent, req.body.children);
+      res.send(response);
+      next();
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  server.post('/metacontroller/migration/sync', async function(req, res, next) {
+    try {
+      const response = await webhookHandler.handleMigrationSync(req.body.parent, req.body.children);
+      res.send(response);
+      next();
+    } catch (error) {
+      next(error);
+    }
+  });
+
   server.post('/sync/additions', suggest_deployment_template_params, suggest_deployment, handle_sync_addition, format_result);
   server.post('/sync/updates', handle_sync_updates, format_result);
   server.post('/sync/deletions', handle_sync_deletion);

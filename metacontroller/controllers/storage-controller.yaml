@@ -1,0 +1,20 @@
+
+apiVersion: metacontroller.k8s.io/v1alpha1
+kind: CompositeController
+metadata:
+  name: storage-controller
+spec:
+  generateSelector: true
+  parentResource:
+    apiVersion: nightscout.k8s/v1alpha1
+    resource: tenantstorages
+    scope: Namespaced
+  childResources:
+    - apiVersion: batch/v1
+      resource: jobs
+    - apiVersion: v1
+      resource: secrets
+  hooks:
+    sync:
+      webhook:
+        url: http://deployment-controller:3000/metacontroller/storage/sync
