@@ -1,0 +1,38 @@
+
+apiVersion: apiextensions.crossplane.io/v1
+kind: CompositeResourceDefinition
+metadata:
+  name: xtenantstacks.nightscout.crossplane.io
+spec:
+  group: nightscout.crossplane.io
+  names:
+    kind: XTenantStack
+    plural: xtenantstacks
+  claimNames:
+    kind: TenantStack
+    plural: tenantstacks
+  versions:
+    - name: v1alpha1
+      served: true
+      referenceable: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              properties:
+                parameters:
+                  type: object
+                  properties:
+                    tenantId:
+                      type: string
+                      description: "The unique identifier for this tenant"
+                    migrateFrom:
+                      type: string
+                      description: "Optional MongoDB URI to migrate from"
+                    needsProvisioning:
+                      type: boolean
+                      default: false
+                  required:
+                    - tenantId
