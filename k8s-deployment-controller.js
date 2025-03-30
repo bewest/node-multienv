@@ -127,7 +127,7 @@ function template_persistent_volume_claim(data) {
         }]
       }
     };
-  }
+  }"
 
   function create_nightscout_instance(req, res, next) {
     // Create MongoDB resources first
