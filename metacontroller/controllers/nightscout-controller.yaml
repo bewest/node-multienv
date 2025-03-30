@@ -14,10 +14,6 @@ spec:
       resource: statefulsets
       updateStrategy:
         method: InPlace
-    - apiVersion: apps/v1
-      resource: deployments
-      updateStrategy:
-        method: Recreate
     - apiVersion: v1
       resource: services
     - apiVersion: v1
