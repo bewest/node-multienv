@@ -11,6 +11,10 @@ spec:
     scope: Namespaced
   childResources:
     - apiVersion: apps/v1
+      resource: statefulsets
+      updateStrategy:
+        method: InPlace
+    - apiVersion: apps/v1
       resource: deployments
       updateStrategy:
         method: Recreate
