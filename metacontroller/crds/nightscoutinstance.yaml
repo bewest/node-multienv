@@ -25,4 +25,4 @@ spec:
                   type: string
                 storageSize:
                   type: string
-                  default: "1Gi"
+                  default: "2Gi"
