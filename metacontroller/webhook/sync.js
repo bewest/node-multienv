@@ -80,7 +80,18 @@ function handleSync(req, res) {
             {
               name: 'mongodb-data',
               persistentVolumeClaim: {
-                claimName: parent.metadata.name + '-mongodb-data'
+                claimName: parent.metadata.name + '-mongodb-data',
+                spec: {
+                  accessModes: ["ReadWriteOnce"],
+                  resources: {
+                    requests: {
+                      storage: "2Gi"
+                    }
+                  },
+                  storageClassName: "do-block-storage",
+                  volumeMode: "Filesystem",
+                  fsType: "xfs"
+                }
               }
             }
           ]
