@@ -671,7 +671,23 @@ function template_persistent_volume_claim(data) {
   server.get('/deployments', list_deployments, format_result);
 
   const createMetacontrollerRoutes = require('./lib/routes/metacontroller');
+  const createDeploymentRoutes = require('./lib/routes/deployments');
+  const createConfigMapRoutes = require('./lib/routes/configmaps');
+
   const metacontrollerRoutes = createMetacontrollerRoutes(k8s, selected_namespace);
+  const deploymentRoutes = createDeploymentRoutes(k8s, selected_namespace, opts);
+  const configMapRoutes = createConfigMapRoutes(k8s, selected_namespace, opts);
+
+  // Deployment routes
+  server.get('/deployments/:name', deploymentRoutes.fetchDeployment, format_result);
+  server.del('/deployments/:name', deploymentRoutes.deleteDeployment);
+  server.get('/deployments', deploymentRoutes.listDeployments, format_result);
+
+  // ConfigMap routes  
+  server.get('/configmaps/:name', configMapRoutes.fetchConfigMap, format_result);
+  server.post('/configmaps/:name', suggest, suggest_config_map, configMapRoutes.createOrUpdateConfigMap, format_result);
+  server.del('/configmaps/:name', configMapRoutes.deleteConfigMap);
+  server.get('/configmaps', configMapRoutes.listConfigMaps, format_result);
 
   // MetaController webhook endpoints
   server.post('/metacontroller/sync', metacontrollerRoutes.handleSync);
