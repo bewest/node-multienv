@@ -673,10 +673,14 @@ function template_persistent_volume_claim(data) {
   const createMetacontrollerRoutes = require('./lib/routes/metacontroller');
   const createDeploymentRoutes = require('./lib/routes/deployments');
   const createConfigMapRoutes = require('./lib/routes/configmaps');
+  const createHealthRoutes = require('./lib/routes/health');
+  const createInstanceRoutes = require('./lib/routes/instances');
 
   const metacontrollerRoutes = createMetacontrollerRoutes(k8s, selected_namespace);
   const deploymentRoutes = createDeploymentRoutes(k8s, selected_namespace, opts);
   const configMapRoutes = createConfigMapRoutes(k8s, selected_namespace, opts);
+  const healthRoutes = createHealthRoutes(k8s, selected_namespace);
+  const instanceRoutes = createInstanceRoutes(k8s, selected_namespace);
 
   // Deployment routes
   server.get('/deployments/:name', deploymentRoutes.fetchDeployment, format_result);
