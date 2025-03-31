@@ -38,10 +38,52 @@ Integrates with the deployment controller to:
 - Manages dependent resources
 
 ## Usage
-1. Create a NightscoutInstance resource
-2. Controller automatically provisions required resources
-3. Webhook handler reconciles the desired state
-4. Status updates reflect current state
+
+### Basic Instance Creation
+```yaml
+apiVersion: nightscout.k8s/v1alpha1
+kind: NightscoutInstance
+metadata:
+  name: demo-instance
+spec:
+  webName: demo
+  storageSize: "2Gi"
+```
+
+### Migration Using Annotations
+```yaml
+apiVersion: nightscout.k8s/v1alpha1
+kind: NightscoutInstance
+metadata:
+  name: migrated-instance
+  annotations:
+    nightscout.k8s/migrate-from: "mongodb://oldhost:27017/olddb"
+spec:
+  webName: migrated
+  storageSize: "2Gi"
+```
+
+### Storage Provisioning
+```yaml
+apiVersion: nightscout.k8s/v1alpha1
+kind: TenantStorage
+metadata:
+  name: new-tenant-storage
+spec:
+  tenantId: new-tenant
+  needsProvisioning: true
+```
+
+### Migration Job
+```yaml
+apiVersion: nightscout.k8s/v1alpha1
+kind: TenantMigration
+metadata:
+  name: tenant-migration
+spec:
+  tenantId: tenant-to-migrate
+  sourceUri: "mongodb://source:27017/db"
+```
 
 ## Resource Management
 The controller manages:
