@@ -670,39 +670,13 @@ function template_persistent_volume_claim(data) {
   server.del('/deployments/:name', delete_deployment);
   server.get('/deployments', list_deployments, format_result);
 
-  const WebhookHandler = require('./lib/webhook_handler');
-  const webhookHandler = new WebhookHandler(k8s, selected_namespace);
+  const createMetacontrollerRoutes = require('./lib/routes/metacontroller');
+  const metacontrollerRoutes = createMetacontrollerRoutes(k8s, selected_namespace);
 
-  // MetaController webhook endpoint
-  server.post('/metacontroller/sync', async function(req, res, next) {
-    try {
-      const response = await webhookHandler.handleSync(req.body.parent, req.body.children);
-      res.send(response);
-      next();
-    } catch (error) {
-      next(error);
-    }
-  });
-
-  server.post('/metacontroller/storage/sync', async function(req, res, next) {
-    try {
-      const response = await webhookHandler.handleStorageSync(req.body.parent, req.body.children);
-      res.send(response);
-      next();
-    } catch (error) {
-      next(error);
-    }
-  });
-
-  server.post('/metacontroller/migration/sync', async function(req, res, next) {
-    try {
-      const response = await webhookHandler.handleMigrationSync(req.body.parent, req.body.children);
-      res.send(response);
-      next();
-    } catch (error) {
-      next(error);
-    }
-  });
+  // MetaController webhook endpoints
+  server.post('/metacontroller/sync', metacontrollerRoutes.handleSync);
+  server.post('/metacontroller/storage/sync', metacontrollerRoutes.handleStorageSync);
+  server.post('/metacontroller/migration/sync', metacontrollerRoutes.handleMigrationSync);
 
   server.post('/sync/additions', suggest_deployment_template_params, suggest_deployment, handle_sync_addition, format_result);
   server.post('/sync/updates', handle_sync_updates, format_result);
