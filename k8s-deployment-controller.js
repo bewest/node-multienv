@@ -1,4 +1,3 @@
-
 var restify = require('restify');
 var bunyan = require('bunyan');
 var _ = require('lodash');
@@ -27,28 +26,7 @@ function configure (opts) {
 
   // 
 
-
-function template_persistent_volume_claim(data) {
-  return {
-    apiVersion: 'v1',
-    kind: 'PersistentVolumeClaim',
-    metadata: {
-      name: `${data.WEB_NAME}-mongodb-data`,
-      labels: {
-        app: 'tenant',
-        tenant: data.WEB_NAME
-      }
-    },
-    spec: {
-      accessModes: ['ReadWriteOnce'],
-      resources: {
-        requests: {
-          storage: '1Gi'
-        }
-      }
-    }
-  };
-}
+const templates = require('./lib/templates');
 
   function suggest (req, res, next) {
     var data = _.extend({ WEB_NAME: req.params.name }, req.query);
@@ -56,6 +34,7 @@ function template_persistent_volume_claim(data) {
     req.suggestion = data;
     next( );
   }
+
 
   function template_provisioner_deployment(data) {
     return {
@@ -106,43 +85,21 @@ function template_persistent_volume_claim(data) {
     };
   }
 
-  function template_mongodb_service(data) {
-    return {
-      apiVersion: 'v1',
-      kind: 'Service',
-      metadata: {
-        name: `${data.WEB_NAME}-mongodb`,
-        labels: {
-          app: 'tenant',
-          tenant: data.WEB_NAME
-        }
-      },
-      spec: {
-        selector: {
-          app: `${data.WEB_NAME}-mongodb`
-        },
-        ports: [{
-          port: 27017,
-          targetPort: 27017
-        }]
-      }
-    };
-  }"
 
   function create_nightscout_instance(req, res, next) {
     // Create MongoDB resources first
     k8s.createNamespacedPersistentVolumeClaim(
       selected_namespace,
-      template_persistent_volume_claim(req.suggestion)
+      templates.template_persistent_volume_claim(req.suggestion)
     ).then(() => {
       return k8s.createNamespacedService(
         selected_namespace, 
-        template_mongodb_service(req.suggestion)
+        templates.template_mongodb_service(req.suggestion)
       );
     }).then(() => {
       return appsApi.createNamespacedStatefulSet(
         selected_namespace,
-        template_mongodb_statefulset(req.suggestion)
+        templates.template_mongodb_statefulset(req.suggestion)
       );
     }).then(() => {
       // Create Provisioner API deployment
@@ -176,7 +133,7 @@ function template_persistent_volume_claim(data) {
       selector: {
         matchLabels: {
           internal_name: data.WEB_NAME
-          
+
         }
       },
       template: {
@@ -297,26 +254,16 @@ function template_persistent_volume_claim(data) {
     res.result.custom_env = res.result.data;
     res.result.state = 'persisted';
     delete res.result.data;
-    /*
-    var v = {
-      id: worker.id || null
-    , custom_env: worker.custom_env
-    , state: worker.state || 'missing'
-    , isDead: worker.isDead && worker.isDead( )
-    // , url: "http://" + [ 'localhost', worker.custom_env.PORT ].join(':') + '/'
-    // , status_url: "http://" + [ 'localhost', worker.custom_env.PORT ].join(':') + '/api/v1/status.json'
-    };
-    */
     next( );
   }
 
   function create_deployment (req, res, next) {
     var msg = {status: 'create or update starting' };
-    
+
     // Create PVC first
     k8s.createNamespacedPersistentVolumeClaim(
       selected_namespace,
-      template_persistent_volume_claim(req.suggestion)
+      templates.template_persistent_volume_claim(req.suggestion)
     ).catch(function(err) {
       if (err.statusCode !== 409) { // Ignore if PVC already exists
         console.log('Error creating PVC:', err);
@@ -327,14 +274,6 @@ function template_persistent_volume_claim(data) {
       msg.result = result;
       console.log("replace or create", msg);
       var body = result.body;
-      /*
-      if (req.params.field && req.deployment.data[req.params.field]) {
-        body.data[req.params.field] = req.deployment.data[req.params.field];
-      } else {
-        body.data = req.deployment.data;
-      }
-      */
-      // console.log("READ before update", req.deployment.data, body);
       console.log("before update", req.suggestion);
       appsApi.replaceNamespacedDeployment(body.metadata.name, selected_namespace, body).then(function (result) {
         msg.status = "replaceNamespacedDeployment result"
@@ -353,7 +292,6 @@ function template_persistent_volume_claim(data) {
         var body = result.body;
         res.header('Location', '/environs/' + body.metadata.name);
         res.deployment = result.body;
-        // res.result = result.body.data;
         next( );
       }).catch(function (err) {
         console.log('error creating config map', err);
@@ -389,7 +327,6 @@ function template_persistent_volume_claim(data) {
     } else {
       res.result = doc;
     }
-    // res.result = doc[req.params.section][req.params.field];
     next( );
   }
 
@@ -416,11 +353,6 @@ function template_persistent_volume_claim(data) {
 
   function suggest_deployment_template_params (req, res, next) {
     console.log("INCOMING UPDATE", req.body);
-    // TODO: inspect annotations and/or labels to see if this configmap or
-    // secret should be added.
-    // or if the deployment should be restarted.
-    // TODO: inspect annotation or labels to determine the tenant's name if
-    // this is a supplementary secret or configmap.
     var data = _.extend({ WEB_NAME: req.body.object.metadata.name }, req.query);
     data = _.extend(data, req.body);
     req.suggestion = data;
@@ -435,27 +367,16 @@ function template_persistent_volume_claim(data) {
       res.result = result;
       return next( );
     }).catch((err) => {
-      // maybe previously existed but we are adding a new type of config or are
-      // transitioning configmaps in or out of labels configured for different
-      // watches to facilitate a hybrid or migrating environment.
-      // TODO: consider creating a list of patches to add or remove configmaps
-      // based on inspected labels and annotations to help support migrations
-      // or hybrid environments.
       const patch = [{
         op: "add",
         path: "/spec/template/metadata/annotations/updated-at",
-        // path: "/spec/template/metadata/annotations",
-        // path: "/metadata/annotations/updated-at",
-        // value: { "updated-at": new Date().toISOString() }
         value: new Date().toISOString()
       }];
       console.log("ATTEMPT TO PATCH DEPLOYMENT THAT COULD NOT BE CREATED", deploymentName, req.deployment, patch, err.response.body);
-     // Perform the patch operation
      var options = { headers: { "Content-Type": "application/json-patch+json" } };
      appsApi.patchNamespacedDeployment(deploymentName, selected_namespace, patch, undefined, undefined, undefined, undefined, undefined, options)
        .then((result) => {
 				console.log(`deployment ${req.deployment.metadata.name} updated for rolling restart`);
-        // res.result = deployment
         res.result = result;
         next( );
       }).catch((err) => {
@@ -480,7 +401,6 @@ function template_persistent_volume_claim(data) {
       appsApi.patchNamespacedDeployment(targetDeployment, selected_namespace, patch, undefined, undefined, undefined, undefined, undefined, options)
       .then((result) => {
 				console.log(`deployment ${targetDeployment} updated for rolling restart`);
-        // res.result = deployment
         res.result = result;
         next( );
       }).catch((err) => {
@@ -534,11 +454,9 @@ function template_persistent_volume_claim(data) {
     , metadata: { name: data.WEB_NAME,
       annotations: {
         ...opts.default.configmap.annotations
-        // 'managed-by': 'multienv/k8s-deployment-controller'
       },
       labels: {
         ...opts.default.configmap.labels
-        // managed: 'multienv', app: 'tenant'
       }
     }
     , data: data
@@ -620,8 +538,6 @@ function template_persistent_volume_claim(data) {
     var options = { headers: { "Content-Type": "application/merge-patch+json" } };
     k8s.patchNamespacedConfigMap(targetConfigMap, selected_namespace, patch, undefined, undefined, undefined, undefined, undefined, options)
     .then(function (result) {
-      // res.result = null;
-
       res.status(204);
       res.end( );
       next( );
@@ -665,7 +581,6 @@ function template_persistent_volume_claim(data) {
 
   server.get('/deployments/:name', fetch_deployment, format_multienv_compatible_result, format_result );
   server.post('/deployments/:name', suggest, suggest_deployment, create_deployment, format_multienv_compatible_result, format_result);
-  // server.get('/deployments/:name/env/:field', fetch_deployment, select_field, format_result );
   server.get('/deployments/:name/env', fetch_deployment, select_env, format_result );
   server.del('/deployments/:name', delete_deployment);
   server.get('/deployments', list_deployments, format_result);
@@ -707,7 +622,6 @@ function template_persistent_volume_claim(data) {
   server.post('/consul/sync/deletions', sync_consul_deletion);
 
   function sync_consul_addition (req, res, next) {
-
     console.log("NOTHING TO DO WITH CONSUL SINCE POD IS NOT RUNNING", req.body);
     next( );
   }
@@ -768,16 +682,6 @@ function template_persistent_volume_claim(data) {
 				failures_before_critical: 1,
 				deregister_critical_service_after: '5s'
 			},
-			/*
-			{
-				name: "ValidExpectedPort",
-				ttl: '10s',
-				interval: '5s',
-				http: url.format({protocol: 'http', hostname: host, port: multienv.port,  pathname: ('/environs/' + name + '/assigned/PORT/' + port)}),
-				failures_before_critical: 1,
-				deregister_critical_service_after: '1m'
-			},
-			*/
 			]
 		};
     consul.agent.service.register(insert, function (err, body, resp) {
@@ -919,7 +823,7 @@ function template_persistent_volume_claim(data) {
   return server;
 }
 
-if (!module.parent) {
+if(!module.parent) {
   var port = parseInt(process.env.PORT || '2828')
   var k8s_local = process.env.MULTIENV_K8S_AUTH == 'local';
   var MULTIENV_MANAGED_BY = process.env.MULTIENV_MANAGED_BY || 'multienv/k8s-deployment-controller';
@@ -947,7 +851,7 @@ if (!module.parent) {
         'managed-by': MULTIENV_MANAGED_BY,
       },
       labels: {
-        managed: 'multienv', app: MULTIENV_DEFAULT_APP_LABEL, // 'tenant',
+        managed: 'multienv', app: MULTIENV_DEFAULT_APP_LABEL, 
         role: MULTIENV_DEFAULT_CONFIG_ROLE
       }
     }
@@ -956,7 +860,7 @@ if (!module.parent) {
         'managed-by': MULTIENV_MANAGED_BY,
       },
       labels: {
-        managed: 'multienv', app: MULTIENV_DEFAULT_APP_LABEL, // 'tenant',
+        managed: 'multienv', app: MULTIENV_DEFAULT_APP_LABEL, 
         component: MULTIENV_DEFAULT_COMPONENT_LABEL,
         role: MULTIENV_DEFAULT_CONFIG_ROLE
       }
@@ -994,4 +898,3 @@ if (!module.parent) {
     });
   });
 }
-
