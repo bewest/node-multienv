@@ -1,48 +1,82 @@
 
 # MetaController Resources
 
-This directory contains MetaController definitions and configurations for managing Nightscout deployments using a webhook-based control pattern.
+This directory contains MetaController definitions and configurations for managing Nightscout deployments using webhook-based control patterns.
 
 ## Technical Architecture
 
 ### Controller Model
-The implementation uses MetaController's CompositeController pattern which:
-- Implements a declarative reconciliation loop
+The implementation uses MetaController's CompositeController and DecoratorController patterns which:
+- Implements declarative reconciliation loops
 - Manages parent-child resource relationships
 - Provides webhook-based customization
 - Handles state transitions and updates
 
-### State Management
-Controllers implement a state machine that:
-- Tracks resource lifecycle stages
-- Manages dependent resource states
-- Handles migration scenarios
-- Implements rollback capabilities
+### Architectural Patterns
 
-## Component Architecture
+#### Config-as-Deploy Pattern
+We implement a config-driven deployment pattern where:
+- Each tenant has a ConfigMap in the hosted-tenants namespace
+- ConfigMaps are tagged with `config-as-deploy`
+- A dispatcher watches ConfigMap changes
+- Changes trigger controller updates via webhooks
+- Controller reconciles deployment state
 
-### NightscoutInstance Controller
+This pattern aligns with MetaController's decorator approach, where resource changes trigger reconciliation.
+
+#### Unified StatefulSet Pattern
+Moving towards a unified pod model where:
+- Single StatefulSet manages multiple containers:
+  - Nightscout webapp
+  - MongoDB database
+  - Admin/tooling container (optional)
+- Shared volume mounts
+- Coordinated lifecycle management
+- Simplified networking model
+
+Benefits:
+- Reduced operational complexity
+- Improved resource utilization
+- Simplified state management
+- Better container coordination
+
+### Component Architecture
+
+#### NightscoutInstance Controller
 Primary controller managing the core deployment:
 - Implements parent-child relationship tracking
 - Manages resource lifecycle and updates
 - Handles configuration changes
 - Implements health checking
 
-### Storage Controller
+#### Migration Controller
+Implements migration orchestration through:
+- ConfigMap annotation watching (`migrate-config-crd`)
+- Migration job creation and management
+- Progress tracking and status updates
+- Uses existing dispatcher/controller infrastructure
+
+Migration Flow:
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: tenant-config
+  annotations:
+    nightscout.k8s/migrate-config-crd: "true"
+    nightscout.k8s/migration-source: "mongodb://source/db"
+  labels:
+    config-as-deploy: "true"
+```
+
+#### Storage Controller
 Manages persistent storage resources:
 - Handles PVC provisioning
 - Implements storage class selection
 - Manages capacity updates
 - Handles backup/restore
 
-### Migration Controller
-Orchestrates data migrations:
-- Implements source/target validation
-- Manages migration job lifecycle
-- Handles progress tracking
-- Implements failure recovery
-
-### Migration Decorator
+#### Migration Decorator
 Annotation-based migration trigger:
 - Watches for migration annotations
 - Creates migration resources
@@ -63,11 +97,10 @@ sync: {
 
 ### Resource Management
 Controllers handle multiple resource types:
-- StatefulSets for stateful components
-- Deployments for stateless components
+- StatefulSets for unified pods
 - Services for networking
 - PVCs for storage
-- Jobs for operations
+- Jobs for migrations
 
 ### State Reconciliation
 The sync loop implements:
