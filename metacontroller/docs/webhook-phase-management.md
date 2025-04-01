@@ -121,3 +121,26 @@ function handleFailure(parent, children, phase) {
    - Bubble up status from child resources
    - Aggregate health checks
    - Maintain detailed progress information
+
+
+## Resource Stability Considerations
+
+### Webhook Availability Impact
+- Resource stability is maintained even if webhook becomes unavailable
+- Existing pods and configmaps continue running
+- Status updates are queued until webhook recovery
+- Only new operations or updates are delayed
+
+### Status Field Usage
+```javascript
+// Example status tracking in webhook
+status: {
+  phase: 'Provisioning',
+  conditions: [{
+    type: 'SecretAvailable',
+    status: 'True',
+    lastTransitionTime: new Date().toISOString()
+  }],
+  observedGeneration: parent.metadata.generation
+}
+```

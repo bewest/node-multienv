@@ -18,6 +18,8 @@ spec:
       resource: services
     - apiVersion: v1
       resource: persistentvolumeclaims
+    - apiVersion: v1
+      resource: secrets
   hooks:
     sync:
       webhook:
