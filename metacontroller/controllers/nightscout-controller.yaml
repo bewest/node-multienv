@@ -3,6 +3,14 @@ apiVersion: metacontroller.k8s.io/v1alpha1
 kind: CompositeController
 metadata:
   name: nightscout-controller
+  annotations:
+    metacontroller.k8s.io/description: |
+      Manages Nightscout instances using related resources pattern:
+      - Secrets: MongoDB credentials
+      - ConfigMaps: Nightscout configuration
+      - StatefulSet: MongoDB database
+      - Deployment: Nightscout application
+      - Jobs: Database initialization and migrations
 spec:
   generateSelector: true
   parentResource:
