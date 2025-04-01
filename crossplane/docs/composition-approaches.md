@@ -77,8 +77,7 @@ pipeline:
    - Lower operational overhead
 
 ## Current Implementation
-Our system uses both approaches:
-- MetaController for complex tenant provisioning logic
-- Crossplane for infrastructure resource management
-
-This hybrid approach allows us to leverage the strengths of both patterns while managing their respective trade-offs.
+- [ ] TODO: describe how crossplane uses webhooks
+- [ ] TODO: describe how crossplane can be used to implement similar if not the same functionality as an operational or even hybrid (via labels) alternative to metacontroller.
+- [ ] compare and contrast operational vs development feasibility of these approaches
+      
