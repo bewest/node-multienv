@@ -77,7 +77,35 @@ pipeline:
    - Lower operational overhead
 
 ## Current Implementation
-- [ ] TODO: describe how crossplane uses webhooks
-- [ ] TODO: describe how crossplane can be used to implement similar if not the same functionality as an operational or even hybrid (via labels) alternative to metacontroller.
-- [ ] compare and contrast operational vs development feasibility of these approaches
+
+### Crossplane Webhook Usage
+- Composition Functions allow webhook-like behavior
+- Can implement complex transformation logic
+- Supports external API calls during composition
+- Maintains declarative configuration while allowing programmatic interventions
+
+### Implementing MetaController Patterns
+1. **Via Pure Crossplane**
+   - Use Composition pipeline for staged provisioning
+   - Leverage status conditions for phase management
+   - Implement resource dependencies through pipeline ordering
+   - Use XRD validations for tenant constraints
+
+2. **Hybrid Approach**
+   - Use labels to bridge MetaController and Crossplane resources
+   - MetaController handles stateful operations
+   - Crossplane manages infrastructure resources
+   - Shared status propagation through label selectors
+
+### Feasibility Analysis
+
+#### Operational Considerations
+- Crossplane: Better stability, simpler upgrades, standard patterns
+- MetaController: More flexible, easier debugging, familiar Node.js stack
+- Hybrid: Best of both but increased complexity
+
+#### Development Tradeoffs
+- Crossplane: Steeper learning curve, more YAML configuration
+- MetaController: Faster development cycles, easier testing
+- Hybrid: Allows gradual migration, maintains existing code
       
