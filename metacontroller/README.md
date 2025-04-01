@@ -40,6 +40,9 @@ Benefits:
 - Simplified state management
 - Better container coordination
 
+### Phase Management
+The controllers implement phase-based state management to handle complex provisioning workflows. See [Webhook Phase Management](docs/webhook-phase-management.md) for details on implementing phase transitions and dependency management.
+
 ### Component Architecture
 
 #### NightscoutInstance Controller
