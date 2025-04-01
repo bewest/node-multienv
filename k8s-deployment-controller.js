@@ -727,6 +727,78 @@ const templates = require('./lib/templates');
   server.post('/environs/:name/env/:field', suggest, suggest_config_map, create_or_update_configmap, select_data_field, format_result );
   server.del('/environs/:name', delete_configmap);
 
+  // Account and site provisioning endpoints
+  server.post('/accounts', function(req, res, next) {
+    const accountId = objectId();
+    const secretName = `${accountId}-secret`;
+    
+    // Create K8s secret with MongoDB credentials
+    const secret = {
+      apiVersion: 'v1',
+      kind: 'Secret',
+      metadata: {
+        name: secretName,
+        labels: {
+          'app.kubernetes.io/managed-by': 'tenant-controller',
+          'tenant.nightscout.org/account-id': accountId
+        }
+      },
+      stringData: {
+        MONGODB_INITDB_ROOT_USERNAME: `user_${accountId}`,
+        MONGODB_INITDB_ROOT_PASSWORD: objectId() 
+      }
+    };
+
+    k8s.createNamespacedSecret(selected_namespace, secret)
+      .then(() => {
+        res.json({
+          account: accountId,
+          name: req.body.name || accountId
+        });
+        next();
+      })
+      .catch(next);
+  });
+
+  server.post('/accounts/:account/sites', function(req, res, next) {
+    const { account } = req.params;
+    
+    // Create NightscoutInstance CRD
+    const instance = {
+      apiVersion: 'nightscout.k8s/v1alpha1',
+      kind: 'NightscoutInstance',
+      metadata: {
+        name: req.body.name,
+        labels: {
+          'tenant.nightscout.org/account-id': account
+        }
+      },
+      spec: {
+        parameters: {
+          account: account,
+          WEB_NAME: req.body.name
+        }
+      }
+    };
+
+    k8s.createNamespacedCustomObject(
+      'nightscout.k8s',
+      'v1alpha1', 
+      selected_namespace,
+      'nightscoutinstances',
+      instance
+    )
+    .then(() => {
+      res.json({
+        id: objectId(),
+        name: req.body.name,
+        account: account
+      });
+      next();
+    })
+    .catch(next);
+  });
+
   // NightscoutInstance CRD endpoints
   function fetch_nightscout_instance(req, res, next) {
     k8s.getNamespacedCustomObject(
