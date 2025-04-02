@@ -1,4 +1,3 @@
-
 apiVersion: metacontroller.k8s.io/v1alpha1
 kind: CompositeController
 metadata:
@@ -32,3 +31,10 @@ spec:
     sync:
       webhook:
         url: http://deployment-controller:3000/metacontroller/sync
+  customize:
+    resources:
+      - apiVersion: v1
+        kind: Secret
+        labelSelector:
+          matchLabels:
+            app: tenant
