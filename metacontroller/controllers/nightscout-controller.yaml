@@ -32,9 +32,21 @@ spec:
       webhook:
         url: http://deployment-controller:3000/metacontroller/sync
   customize:
+    webhook:
+      url: http://deployment-controller:3000/metacontroller/customize
     resources:
       - apiVersion: v1
         kind: Secret
+        labelSelector:
+          matchLabels:
+            app: tenant
+      - apiVersion: v1
+        kind: ConfigMap
+        labelSelector:
+          matchLabels:
+            app: tenant
+      - apiVersion: apps/v1
+        kind: StatefulSet
         labelSelector:
           matchLabels:
             app: tenant
