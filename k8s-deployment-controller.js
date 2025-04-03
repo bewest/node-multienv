@@ -598,20 +598,20 @@ const templates = require('./lib/templates');
   const instanceRoutes = createInstanceRoutes(k8s, selected_namespace);
 
   // Deployment routes
-  server.get('/deployments/:name', deploymentRoutes.fetchDeployment, format_result);
-  server.del('/deployments/:name', deploymentRoutes.deleteDeployment);
-  server.get('/deployments', deploymentRoutes.listDeployments, format_result);
+  // server.get('/deployments/:name', deploymentRoutes.fetchDeployment, format_result);
+  // server.del('/deployments/:name', deploymentRoutes.deleteDeployment);
+  // server.get('/deployments', deploymentRoutes.listDeployments, format_result);
 
   // ConfigMap routes  
-  server.get('/configmaps/:name', configMapRoutes.fetchConfigMap, format_result);
-  server.post('/configmaps/:name', suggest, suggest_config_map, configMapRoutes.createOrUpdateConfigMap, format_result);
-  server.del('/configmaps/:name', configMapRoutes.deleteConfigMap);
-  server.get('/configmaps', configMapRoutes.listConfigMaps, format_result);
+  // server.get('/configmaps/:name', configMapRoutes.fetchConfigMap, format_result);
+  // server.post('/configmaps/:name', suggest, suggest_config_map, configMapRoutes.createOrUpdateConfigMap, format_result);
+  // server.del('/configmaps/:name', configMapRoutes.deleteConfigMap);
+  // server.get('/configmaps', configMapRoutes.listConfigMaps, format_result);
 
   // MetaController webhook endpoints
   server.post('/metacontroller/sync', metacontrollerRoutes.handleSync);
-  server.post('/metacontroller/storage/sync', metacontrollerRoutes.handleStorageSync);
-  server.post('/metacontroller/migration/sync', metacontrollerRoutes.handleMigrationSync);
+  // server.post('/metacontroller/storage/sync', metacontrollerRoutes.handleStorageSync);
+  // server.post('/metacontroller/migration/sync', metacontrollerRoutes.handleMigrationSync);
 
   server.post('/sync/additions', suggest_deployment_template_params, suggest_deployment, handle_sync_addition, format_result);
   server.post('/sync/updates', handle_sync_updates, format_result);
