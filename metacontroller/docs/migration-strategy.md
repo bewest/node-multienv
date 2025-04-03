@@ -1,4 +1,3 @@
-
 # Migration Strategy and Implementation Status
 
 ## Current Architecture
@@ -6,6 +5,21 @@
 - TenantMigration CRD handles data migration between instances
 - MetaController decorator pattern observes migration annotations
 - Phase-based migration workflow with status tracking
+- Environment-driven label configuration
+
+## Configuration 
+
+### Environment Variables
+```bash
+# Label Configuration
+TENANT_APP_LABEL=tenant       # Default app label for tenant resources
+TENANT_COMPONENT_LABEL=app    # Default component label
+MIGRATION_BATCH_LABEL=batch   # Label for grouping migration resources
+TENANT_ID_LABEL=tenant-id    # Tenant identifier label
+
+# Resource Selectors
+WATCH_LABEL_SELECTOR=app=tenant   # Label selector for customize hook
+```
 
 ## Migration Implementation Status
 
@@ -14,16 +28,19 @@
    - Watches TenantMigration CRD
    - Creates migration jobs based on source/target URIs
    - Manages job lifecycle and status updates
+   - Configurable via environment variables
 
 2. **Migration Decorator**
    - Watches NightscoutInstance annotations
    - Triggers migrations via `nightscout.k8s/migrate-from` annotation
    - Creates supporting resources (jobs, configmaps)
+   - Label-based resource tracking
 
 3. **Webhook Handlers**
    - Phase-based migration handling
    - Resource creation templates
    - Status propagation logic
+   - Customizable label matching
 
 ### Code Completeness Checklist
 - [x] CRD Definitions (TenantMigration, NightscoutInstance)
@@ -31,24 +48,20 @@
 - [x] Phase-based webhook handlers
 - [x] Template generation
 - [x] Migration job management
-- [ ] Comprehensive status conditions
-- [ ] Rollback mechanisms
+- [x] Label configuration
+- [ ] Health check implementation
 - [ ] Progress tracking
 - [ ] Data validation
 - [ ] Cross-namespace permissions
-- [ ] Health check implementation
-
-## Operational Guidelines
 
 ### Resource Labeling Strategy
 ```yaml
 metadata:
   labels:
-    app.kubernetes.io/name: nightscout
-    app.kubernetes.io/instance: ${webName}
-    app.kubernetes.io/component: migration
-    nightscout.k8s/tenant: ${tenantId}
-    nightscout.k8s/migration-batch: ${batchId}
+    ${TENANT_APP_LABEL}: nightscout
+    ${TENANT_COMPONENT_LABEL}: ${component}
+    ${TENANT_ID_LABEL}: ${tenantId}
+    ${MIGRATION_BATCH_LABEL}: ${batchId}
 ```
 
 ### Migration Job Configuration
