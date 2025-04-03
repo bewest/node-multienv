@@ -733,10 +733,14 @@ const templates = require('./lib/templates');
     const secretName = `${accountId}-secret`;
     
     // TODO: we need to apply labels below that can be passed through from
-    // environment variable
+    // environment variable. Some of the labels should help assist the
+    // customize webhook to match this secret.  The webhook will need to
+    // include this secret using the labels in order to correctly perform the
+    // initializing, provisioning, and other phases.
+    // TODO: should include a new DB_NAME as well.
     // todo role: MULTIENV_DEFAULT_SECRET_ROLE (mongodb)
     // 
-    // Create K8s secret with MongoDB credentials
+    // Create K8s secret with provisioning root MongoDB credentials
     const secret = {
       apiVersion: 'v1',
       kind: 'Secret',
@@ -745,6 +749,9 @@ const templates = require('./lib/templates');
         labels: {
           'app.kubernetes.io/managed-by': 'tenant-controller',
           'tenant.nightscout.org/account-id': accountId
+          // TODO: also use tenant/WEB_NAME
+          // TODO: use a label passed from environment to allow runtime
+          // environment to tailor things.
         }
       },
       stringData: {
@@ -776,8 +783,11 @@ const templates = require('./lib/templates');
         name: req.body.name,
         labels: {
           'tenant.nightscout.org/account-id': account
-          // TODO: use a label pass from environment to allow runtime
-          // environment to tailor things.
+          // TODO: also tenant/WEB_NAME label comes from req.body.internal_name
+          //   this value should match /accounts/:account/sites/:name (req.params.name) when the handler is re-used.
+          // TODO: use a label passed from environment to allow runtime
+          //   environment to tailor things.  include role, component, app or
+          //   other relevant annotations for our project
         }
       },
       spec: {
@@ -830,7 +840,7 @@ const templates = require('./lib/templates');
       },
       spec: {
         webName: req.params.name,
-        storageSize: req.body.storageSize || '1Gi'
+        storageSize: req.body.storageSize || '3Gi'
       }
     };
 
