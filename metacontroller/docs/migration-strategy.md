@@ -2,10 +2,10 @@
 # Migration Strategy and Implementation Status
 
 ## Current Architecture
-- Each tenant has a deployment named `{webName}` in `hosted-tenants` namespace
-- ConfigMaps tagged with `config-as-deploy` trigger updates
-- Dispatcher watches ConfigMap changes and notifies controller
-- MetaController decorator pattern manages resource updates
+- NightscoutInstance CRD manages tenant lifecycle
+- TenantMigration CRD handles data migration between instances
+- MetaController decorator pattern observes migration annotations
+- Phase-based migration workflow with status tracking
 
 ## Migration Implementation Status
 
@@ -28,12 +28,15 @@
 ### Code Completeness Checklist
 - [x] CRD Definitions (TenantMigration, NightscoutInstance)
 - [x] Controller YAML configurations
-- [x] Basic webhook handlers
+- [x] Phase-based webhook handlers
 - [x] Template generation
+- [x] Migration job management
+- [ ] Comprehensive status conditions
 - [ ] Rollback mechanisms
 - [ ] Progress tracking
 - [ ] Data validation
 - [ ] Cross-namespace permissions
+- [ ] Health check implementation
 
 ## Operational Guidelines
 
