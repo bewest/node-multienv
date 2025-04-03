@@ -915,10 +915,23 @@ const templates = require('./lib/templates');
 if(!module.parent) {
   var port = parseInt(process.env.PORT || '2828')
   var k8s_local = process.env.MULTIENV_K8S_AUTH == 'local';
-  var MULTIENV_MANAGED_BY = process.env.MULTIENV_MANAGED_BY || 'multienv/k8s-deployment-controller';
-  var MULTIENV_DEFAULT_COMPONENT_LABEL = process.env.MULTIENV_DEFAULT_COMPONENT_LABEL || 'config';
-  var MULTIENV_DEFAULT_CONFIG_ROLE = process.env.MULTIENV_DEFAULT_CONFIG_ROLE || 'config-as-deploy';
-  var MULTIENV_DEFAULT_APP_LABEL = (process.env.MULTIENV_DEFAULT_APP_LABEL || 'tenant');
+  
+  // Centralized webhook configuration
+  const webhookConfig = {
+    labels: {
+      appLabel: process.env.TENANT_APP_LABEL || 'tenant',
+      componentLabel: process.env.TENANT_COMPONENT_LABEL || 'app',
+      tenantIdLabel: process.env.TENANT_ID_LABEL || 'tenant-id',
+      migrationBatchLabel: process.env.MIGRATION_BATCH_LABEL || 'batch',
+      watchSelector: process.env.WATCH_LABEL_SELECTOR || 'app=tenant'
+    },
+    managed: {
+      by: process.env.MULTIENV_MANAGED_BY || 'multienv/k8s-deployment-controller',
+      component: process.env.MULTIENV_DEFAULT_COMPONENT_LABEL || 'config',
+      configRole: process.env.MULTIENV_DEFAULT_CONFIG_ROLE || 'config-as-deploy',
+      appLabel: process.env.MULTIENV_DEFAULT_APP_LABEL || 'tenant'
+    }
+  };
   var CONSUL = process.env.CONSUL || 'http://consul.service.consul';
   var config = {
     MULTIENV_K8S_NAMESPACE: process.env.MULTIENV_K8S_NAMESPACE || 'default',
