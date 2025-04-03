@@ -72,9 +72,6 @@ metadata:
    ```
 
 3. **Development/Testing Setup**
-   - Use `WEBHOOK_ENV=development` for testing
-   - Set `MIGRATION_BATCH_SIZE` for controlled migrations
-   - Enable `DEBUG_LOGGING` for verbose output
 
 ### Best Practices
 1. **Resource Management**
