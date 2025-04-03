@@ -732,6 +732,10 @@ const templates = require('./lib/templates');
     const accountId = objectId();
     const secretName = `${accountId}-secret`;
     
+    // TODO: we need to apply labels below that can be passed through from
+    // environment variable
+    // todo role: MULTIENV_DEFAULT_SECRET_ROLE (mongodb)
+    // 
     // Create K8s secret with MongoDB credentials
     const secret = {
       apiVersion: 'v1',
@@ -746,6 +750,7 @@ const templates = require('./lib/templates');
       stringData: {
         MONGODB_INITDB_ROOT_USERNAME: `user_${accountId}`,
         MONGODB_INITDB_ROOT_PASSWORD: objectId() 
+        // TODO: MONGODB_URL: <formatted_mongo_url>
       }
     };
 
@@ -771,11 +776,13 @@ const templates = require('./lib/templates');
         name: req.body.name,
         labels: {
           'tenant.nightscout.org/account-id': account
+          // TODO: use a label pass from environment to allow runtime
+          // environment to tailor things.
         }
       },
       spec: {
         parameters: {
-          account: account,
+          storeageAccount: account,
           WEB_NAME: req.body.name
         }
       }

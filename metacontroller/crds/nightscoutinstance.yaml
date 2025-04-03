@@ -23,6 +23,5 @@ spec:
               properties:
                 webName:
                   type: string
-                storageSize:
+                storageAccount:
                   type: string
-                  default: "2Gi"
