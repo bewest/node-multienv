@@ -4,6 +4,7 @@ var _ = require('lodash');
 var Consul = require('consul');
 var url = require('url');
 var dns = require('dns');
+var objectId = require('./lib/object-id');
 
 function configure (opts) {
 
@@ -585,7 +586,7 @@ const templates = require('./lib/templates');
   server.del('/deployments/:name', delete_deployment);
   server.get('/deployments', list_deployments, format_result);
 
-  const createMetacontrollerRoutes = require('./lib/routes/metacontroller');
+  const createMetacontrollerRoutes = require('./lib/webhook/tenant-webhook-handler');
   const createDeploymentRoutes = require('./lib/routes/deployments');
   const createConfigMapRoutes = require('./lib/routes/configmaps');
   const createHealthRoutes = require('./lib/routes/health');
@@ -609,7 +610,7 @@ const templates = require('./lib/templates');
   // server.get('/configmaps', configMapRoutes.listConfigMaps, format_result);
 
   // MetaController webhook endpoints
-  server.post('/metacontroller/sync', metacontrollerRoutes.handleSync);
+  server.post('/metacontroller/sync', metacontrollerRoutes);
   // server.post('/metacontroller/storage/sync', metacontrollerRoutes.handleStorageSync);
   // server.post('/metacontroller/migration/sync', metacontrollerRoutes.handleMigrationSync);
 
@@ -727,9 +728,7 @@ const templates = require('./lib/templates');
   server.post('/environs/:name/env/:field', suggest, suggest_config_map, create_or_update_configmap, select_data_field, format_result );
   server.del('/environs/:name', delete_configmap);
 
-  // Account and site provisioning endpoints
-  server.post('/accounts', function(req, res, next) {
-    const accountId = objectId();
+  function template_initial_storage_secret (accountId) {
     const secretName = `${accountId}-secret`;
     
     // TODO: we need to apply labels below that can be passed through from
@@ -748,10 +747,10 @@ const templates = require('./lib/templates');
         name: secretName,
         labels: {
           'app.kubernetes.io/managed-by': 'tenant-controller',
-          'tenant.nightscout.org/account-id': accountId
+          'storage.nightscout.org/account': accountId
           // TODO: also use tenant/WEB_NAME
           // TODO: use a label passed from environment to allow runtime
-          // environment to tailor things.
+          // environment to tailor things.  include role and component labels
         }
       },
       stringData: {
@@ -760,29 +759,43 @@ const templates = require('./lib/templates');
         // TODO: MONGODB_URL: <formatted_mongo_url>
       }
     };
+    return secret;
+  }
 
+  function handle_new_provisioner_account_webhook (req, res, next) {
+    const accountId = req.params.account || objectId();
+    var secret = template_initial_storage_secret(accountId);
     k8s.createNamespacedSecret(selected_namespace, secret)
-      .then(() => {
+      .then((result) => {
+        console.log("NEW PROVISIONER ACCOUNT RESULT SECRET", result);
         res.json({
           account: accountId,
-          name: req.body.name || accountId
+          resource: result.body
+          // name: req.body.name || accountId
         });
         next();
       })
       .catch(next);
-  });
+  }
 
-  server.post('/accounts/:account/sites', function(req, res, next) {
+  // Account and site provisioning endpoints
+  server.post('/accounts', handle_new_provisioner_account_webhook);
+  server.post('/accounts/:account', handle_new_provisioner_account_webhook);
+
+
+  function suggest_nightscout_instance_template (req, res, next) {
     const { account } = req.params;
-    
-    // Create NightscoutInstance CRD
     const instance = {
       apiVersion: 'nightscout.k8s/v1alpha1',
       kind: 'NightscoutInstance',
       metadata: {
-        name: req.body.name,
+        name: req.body.internal_name,
         labels: {
-          'tenant.nightscout.org/account-id': account
+          'storage.nightscout.org/account': account,
+          'tenant.nightscout.org/internal_name': req.body.internal_name,
+          'tenant.nightscout.org/WEB_NAME': req.body.internal_name
+          // role: MULTIENV_TENANT_INSTANCE_ROLE
+          // component: MULTIENV_TENANT_INSTANCE_COMPONENT
           // TODO: also tenant/WEB_NAME label comes from req.body.internal_name
           //   this value should match /accounts/:account/sites/:name (req.params.name) when the handler is re-used.
           // TODO: use a label passed from environment to allow runtime
@@ -793,11 +806,20 @@ const templates = require('./lib/templates');
       spec: {
         parameters: {
           storeageAccount: account,
-          WEB_NAME: req.body.name
+          WEB_NAME: req.body.internal_name
         }
       }
     };
 
+    // return instance;
+    res.suggestion = instance;
+    next( );
+  }
+
+  function create_nightscout_instance_resource (req, res, next) {
+    
+    // Create NightscoutInstance CRD
+    var instance = res.suggestion;
     k8s.createNamespacedCustomObject(
       'nightscout.k8s',
       'v1alpha1', 
@@ -814,7 +836,9 @@ const templates = require('./lib/templates');
       next();
     })
     .catch(next);
-  });
+  }
+
+  server.post('/accounts/:account/sites', suggest_nightscout_instance_template, create_nightscout_instance_resource, create_nightscout_instance_resource);
 
   // NightscoutInstance CRD endpoints
   function fetch_nightscout_instance(req, res, next) {
