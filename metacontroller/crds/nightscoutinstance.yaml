@@ -20,6 +20,27 @@ spec:
         openAPIV3Schema:
           type: object
           properties:
+            status:
+              type: object
+              properties:
+                observedGeneration:
+                  type: integer
+                phase:
+                  type: string
+                conditions:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      type:
+                        type: string
+                      status:
+                        type: string
+                      reason:
+                        type: string
+                      message:
+                        type: string
+                  
             spec:
               type: object
               properties:
