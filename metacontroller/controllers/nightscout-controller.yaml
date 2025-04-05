@@ -15,7 +15,7 @@ spec:
   parentResource:
     apiVersion: nightscout.k8s/v1alpha1
     resource: nightscoutinstances
-    scope: Namespaced
+    # scope: Namespaced
   childResources:
     - apiVersion: apps/v1
       resource: statefulsets
@@ -27,26 +27,12 @@ spec:
       resource: persistentvolumeclaims
     - apiVersion: v1
       resource: secrets
+    - apiVersion: v1
+      resource: configmaps 
   hooks:
     sync:
       webhook:
-        url: http://deployment-controller:3000/metacontroller/sync
-  customize:
-    webhook:
-      url: http://deployment-controller:3000/metacontroller/customize
-    resources:
-      - apiVersion: v1
-        kind: Secret
-        labelSelector:
-          matchLabels:
-            app: tenant
-      - apiVersion: v1
-        kind: ConfigMap
-        labelSelector:
-          matchLabels:
-            app: tenant
-      - apiVersion: apps/v1
-        kind: StatefulSet
-        labelSelector:
-          matchLabels:
-            app: tenant
+        url: http://multienv-deployment-controller:3000/metacontroller/sync
+    customize:
+      webhook:
+        url: http://multienv-deployment-controller:3000/metacontroller/customize

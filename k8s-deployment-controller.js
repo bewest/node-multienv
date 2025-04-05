@@ -587,6 +587,7 @@ const templates = require('./lib/templates');
   server.get('/deployments', list_deployments, format_result);
 
   const createMetacontrollerRoutes = require('./lib/webhook/tenant-webhook-handler');
+  const customizeRoute = require('./lib/routes/metacontroller/customize');
   const createDeploymentRoutes = require('./lib/routes/deployments');
   const createConfigMapRoutes = require('./lib/routes/configmaps');
   const createHealthRoutes = require('./lib/routes/health');
@@ -596,7 +597,7 @@ const templates = require('./lib/templates');
   const deploymentRoutes = createDeploymentRoutes(k8s, selected_namespace, opts);
   const configMapRoutes = createConfigMapRoutes(k8s, selected_namespace, opts);
   const healthRoutes = createHealthRoutes(k8s, selected_namespace);
-  const instanceRoutes = createInstanceRoutes(k8s, selected_namespace);
+  const instanceRoutes = createInstanceRoutes(opts.kc, selected_namespace);
 
   // Deployment routes
   // server.get('/deployments/:name', deploymentRoutes.fetchDeployment, format_result);
@@ -611,6 +612,7 @@ const templates = require('./lib/templates');
 
   // MetaController webhook endpoints
   server.post('/metacontroller/sync', metacontrollerRoutes);
+  server.post('/metacontroller/customize', customizeRoute);
   // server.post('/metacontroller/storage/sync', metacontrollerRoutes.handleStorageSync);
   // server.post('/metacontroller/migration/sync', metacontrollerRoutes.handleMigrationSync);
 
@@ -783,154 +785,13 @@ const templates = require('./lib/templates');
   server.post('/accounts/:account', handle_new_provisioner_account_webhook);
 
 
-  function suggest_nightscout_instance_template (req, res, next) {
-    const { account } = req.params;
-    const instance = {
-      apiVersion: 'nightscout.k8s/v1alpha1',
-      kind: 'NightscoutInstance',
-      metadata: {
-        name: req.body.internal_name,
-        labels: {
-          'storage.nightscout.org/account': account,
-          'tenant.nightscout.org/internal_name': req.body.internal_name,
-          'tenant.nightscout.org/WEB_NAME': req.body.internal_name
-          // role: MULTIENV_TENANT_INSTANCE_ROLE
-          // component: MULTIENV_TENANT_INSTANCE_COMPONENT
-          // TODO: also tenant/WEB_NAME label comes from req.body.internal_name
-          //   this value should match /accounts/:account/sites/:name (req.params.name) when the handler is re-used.
-          // TODO: use a label passed from environment to allow runtime
-          //   environment to tailor things.  include role, component, app or
-          //   other relevant annotations for our project
-        }
-      },
-      spec: {
-        parameters: {
-          storeageAccount: account,
-          WEB_NAME: req.body.internal_name
-        }
-      }
-    };
-
-    // return instance;
-    res.suggestion = instance;
-    next( );
-  }
-
-  function create_nightscout_instance_resource (req, res, next) {
-    
-    // Create NightscoutInstance CRD
-    var instance = res.suggestion;
-    k8s.createNamespacedCustomObject(
-      'nightscout.k8s',
-      'v1alpha1', 
-      selected_namespace,
-      'nightscoutinstances',
-      instance
-    )
-    .then(() => {
-      res.json({
-        id: objectId(),
-        name: req.body.name,
-        account: account
-      });
-      next();
-    })
-    .catch(next);
-  }
-
-  server.post('/accounts/:account/sites', suggest_nightscout_instance_template, create_nightscout_instance_resource, create_nightscout_instance_resource);
-
-  // NightscoutInstance CRD endpoints
-  function fetch_nightscout_instance(req, res, next) {
-    k8s.getNamespacedCustomObject(
-      'nightscout.k8s',
-      'v1alpha1',
-      selected_namespace,
-      'nightscoutinstances',
-      req.params.name
-    ).then(function(result) {
-      res.instance = result.body;
-      res.result = result.body;
-      next();
-    }).catch(next);
-  }
-
-  function create_or_update_nightscout_instance(req, res, next) {
-    const instance = {
-      apiVersion: 'nightscout.k8s/v1alpha1',
-      kind: 'NightscoutInstance',
-      metadata: {
-        name: req.params.name
-      },
-      spec: {
-        webName: req.params.name,
-        storageSize: req.body.storageSize || '3Gi'
-      }
-    };
-
-    k8s.getNamespacedCustomObject(
-      'nightscout.k8s',
-      'v1alpha1',
-      selected_namespace,
-      'nightscoutinstances',
-      req.params.name
-    ).then(function() {
-      return k8s.replaceNamespacedCustomObject(
-        'nightscout.k8s',
-        'v1alpha1',
-        selected_namespace,
-        'nightscoutinstances',
-        req.params.name,
-        instance
-      );
-    }).catch(function(error) {
-      if (error.statusCode === 404) {
-        return k8s.createNamespacedCustomObject(
-          'nightscout.k8s',
-          'v1alpha1',
-          selected_namespace,
-          'nightscoutinstances',
-          instance
-        );
-      }
-      throw error;
-    }).then(function(result) {
-      res.result = result.body;
-      next();
-    }).catch(next);
-  }
-
-  function delete_nightscout_instance(req, res, next) {
-    k8s.deleteNamespacedCustomObject(
-      'nightscout.k8s',
-      'v1alpha1',
-      selected_namespace,
-      'nightscoutinstances',
-      req.params.name
-    ).then(function() {
-      res.status(204);
-      res.end();
-      next();
-    }).catch(next);
-  }
-
-  function list_nightscout_instances(req, res, next) {
-    k8s.listNamespacedCustomObject(
-      'nightscout.k8s',
-      'v1alpha1',
-      selected_namespace,
-      'nightscoutinstances'
-    ).then(function(result) {
-      res.result = result.body;
-      next();
-    }).catch(next);
-  }
+  server.post('/accounts/:account/sites', instanceRoutes.suggest_template, instanceRoutes.create_resource);
 
   // New instances endpoints
-  server.get('/instances/:name', fetch_nightscout_instance, format_result);
-  server.post('/instances/:name', create_or_update_nightscout_instance, format_result);
-  server.del('/instances/:name', delete_nightscout_instance);
-  server.get('/instances', list_nightscout_instances, format_result);
+  server.get('/instances/:name', instanceRoutes.fetchInstance, format_result);
+  server.post('/instances/:name', instanceRoutes.createOrUpdateInstance, format_result);
+  server.del('/instances/:name', instanceRoutes.deleteInstance);
+  server.get('/instances', instanceRoutes.listInstances, format_result);
 
   server.get('/healthchecks/pod/:name/assigned/podIP/:ip', assigned_ip_name_health_check);
   return server;
@@ -983,6 +844,7 @@ if(!module.parent) {
   var boot = require('bootevent')( );
   boot.acquire(function k8s (ctx, next) {
     var my = this;
+    ctx.kc = require('./lib/k8s').get_kc({cluster: !k8s_local});
     ctx.k8s = require('./lib/k8s')({cluster: !k8s_local});
     ctx.appsApi = require('./lib/k8s').get_appsApi({cluster: !k8s_local});
     ctx.k8s.getAPIResources( ).then(function (res) {
@@ -1005,7 +867,7 @@ if(!module.parent) {
     });
   })
   .boot(function booted (ctx) {
-    var server = configure(_.extend(config, { k8s: ctx.k8s, appsApi: ctx.appsApi, consul: ctx.consul }));
+    var server = configure(_.extend(config, { kc: ctx.kc, k8s: ctx.k8s, appsApi: ctx.appsApi, consul: ctx.consul }));
     server.listen(port, function ( ) {
       console.log('listening', this.address( ));
     });

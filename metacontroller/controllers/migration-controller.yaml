@@ -15,4 +15,4 @@ spec:
   hooks:
     sync:
       webhook:
-        url: http://deployment-controller:3000/metacontroller/migration/sync
+        url: http://multienv-deployment-controller:3000/metacontroller/migration/sync
