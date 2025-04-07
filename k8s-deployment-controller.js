@@ -593,7 +593,7 @@ const templates = require('./lib/templates');
   const createHealthRoutes = require('./lib/routes/health');
   const createInstanceRoutes = require('./lib/routes/instances');
 
-  const metacontrollerRoutes = createMetacontrollerRoutes(k8s, selected_namespace);
+  const metacontrollerRoutes = createMetacontrollerRoutes(opts);
   const deploymentRoutes = createDeploymentRoutes(k8s, selected_namespace, opts);
   const configMapRoutes = createConfigMapRoutes(k8s, selected_namespace, opts);
   const healthRoutes = createHealthRoutes(k8s, selected_namespace);
@@ -819,6 +819,15 @@ if(!module.parent) {
       cpu: process.env.MULTIENV_TENANT_LIMITS_CPU || '500m',
       memory: process.env.MULTIENV_TENANT_LIMITS_MEMORY || '500Mi'
     }
+  , tenant: {
+    storage_init_job_image: process.env.MULTIENV_TENANT_STORAGE_INIT_JOB_IMAGE || 'multienv',
+    storage_init_job_command: process.env.MULTIENV_TENANT_STORAGE_INIT_JOB_COMMAND || 'initialize-tenant-storage',
+    storage_provisioner_image: process.env.MULTIENV_TENANT_STORAGE_PROVISIONER_IMAGE || 'provisioner',
+    storage_migration_job_image: process.env.MULTIENV_TENANT_STORAGE_MIGRATION_JOB_IMAGE || 'provisioner',
+    storage_migration_job_command: process.env.MULTIENV_TENANT_STORAGE_MIGRATION_JOB_COMMAND || 'initialize-tenant-storage',
+    tenant_app_image: process.env.MULTIENV_TENANT_APP_IMAGE || 'nightscout',
+    storage_image: process.env.MULTIENV_TENANT_STORAGE_IMAGE || 'mongo'
+  }
   , default: {
     deployment: {
       annotations: {
