@@ -15,6 +15,8 @@ spec:
       resource: tenantstorages
     - apiVersion: v1
       resource: persistentvolumeclaims
+    - apiVersion: snapshot.storage.k8s.io/v1
+      resource: volumesnapshots
   hooks:
     sync:
       webhook:
