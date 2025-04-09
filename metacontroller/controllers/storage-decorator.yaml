@@ -13,6 +13,8 @@ spec:
   attachments:
     - apiVersion: nightscout.k8s/v1alpha1
       resource: tenantstorages
+    - apiVersion: v1
+      resource: persistentvolumeclaims
   hooks:
     sync:
       webhook:
