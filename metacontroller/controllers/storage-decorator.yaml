@@ -1,0 +1,19 @@
+
+apiVersion: metacontroller.k8s.io/v1alpha1
+kind: DecoratorController
+metadata:
+  name: storage-decorator
+spec:
+  resources:
+    - apiVersion: v1
+      resource: secrets
+      labelSelector:
+        matchLabels:
+          "storage.nightscout.org/account": "*"
+  attachments:
+    - apiVersion: nightscout.k8s/v1alpha1
+      resource: tenantstorages
+  hooks:
+    sync:
+      webhook:
+        url: http://deployment-controller:3000/metacontroller/decorator/storage/sync
