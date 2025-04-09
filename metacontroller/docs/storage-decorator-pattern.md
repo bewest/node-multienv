@@ -10,6 +10,11 @@ The storage decorator pattern manages the lifecycle relationship between Secrets
 - PVCs should be the primary managed resource
 - Secrets act as configuration/credentials stores
 - Use finalizers to protect storage resources from accidental deletion
+- All managed resources must be declared in the controller spec
+- Undeclared resources created via hooks will not be lifecycle managed
+
+### Important Note
+Resources created by hooks but not declared in the controller's `attachments` or `childResources` sections will not be managed by the controller. They may still be monitored through the customize hook's related resources mechanism, but will not receive garbage collection or lifecycle management.
 
 ### 2. Decorator Controller Structure
 ```yaml

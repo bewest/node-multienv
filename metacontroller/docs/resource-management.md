@@ -22,6 +22,13 @@ childResources:
 - Better resource lifecycle management
 - Easier to track dependencies
 
+### Resource Declaration Rules
+- Resources must be explicitly declared in controller manifests to be managed
+- Resources created but not declared will not be garbage collected
+- Undeclared resources returned by customize hooks are treated as related resources
+- Related resources are monitored but not managed by the controller
+- To ensure proper lifecycle management, always declare resources in the controller spec
+
 ### Tradeoffs
 - Less direct control over pods
 - More complex initial setup
