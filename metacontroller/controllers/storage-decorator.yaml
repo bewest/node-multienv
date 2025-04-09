@@ -8,8 +8,9 @@ spec:
     - apiVersion: v1
       resource: secrets
       labelSelector:
-        matchLabels:
-          "storage.nightscout.org/account": "*"
+        matchExpressions:
+          - key: "storage.nightscout.org/account"
+            operator: "Exists"
   attachments:
     - apiVersion: v1
       resource: persistentvolumeclaims
