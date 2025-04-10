@@ -593,6 +593,7 @@ const templates = require('./lib/templates');
   const createHealthRoutes = require('./lib/routes/health');
   const createInstanceRoutes = require('./lib/routes/instances');
 
+  const storageDecorator = require('./lib/webhook/storage-decorator-handler.js')(opts);
   const metacontrollerRoutes = createMetacontrollerRoutes(opts);
   const deploymentRoutes = createDeploymentRoutes(k8s, selected_namespace, opts);
   const configMapRoutes = createConfigMapRoutes(k8s, selected_namespace, opts);
@@ -613,7 +614,8 @@ const templates = require('./lib/templates');
   // MetaController webhook endpoints
   server.post('/metacontroller/sync', metacontrollerRoutes);
   server.post('/metacontroller/customize', customizeRoute);
-  // server.post('/metacontroller/storage/sync', metacontrollerRoutes.handleStorageSync);
+  server.post('/metacontroller/storage/sync', storageDecorator.handle_webhook);
+  server.post('/metacontroller/storage/customize', storageDecorator.handle_customize);
   // server.post('/metacontroller/migration/sync', metacontrollerRoutes.handleMigrationSync);
 
   server.post('/sync/additions', suggest_deployment_template_params, suggest_deployment, handle_sync_addition, format_result);
