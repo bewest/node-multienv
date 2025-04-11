@@ -758,8 +758,8 @@ const templates = require('./lib/templates');
         }
       },
       stringData: {
-        MONGODB_INITDB_ROOT_USERNAME: `user_${accountId}`,
-        MONGODB_INITDB_ROOT_PASSWORD: objectId() 
+        MONGO_INITDB_ROOT_USERNAME: `user_${accountId}`,
+        MONGO_INITDB_ROOT_PASSWORD: objectId() 
         // TODO: MONGODB_URL: <formatted_mongo_url>
       }
     };
