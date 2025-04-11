@@ -14,10 +14,15 @@ spec:
   attachments:
     - apiVersion: v1
       resource: persistentvolumeclaims
+      updateStrategy:
+        method: OnDelete
   hooks:
     sync:
       webhook:
+        url: http://multienv-deployment-controller:3000/metacontroller/storage/sync
     customize:
       webhook:
-        url: http://deployment-controller:3000/metacontroller/decorator/storage/customize
-        url: http://deployment-controller:3000/metacontroller/decorator/storage/sync
+        url: http://multienv-deployment-controller:3000/metacontroller/storage/customize
+    finalize:
+      webhook:
+        url: http://multienv-deployment-controller:3000/metacontroller/storage/sync

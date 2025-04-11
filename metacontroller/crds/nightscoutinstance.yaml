@@ -19,7 +19,16 @@ spec:
       schema:
         openAPIV3Schema:
           type: object
+          required:
+          - spec
+          - metadata
           properties:
+            apiVersion:
+              type: string
+            kind:
+              type: string
+            metadata:
+              type: object
             status:
               type: object
               properties:
@@ -43,6 +52,9 @@ spec:
                   
             spec:
               type: object
+              required:
+              - webName
+              - storageAccount
               properties:
                 webName:
                   type: string

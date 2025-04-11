@@ -17,14 +17,14 @@ spec:
     resource: nightscoutinstances
     # scope: Namespaced
   childResources:
+    - apiVersion: batch/v1
+      resource: jobs
     - apiVersion: apps/v1
-      resource: statefulsets
+      resource: deployments
       updateStrategy:
         method: InPlace
     - apiVersion: v1
       resource: services
-    - apiVersion: v1
-      resource: persistentvolumeclaims
     - apiVersion: v1
       resource: secrets
     - apiVersion: v1
