@@ -161,6 +161,15 @@ var CONSUL_ENV = {
   function onConnect ( ) { }
   server.listen(port);
   server.on('listening', console.log.bind(console, 'port', port));
+
+  server.on('listening', function (connected) {
+    if (fs.existsSync(port)) {
+      fs.chmod(port, 0o775, function (err) {
+        console.log("SET GROUP PERMISSION ON SOCKET", port, err);
+      });
+    }
+  });
+
   process.on('SIGINT', () => {
     remove_socket(port);
     process.exit(0);
