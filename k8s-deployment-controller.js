@@ -418,7 +418,10 @@ function configure (opts) {
         res.header('Location', '/environs/' + body.metadata.name);
         res.result = result.body.data;
         next( );
-      }).catch(next);
+      }).catch(function (err) {
+        console.log('error replacing config map', err, body);
+        next(err);
+      });
     }).catch(function (err) {
       console.log('first time creating?', err);
       k8s.createNamespacedConfigMap(selected_namespace, req.configmap).then(function (result) {
