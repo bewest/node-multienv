@@ -3,6 +3,7 @@ var restify = require('restify');
 var url = require('url');
 var bunyan = require('bunyan');
 var dns = require('dns');
+var fs = require('fs');
 
 function createServer (opts) {
   var cluster = opts.cluster;
@@ -141,6 +142,12 @@ function createServer (opts) {
 
 exports = module.exports = createServer;
 
+function remove_socket (socketPath) {
+  if (fs.existsSync(socketPath)) {
+    fs.unlinkSync(socketPath);
+  }
+}
+
 if (!module.parent) {
 var CONSUL_ENV = {
     service: 'backends',
@@ -154,5 +161,22 @@ var CONSUL_ENV = {
   function onConnect ( ) { }
   server.listen(port);
   server.on('listening', console.log.bind(console, 'port', port));
+
+  server.on('listening', function (connected) {
+    if (fs.existsSync(port)) {
+      fs.chmod(port, 0o775, function (err) {
+        console.log("SET GROUP PERMISSION ON SOCKET", port, err);
+      });
+    }
+  });
+
+  process.on('SIGINT', () => {
+    remove_socket(port);
+    process.exit(0);
+  });
+  process.on('SIGTERM', () => {
+    remove_socket(port);
+    process.exit(0);
+  });
 
 }

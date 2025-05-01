@@ -418,7 +418,10 @@ function configure (opts) {
         res.header('Location', '/environs/' + body.metadata.name);
         res.result = result.body.data;
         next( );
-      }).catch(next);
+      }).catch(function (err) {
+        console.log('error replacing config map', err, body);
+        next(err);
+      });
     }).catch(function (err) {
       console.log('first time creating?', err);
       k8s.createNamespacedConfigMap(selected_namespace, req.configmap).then(function (result) {
@@ -628,6 +631,15 @@ function configure (opts) {
   server.del('/environs/:name', delete_configmap);
 
   server.get('/healthchecks/pod/:name/assigned/podIP/:ip', assigned_ip_name_health_check);
+  server.get('/healthchecks/controller/self/:instance', function (req, res, next) {
+    var ok = (req.params.instance == MULTIENV_SELF_ADDRESS);
+    res.json(ok ? 200 : 500, { ok, status:  ok ? 'OK' : "bad", host: MULTIENV_SELF_ADDRESS });
+    next( );
+  });
+  server.get('/about/server/status', function (req, res, next) {
+    res.json({ ok: true, status: 'OK', host: MULTIENV_SELF_ADDRESS });
+    next( );
+  });
   return server;
 }
 
@@ -638,13 +650,15 @@ if (!module.parent) {
   var MULTIENV_DEFAULT_COMPONENT_LABEL = process.env.MULTIENV_DEFAULT_COMPONENT_LABEL || 'config';
   var MULTIENV_DEFAULT_CONFIG_ROLE = process.env.MULTIENV_DEFAULT_CONFIG_ROLE || 'config-as-deploy';
   var MULTIENV_DEFAULT_APP_LABEL = (process.env.MULTIENV_DEFAULT_APP_LABEL || 'tenant');
+  var MULTIENV_SELF_REGISTRATION_NAME = (process.env.MULTIENV_SELF_REGISTRATION_NAME || 'multienv-deployment-controller');
+  var MULTIENV_SELF_ADDRESS = (process.env.POD_IP || process.env.HOSTNAME);
   var CONSUL = process.env.CONSUL || 'http://consul.service.consul';
   var config = {
     MULTIENV_K8S_NAMESPACE: process.env.MULTIENV_K8S_NAMESPACE || 'default',
     MULTIENV_TENANT_NODEPOOL_TARGET: process.env.MULTIENV_TENANT_NODEPOOL_TARGET || 'bigger-tenant-runners',
     MULTIENV_TENANT_REQUESTS_ENABLE: (process.env.MULTIENV_TENANT_REQUESTS_ENABLE ||'1') != 'false',
     MULTIENV_TENANT_LIMITS_ENABLE: (process.env.MULTIENV_TENANT_LIMITS_ENABLE ||'1') != 'false',
-    MULTIENV_HEALTH_CHECK_SERVICE: (process.env.MULTIENV_HEALTH_CHECK_SERVICE || 'http://multienv-deployment-controller:3000'),
+    MULTIENV_HEALTH_CHECK_SERVICE: (process.env.MULTIENV_HEALTH_CHECK_SERVICE || 'http://multienv-deployment-controller.service.consul:3000'),
     requests: {
       cpu: process.env.MULTIENV_TENANT_REQUESTS_CPU || '5m',
       memory: process.env.MULTIENV_TENANT_REQUESTS_MEMORY || '120Mi'
@@ -695,8 +709,27 @@ if (!module.parent) {
         console.log("COULD NOT CONNECT TO CONSUL", err);
         process.exit(1);
       }
-      console.log("CONNECTED TO CONSUL", body);
-      next( );
+      var healthCheckService = url.parse(config.MULTIENV_HEALTH_CHECK_SERVICE);
+      var host = MULTIENV_SELF_ADDRESS;
+      var port = healthCheckService.port;
+      var self_service = {
+        name: MULTIENV_SELF_REGISTRATION_NAME,
+        address: host,
+        port: parseInt(port),
+        tags: [ 'healthchecks', 'multienv', 'multienv-deployment-controller' ],
+        checks: [ {
+          name: "HealthCheckServerOk",
+          ttl: '30s',
+          interval: '10s',
+          http: url.format({protocol: 'http', hostname: host, port: port,  pathname: '/about/server/status'}),
+          deregister_critical_service_after: '20s'
+        } ]
+      };
+      console.log("CONNECTED TO CONSUL, REGISTERING SELF", body, self_service);
+      ctx.consul.agent.service.register(self_service, function (err, body, response) {
+        console.log("REGISTERED", self_service.name, err, body);
+        next( );
+      });
     });
   })
   .boot(function booted (ctx) {
