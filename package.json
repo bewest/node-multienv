@@ -6,6 +6,7 @@
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
     "start": "node master.js",
+    "webhook": "node cmd/webhook/server.js",
     "postinstall": "env"
   },
   "author": "Ben West <bewest@gmail.com>",
@@ -20,9 +21,11 @@
     "consul": "^0.34.1",
     "debounce": "^1.0.0",
     "dotenv": "github:motdotla/dotenv#838e89e",
+    "express": "^4.21.2",
     "glob": "^7.2.0",
     "got": "^11.5.2",
     "hashids": "^1.2.2",
+    "lodash": "^4.17.21",
     "mv": "^2.1.1",
     "ndjson": "^2.0.0",
     "parallel-transform": "^1.2.0",

@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: tenant-demo-config
+  namespace: default
+  labels:
+    ns.mdn.io/enabled: "true"
+data:
+  TENANT_ID: "demo"
+  NS_IMAGE: "nightscout/cgm-remote-monitor:latest"
+  MONGO_STORAGE_GI: "10"
+  MONGO_SC: "standard"
+  CDC_ENABLED: "true"
+  CDC_COLLECTIONS: "entries,treatments"
+  CDC_PARTITIONS_ENTRIES: "3"
+  CDC_PARTITIONS_TREATMENTS: "1"
+  CDC_RETENTION_MS: "604800000"

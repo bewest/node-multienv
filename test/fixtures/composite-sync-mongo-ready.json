@@ -1,0 +1,53 @@
+{
+  "controller": {
+    "metadata": {
+      "name": "nightscout-tenant-controller"
+    }
+  },
+  "parent": {
+    "apiVersion": "v1",
+    "kind": "ConfigMap",
+    "metadata": {
+      "name": "tenant-demo-config",
+      "namespace": "default",
+      "labels": {
+        "ns.mdn.io/enabled": "true"
+      }
+    },
+    "data": {
+      "TENANT_ID": "demo",
+      "NS_IMAGE": "nightscout/cgm-remote-monitor:latest",
+      "MONGO_STORAGE_GI": "10",
+      "MONGO_SC": "standard",
+      "CDC_ENABLED": "true",
+      "CDC_COLLECTIONS": "entries,treatments",
+      "CDC_PARTITIONS_ENTRIES": "3",
+      "CDC_PARTITIONS_TREATMENTS": "1",
+      "CDC_RETENTION_MS": "604800000"
+    }
+  },
+  "children": {
+    "Secret.v1": {},
+    "Service.v1": {},
+    "StatefulSet.apps/v1": {
+      "ns-mongo": {
+        "apiVersion": "apps/v1",
+        "kind": "StatefulSet",
+        "metadata": {
+          "name": "ns-mongo",
+          "namespace": "default"
+        },
+        "status": {
+          "replicas": 1,
+          "readyReplicas": 1,
+          "currentReplicas": 1,
+          "updatedReplicas": 1
+        }
+      }
+    },
+    "Deployment.apps/v1": {},
+    "PodDisruptionBudget.policy/v1": {},
+    "KafkaTopic.kafka.strimzi.io/v1beta2": {},
+    "KafkaConnector.kafka.strimzi.io/v1beta2": {}
+  }
+}

@@ -1,0 +1,25 @@
+apiVersion: metacontroller.k8s.io/v1alpha1
+kind: DecoratorController
+metadata:
+  name: pvc-backup-decorator
+spec:
+  resources:
+    - apiVersion: v1
+      resource: persistentvolumeclaims
+      labelSelector:
+        matchLabels:
+          app.kubernetes.io/name: ns-mongo
+          app.kubernetes.io/part-of: nightscout-tenant
+  attachments:
+    - apiVersion: snapshot.storage.k8s.io/v1
+      resource: volumesnapshots
+  hooks:
+    sync:
+      webhook:
+        url: http://webhook-service.default.svc.cluster.local:3000/decorator/sync
+        timeout: 30s
+    finalize:
+      webhook:
+        url: http://webhook-service.default.svc.cluster.local:3000/decorator/finalize
+        timeout: 30s
+  resyncPeriodSeconds: 30
