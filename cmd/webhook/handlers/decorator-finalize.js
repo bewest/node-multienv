@@ -39,6 +39,13 @@ async function decoratorFinalize(req, res) {
     if (!snapshotReady) {
       console.log(`Creating VolumeSnapshot ${snapshotName} for PVC ${pvcName}`);
       
+      // Get snapshot class from PVC annotation or use default
+      const snapshotClass = object.metadata?.annotations?.['ns.mdn.io/backup-snapshot-class'] || 'csi-snapclass';
+      
+      // Get metadata from PVC labels
+      const tenantId = object.metadata?.labels?.['ns.mdn.io/tenant'] || 'unknown';
+      const version = object.metadata?.labels?.['app.kubernetes.io/version'] || 'unknown';
+      
       const volumeSnapshot = {
         apiVersion: 'snapshot.storage.k8s.io/v1',
         kind: 'VolumeSnapshot',
@@ -46,12 +53,18 @@ async function decoratorFinalize(req, res) {
           name: snapshotName,
           namespace: namespace,
           labels: {
+            'app.kubernetes.io/name': 'volume-snapshot',
+            'app.kubernetes.io/component': 'backup',
             'app.kubernetes.io/part-of': 'nightscout-tenant',
+            'app.kubernetes.io/instance': tenantId,
+            'app.kubernetes.io/version': version,
+            'app.kubernetes.io/managed-by': 'metacontroller',
+            'ns.mdn.io/tenant': tenantId,
             'ns.mdn.io/backup-type': 'final'
           }
         },
         spec: {
-          volumeSnapshotClassName: 'csi-snapclass',
+          volumeSnapshotClassName: snapshotClass,
           source: {
             persistentVolumeClaimName: pvcName
           }

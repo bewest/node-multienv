@@ -7,9 +7,15 @@ spec:
     - apiVersion: v1
       resource: persistentvolumeclaims
       labelSelector:
-        matchLabels:
-          app.kubernetes.io/name: ns-mongo
-          app.kubernetes.io/part-of: nightscout-tenant
+        matchExpressions:
+          - key: app.kubernetes.io/name
+            operator: In
+            values: ["mongodb"]
+          - key: app.kubernetes.io/part-of
+            operator: In
+            values: ["nightscout-tenant"]
+          - key: ns.mdn.io/tenant
+            operator: Exists
   attachments:
     - apiVersion: snapshot.storage.k8s.io/v1
       resource: volumesnapshots

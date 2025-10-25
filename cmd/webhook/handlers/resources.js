@@ -1,22 +1,55 @@
 function renderMongoDB(parent) {
   const tenantId = parent.data.TENANT_ID;
   const namespace = parent.metadata.namespace;
+  
+  // Storage configuration
   const storageGi = parent.data.MONGO_STORAGE_GI || '10';
   const storageClass = parent.data.MONGO_SC || 'standard';
+  
+  // MongoDB configuration
+  const mongoImage = parent.data.MONGO_IMAGE || 'mongo:6';
+  const mongoReplicas = parseInt(parent.data.MONGO_REPLICAS || '1');
+  
+  // Extract version from image
+  const mongoVersion = mongoImage.split(':')[1] || 'latest';
+  
+  // Resource limits
+  const mongoCpuRequest = parent.data.MONGO_CPU_REQUEST || '100m';
+  const mongoCpuLimit = parent.data.MONGO_CPU_LIMIT || '500m';
+  const mongoMemRequest = parent.data.MONGO_MEM_REQUEST || '256Mi';
+  const mongoMemLimit = parent.data.MONGO_MEM_LIMIT || '512Mi';
+  
+  // PDB configuration
+  const mongoPdbMinAvailable = parseInt(parent.data.MONGO_PDB_MIN_AVAILABLE || '1');
+  
+  // Resource names with tenant prefix
+  const secretName = `${tenantId}-mongo-auth`;
+  const serviceName = `${tenantId}-mongo`;
+  const statefulSetName = `${tenantId}-mongo`;
+  const pdbName = `${tenantId}-mongo-pdb`;
+  const pod0Hostname = `${tenantId}-mongo-0.${tenantId}-mongo`;
 
   const resources = [];
+
+  // Helper function for standard labels
+  const standardLabels = (component, additionalLabels = {}) => ({
+    'app.kubernetes.io/name': 'mongodb',
+    'app.kubernetes.io/component': component,
+    'app.kubernetes.io/part-of': 'nightscout-tenant',
+    'app.kubernetes.io/instance': tenantId,
+    'app.kubernetes.io/version': mongoVersion,
+    'app.kubernetes.io/managed-by': 'metacontroller',
+    'ns.mdn.io/tenant': tenantId,
+    ...additionalLabels
+  });
 
   const secret = {
     apiVersion: 'v1',
     kind: 'Secret',
     metadata: {
-      name: 'ns-mongo-auth',
+      name: secretName,
       namespace: namespace,
-      labels: {
-        'app.kubernetes.io/name': 'ns-mongo',
-        'app.kubernetes.io/part-of': 'nightscout-tenant',
-        'ns.mdn.io/tenant': tenantId
-      }
+      labels: standardLabels('database')
     },
     type: 'Opaque',
     stringData: {
@@ -30,18 +63,15 @@ function renderMongoDB(parent) {
     apiVersion: 'v1',
     kind: 'Service',
     metadata: {
-      name: 'ns-mongo',
+      name: serviceName,
       namespace: namespace,
-      labels: {
-        'app.kubernetes.io/name': 'ns-mongo',
-        'app.kubernetes.io/part-of': 'nightscout-tenant',
-        'ns.mdn.io/tenant': tenantId
-      }
+      labels: standardLabels('database')
     },
     spec: {
       clusterIP: 'None',
       selector: {
-        'app.kubernetes.io/name': 'ns-mongo'
+        'app.kubernetes.io/name': 'mongodb',
+        'app.kubernetes.io/instance': tenantId
       },
       ports: [
         {
@@ -57,46 +87,39 @@ function renderMongoDB(parent) {
     apiVersion: 'apps/v1',
     kind: 'StatefulSet',
     metadata: {
-      name: 'ns-mongo',
+      name: statefulSetName,
       namespace: namespace,
-      labels: {
-        'app.kubernetes.io/name': 'ns-mongo',
-        'app.kubernetes.io/part-of': 'nightscout-tenant',
-        'ns.mdn.io/tenant': tenantId
-      }
+      labels: standardLabels('database')
     },
     spec: {
-      serviceName: 'ns-mongo',
-      replicas: 1,
+      serviceName: serviceName,
+      replicas: mongoReplicas,
       selector: {
         matchLabels: {
-          'app.kubernetes.io/name': 'ns-mongo'
+          'app.kubernetes.io/name': 'mongodb',
+          'app.kubernetes.io/instance': tenantId
         }
       },
       template: {
         metadata: {
-          labels: {
-            'app.kubernetes.io/name': 'ns-mongo',
-            'app.kubernetes.io/part-of': 'nightscout-tenant',
-            'ns.mdn.io/tenant': tenantId
-          }
+          labels: standardLabels('database')
         },
         spec: {
           initContainers: [
             {
               name: 'init-replica-set',
-              image: 'mongo:6',
+              image: mongoImage,
               command: ['/bin/bash', '-c'],
               args: [
-                `until mongosh --host ns-mongo-0.ns-mongo --eval "rs.status()" > /dev/null 2>&1; do
+                `until mongosh --host ${pod0Hostname} --eval "rs.status()" > /dev/null 2>&1; do
                   echo "Waiting for MongoDB to start...";
                   sleep 2;
                 done;
-                mongosh --host ns-mongo-0.ns-mongo --eval "
+                mongosh --host ${pod0Hostname} --eval "
                   try {
                     rs.initiate({
                       _id: 'rs0',
-                      members: [{ _id: 0, host: 'ns-mongo-0.ns-mongo:27017' }]
+                      members: [{ _id: 0, host: '${pod0Hostname}:27017' }]
                     });
                   } catch(e) {
                     print('RS already initialized or error:', e);
@@ -108,7 +131,7 @@ function renderMongoDB(parent) {
           containers: [
             {
               name: 'mongodb',
-              image: 'mongo:6',
+              image: mongoImage,
               command: ['mongod', '--replSet', 'rs0', '--bind_ip_all'],
               ports: [
                 {
@@ -121,7 +144,7 @@ function renderMongoDB(parent) {
                   name: 'MONGO_INITDB_ROOT_USERNAME',
                   valueFrom: {
                     secretKeyRef: {
-                      name: 'ns-mongo-auth',
+                      name: secretName,
                       key: 'username'
                     }
                   }
@@ -130,7 +153,7 @@ function renderMongoDB(parent) {
                   name: 'MONGO_INITDB_ROOT_PASSWORD',
                   valueFrom: {
                     secretKeyRef: {
-                      name: 'ns-mongo-auth',
+                      name: secretName,
                       key: 'password'
                     }
                   }
@@ -139,7 +162,7 @@ function renderMongoDB(parent) {
                   name: 'MONGO_INITDB_DATABASE',
                   valueFrom: {
                     secretKeyRef: {
-                      name: 'ns-mongo-auth',
+                      name: secretName,
                       key: 'database'
                     }
                   }
@@ -153,12 +176,12 @@ function renderMongoDB(parent) {
               ],
               resources: {
                 requests: {
-                  cpu: '100m',
-                  memory: '256Mi'
+                  cpu: mongoCpuRequest,
+                  memory: mongoMemRequest
                 },
                 limits: {
-                  cpu: '500m',
-                  memory: '512Mi'
+                  cpu: mongoCpuLimit,
+                  memory: mongoMemLimit
                 }
               }
             }
@@ -169,11 +192,7 @@ function renderMongoDB(parent) {
         {
           metadata: {
             name: 'data',
-            labels: {
-              'app.kubernetes.io/name': 'ns-mongo',
-              'app.kubernetes.io/part-of': 'nightscout-tenant',
-              'ns.mdn.io/tenant': tenantId
-            }
+            labels: standardLabels('database')
           },
           spec: {
             accessModes: ['ReadWriteOnce'],
@@ -193,18 +212,16 @@ function renderMongoDB(parent) {
     apiVersion: 'policy/v1',
     kind: 'PodDisruptionBudget',
     metadata: {
-      name: 'ns-mongo-pdb',
+      name: pdbName,
       namespace: namespace,
-      labels: {
-        'app.kubernetes.io/name': 'ns-mongo',
-        'ns.mdn.io/tenant': tenantId
-      }
+      labels: standardLabels('database')
     },
     spec: {
-      minAvailable: 1,
+      minAvailable: mongoPdbMinAvailable,
       selector: {
         matchLabels: {
-          'app.kubernetes.io/name': 'ns-mongo'
+          'app.kubernetes.io/name': 'mongodb',
+          'app.kubernetes.io/instance': tenantId
         }
       }
     }
@@ -217,35 +234,64 @@ function renderMongoDB(parent) {
 function renderNightscout(parent) {
   const tenantId = parent.data.TENANT_ID;
   const namespace = parent.metadata.namespace;
+  
+  // Nightscout configuration
   const nsImage = parent.data.NS_IMAGE || 'nightscout/cgm-remote-monitor:latest';
+  const nsReplicas = parseInt(parent.data.NS_REPLICAS || '1');
+  const nsServiceType = parent.data.NS_SERVICE_TYPE || 'ClusterIP';
+  
+  // Resource limits
+  const nsCpuRequest = parent.data.NS_CPU_REQUEST || '100m';
+  const nsCpuLimit = parent.data.NS_CPU_LIMIT || '500m';
+  const nsMemRequest = parent.data.NS_MEM_REQUEST || '256Mi';
+  const nsMemLimit = parent.data.NS_MEM_LIMIT || '512Mi';
+  
+  // PDB configuration
+  const nsPdbMinAvailable = parseInt(parent.data.NS_PDB_MIN_AVAILABLE || '1');
+  
+  // Extract version from image
+  const nsVersion = nsImage.split(':')[1] || 'latest';
+  
+  // Resource names with tenant prefix
+  const deploymentName = `${tenantId}-nightscout`;
+  const serviceName = `${tenantId}-nightscout`;
+  const pdbName = `${tenantId}-nightscout-pdb`;
+  const secretName = `${tenantId}-mongo-auth`;
+  const mongoHost = `${tenantId}-mongo-0.${tenantId}-mongo`;
 
   const resources = [];
+
+  // Helper function for standard labels
+  const standardLabels = (component, additionalLabels = {}) => ({
+    'app.kubernetes.io/name': 'nightscout',
+    'app.kubernetes.io/component': component,
+    'app.kubernetes.io/part-of': 'nightscout-tenant',
+    'app.kubernetes.io/instance': tenantId,
+    'app.kubernetes.io/version': nsVersion,
+    'app.kubernetes.io/managed-by': 'metacontroller',
+    'ns.mdn.io/tenant': tenantId,
+    ...additionalLabels
+  });
 
   const deployment = {
     apiVersion: 'apps/v1',
     kind: 'Deployment',
     metadata: {
-      name: 'nightscout',
+      name: deploymentName,
       namespace: namespace,
-      labels: {
-        'app.kubernetes.io/name': 'nightscout',
-        'app.kubernetes.io/part-of': 'nightscout-tenant',
-        'ns.mdn.io/tenant': tenantId
-      }
+      labels: standardLabels('application')
     },
     spec: {
-      replicas: 1,
+      replicas: nsReplicas,
       selector: {
         matchLabels: {
-          'app.kubernetes.io/name': 'nightscout'
+          'app.kubernetes.io/name': 'nightscout',
+          'app.kubernetes.io/instance': tenantId
         }
       },
       template: {
         metadata: {
-          labels: {
-            'app.kubernetes.io/name': 'nightscout',
-            'ns.mdn.io/tenant': tenantId
-          }
+          labels: standardLabels('application')
         },
         spec: {
           containers: [
@@ -261,13 +307,13 @@ function renderNightscout(parent) {
               env: [
                 {
                   name: 'MONGO_CONNECTION',
-                  value: 'mongodb://$(MONGO_USER):$(MONGO_PASS)@ns-mongo-0.ns-mongo:27017/$(MONGO_DB)?replicaSet=rs0'
+                  value: `mongodb://$(MONGO_USER):$(MONGO_PASS)@${mongoHost}:27017/$(MONGO_DB)?replicaSet=rs0`
                 },
                 {
                   name: 'MONGO_USER',
                   valueFrom: {
                     secretKeyRef: {
-                      name: 'ns-mongo-auth',
+                      name: secretName,
                       key: 'username'
                     }
                   }
@@ -276,7 +322,7 @@ function renderNightscout(parent) {
                   name: 'MONGO_PASS',
                   valueFrom: {
                     secretKeyRef: {
-                      name: 'ns-mongo-auth',
+                      name: secretName,
                       key: 'password'
                     }
                   }
@@ -285,7 +331,7 @@ function renderNightscout(parent) {
                   name: 'MONGO_DB',
                   valueFrom: {
                     secretKeyRef: {
-                      name: 'ns-mongo-auth',
+                      name: secretName,
                       key: 'database'
                     }
                   }
@@ -293,12 +339,12 @@ function renderNightscout(parent) {
               ],
               resources: {
                 requests: {
-                  cpu: '100m',
-                  memory: '256Mi'
+                  cpu: nsCpuRequest,
+                  memory: nsMemRequest
                 },
                 limits: {
-                  cpu: '500m',
-                  memory: '512Mi'
+                  cpu: nsCpuLimit,
+                  memory: nsMemLimit
                 }
               }
             }
@@ -312,17 +358,15 @@ function renderNightscout(parent) {
     apiVersion: 'v1',
     kind: 'Service',
     metadata: {
-      name: 'nightscout',
+      name: serviceName,
       namespace: namespace,
-      labels: {
-        'app.kubernetes.io/name': 'nightscout',
-        'ns.mdn.io/tenant': tenantId
-      }
+      labels: standardLabels('application')
     },
     spec: {
-      type: 'ClusterIP',
+      type: nsServiceType,
       selector: {
-        'app.kubernetes.io/name': 'nightscout'
+        'app.kubernetes.io/name': 'nightscout',
+        'app.kubernetes.io/instance': tenantId
       },
       ports: [
         {
@@ -338,18 +382,16 @@ function renderNightscout(parent) {
     apiVersion: 'policy/v1',
     kind: 'PodDisruptionBudget',
     metadata: {
-      name: 'nightscout-pdb',
+      name: pdbName,
       namespace: namespace,
-      labels: {
-        'app.kubernetes.io/name': 'nightscout',
-        'ns.mdn.io/tenant': tenantId
-      }
+      labels: standardLabels('application')
     },
     spec: {
-      minAvailable: 1,
+      minAvailable: nsPdbMinAvailable,
       selector: {
         matchLabels: {
-          'app.kubernetes.io/name': 'nightscout'
+          'app.kubernetes.io/name': 'nightscout',
+          'app.kubernetes.io/instance': tenantId
         }
       }
     }
@@ -364,11 +406,28 @@ function renderKafkaTopics(parent) {
   const namespace = parent.metadata.namespace;
   const collections = (parent.data.CDC_COLLECTIONS || 'entries,treatments').split(',');
   
+  // Kafka configuration
+  const kafkaClusterName = parent.data.KAFKA_CLUSTER_NAME || 'kafka-cluster';
   const partitionsEntries = parseInt(parent.data.CDC_PARTITIONS_ENTRIES || '3');
   const partitionsTreatments = parseInt(parent.data.CDC_PARTITIONS_TREATMENTS || '1');
   const retentionMs = parent.data.CDC_RETENTION_MS || '604800000';
+  const topicReplicas = parseInt(parent.data.KAFKA_TOPIC_REPLICAS || '3');
+  const cdcVersion = parent.data.CDC_VERSION || 'v1beta2';
 
   const topics = [];
+
+  // Helper function for standard labels
+  const standardLabels = (additionalLabels = {}) => ({
+    'app.kubernetes.io/name': 'kafka-topic',
+    'app.kubernetes.io/component': 'messaging',
+    'app.kubernetes.io/part-of': 'nightscout-tenant',
+    'app.kubernetes.io/instance': tenantId,
+    'app.kubernetes.io/version': cdcVersion,
+    'app.kubernetes.io/managed-by': 'metacontroller',
+    'strimzi.io/cluster': kafkaClusterName,
+    'ns.mdn.io/tenant': tenantId,
+    ...additionalLabels
+  });
 
   collections.forEach(collection => {
     const partitions = collection === 'entries' ? partitionsEntries : partitionsTreatments;
@@ -379,14 +438,11 @@ function renderKafkaTopics(parent) {
       metadata: {
         name: `ns.${tenantId}.${collection}`,
         namespace: namespace,
-        labels: {
-          'strimzi.io/cluster': 'kafka-cluster',
-          'ns.mdn.io/tenant': tenantId
-        }
+        labels: standardLabels({ 'ns.mdn.io/collection': collection })
       },
       spec: {
         partitions: partitions,
-        replicas: 3,
+        replicas: topicReplicas,
         config: {
           'retention.ms': retentionMs,
           'compression.type': 'producer'
@@ -395,20 +451,18 @@ function renderKafkaTopics(parent) {
     });
   });
 
+  // DLQ topic
   topics.push({
     apiVersion: 'kafka.strimzi.io/v1beta2',
     kind: 'KafkaTopic',
     metadata: {
       name: `dlq.ns.${tenantId}`,
       namespace: namespace,
-      labels: {
-        'strimzi.io/cluster': 'kafka-cluster',
-        'ns.mdn.io/tenant': tenantId
-      }
+      labels: standardLabels({ 'ns.mdn.io/topic-type': 'dlq' })
     },
     spec: {
       partitions: 1,
-      replicas: 3,
+      replicas: topicReplicas,
       config: {
         'retention.ms': retentionMs
       }
@@ -423,8 +477,28 @@ function renderKafkaConnector(parent) {
   const namespace = parent.metadata.namespace;
   const collections = (parent.data.CDC_COLLECTIONS || 'entries,treatments').split(',');
 
+  // Kafka configuration
+  const kafkaConnectClusterName = parent.data.KAFKA_CONNECT_CLUSTER_NAME || 'connect-cluster';
+  const cdcTasksMax = parseInt(parent.data.CDC_TASKS_MAX || '1');
+  const cdcVersion = parent.data.CDC_VERSION || 'v1beta2';
+  
   const uriKey = parent.data.CDC_URI_KEY;
   const useExternalConfig = !!uriKey;
+  
+  const secretName = `${tenantId}-mongo-auth`;
+  const mongoHost = `${tenantId}-mongo-0.${tenantId}-mongo`;
+
+  // Helper function for standard labels
+  const standardLabels = () => ({
+    'app.kubernetes.io/name': 'kafka-connector',
+    'app.kubernetes.io/component': 'messaging',
+    'app.kubernetes.io/part-of': 'nightscout-tenant',
+    'app.kubernetes.io/instance': tenantId,
+    'app.kubernetes.io/version': cdcVersion,
+    'app.kubernetes.io/managed-by': 'metacontroller',
+    'strimzi.io/cluster': kafkaConnectClusterName,
+    'ns.mdn.io/tenant': tenantId
+  });
 
   const config = {
     'database': 'ns',
@@ -449,23 +523,21 @@ function renderKafkaConnector(parent) {
   if (useExternalConfig) {
     config['connection.uri'] = `\${file:/opt/kafka/external-configuration/mongo-credentials/${uriKey}}`;
   } else {
-    config['connection.uri'] = 'mongodb://nsuser:CHANGE_THIS_PASSWORD@ns-mongo-0.ns-mongo:27017/ns?replicaSet=rs0&authSource=admin';
+    // Note: In production, use externalConfiguration to mount credentials from a Secret
+    config['connection.uri'] = `mongodb://nsuser:CHANGE_THIS_PASSWORD@${mongoHost}:27017/ns?replicaSet=rs0&authSource=admin`;
   }
 
   const connector = {
     apiVersion: 'kafka.strimzi.io/v1beta2',
     kind: 'KafkaConnector',
     metadata: {
-      name: `ns-${tenantId}-source`,
+      name: `${tenantId}-cdc-source`,
       namespace: namespace,
-      labels: {
-        'strimzi.io/cluster': 'connect-cluster',
-        'ns.mdn.io/tenant': tenantId
-      }
+      labels: standardLabels()
     },
     spec: {
       class: 'com.mongodb.kafka.connect.MongoSourceConnector',
-      tasksMax: 1,
+      tasksMax: cdcTasksMax,
       config: config
     }
   };

@@ -48,7 +48,8 @@ function isMongoReady(children) {
   const statefulSets = children['StatefulSet.apps/v1'] || {};
   
   for (const [name, sts] of Object.entries(statefulSets)) {
-    if (name.includes('ns-mongo')) {
+    // Look for MongoDB StatefulSets by label or name pattern
+    if (name.endsWith('-mongo') || sts.metadata?.labels?.['app.kubernetes.io/name'] === 'mongodb') {
       const ready = sts.status?.readyReplicas >= 1;
       console.log(`MongoDB StatefulSet ${name} ready:`, ready);
       return ready;

@@ -20,7 +20,7 @@ async function decoratorSync(req, res) {
         },
         finalizers: [
           ...(object.metadata.finalizers || []),
-          'mdn.io/backup-protect'
+          'ns.mdn.io/backup-protect'
         ].filter((v, i, a) => a.indexOf(v) === i)
       }
     };

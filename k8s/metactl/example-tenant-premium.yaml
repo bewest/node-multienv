@@ -1,0 +1,42 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: tenant-premium-config
+  namespace: hosted-tenants
+  labels:
+    ns.mdn.io/enabled: "true"
+data:
+  # Tenant Identity
+  TENANT_ID: "premium"
+  
+  # Nightscout Configuration (Premium Tier)
+  NS_IMAGE: "nightscout/cgm-remote-monitor:latest"
+  NS_REPLICAS: "2"  # High availability
+  NS_SERVICE_TYPE: "LoadBalancer"  # Direct external access
+  NS_CPU_REQUEST: "200m"
+  NS_CPU_LIMIT: "1000m"
+  NS_MEM_REQUEST: "512Mi"
+  NS_MEM_LIMIT: "1Gi"
+  NS_PDB_MIN_AVAILABLE: "1"
+  
+  # MongoDB Configuration (Premium Tier)
+  MONGO_IMAGE: "mongo:6"
+  MONGO_REPLICAS: "3"  # High availability
+  MONGO_STORAGE_GI: "50"  # Larger storage
+  MONGO_SC: "fast-ssd"  # Faster storage class
+  MONGO_CPU_REQUEST: "500m"
+  MONGO_CPU_LIMIT: "2000m"
+  MONGO_MEM_REQUEST: "1Gi"
+  MONGO_MEM_LIMIT: "4Gi"
+  MONGO_PDB_MIN_AVAILABLE: "2"
+  
+  # CDC/Kafka Configuration (Premium Tier)
+  CDC_ENABLED: "true"
+  CDC_COLLECTIONS: "entries,treatments,devicestatus"  # More collections
+  CDC_PARTITIONS_ENTRIES: "6"  # More partitions for higher throughput
+  CDC_PARTITIONS_TREATMENTS: "2"
+  CDC_RETENTION_MS: "2592000000"  # 30 days
+  CDC_TASKS_MAX: "2"  # More connector tasks
+  KAFKA_CLUSTER_NAME: "kafka-cluster"
+  KAFKA_CONNECT_CLUSTER_NAME: "connect-cluster"
+  KAFKA_TOPIC_REPLICAS: "3"

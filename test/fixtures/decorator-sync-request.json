@@ -8,11 +8,14 @@
     "apiVersion": "v1",
     "kind": "PersistentVolumeClaim",
     "metadata": {
-      "name": "data-ns-mongo-0",
-      "namespace": "default",
+      "name": "data-demo-mongo-0",
+      "namespace": "hosted-tenants",
       "labels": {
-        "app.kubernetes.io/name": "ns-mongo",
+        "app.kubernetes.io/name": "mongodb",
+        "app.kubernetes.io/component": "database",
         "app.kubernetes.io/part-of": "nightscout-tenant",
+        "app.kubernetes.io/instance": "demo",
+        "app.kubernetes.io/managed-by": "metacontroller",
         "ns.mdn.io/tenant": "demo"
       },
       "annotations": {}

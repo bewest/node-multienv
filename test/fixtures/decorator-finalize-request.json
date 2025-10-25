@@ -8,11 +8,15 @@
     "apiVersion": "v1",
     "kind": "PersistentVolumeClaim",
     "metadata": {
-      "name": "data-ns-mongo-0",
-      "namespace": "default",
+      "name": "data-demo-mongo-0",
+      "namespace": "hosted-tenants",
       "labels": {
-        "app.kubernetes.io/name": "ns-mongo",
+        "app.kubernetes.io/name": "mongodb",
+        "app.kubernetes.io/component": "database",
         "app.kubernetes.io/part-of": "nightscout-tenant",
+        "app.kubernetes.io/instance": "demo",
+        "app.kubernetes.io/version": "6",
+        "app.kubernetes.io/managed-by": "metacontroller",
         "ns.mdn.io/tenant": "demo"
       },
       "annotations": {
@@ -20,7 +24,7 @@
         "ns.mdn.io/backup-ttl": "30d"
       },
       "finalizers": [
-        "mdn.io/backup-protect"
+        "ns.mdn.io/backup-protect"
       ],
       "deletionTimestamp": "2025-10-24T05:00:00Z"
     },
