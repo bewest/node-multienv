@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: tenant-demo-legacy
+  namespace: default
+  labels:
+    legacy.io/tenant: "false"
+    legacy.io/migrated: "true"
+  annotations:
+    legacy.io/controller: "nightscout-legacy"
+    legacy.io/migrated-to: "hosted-tenants/demo-config"
+    legacy.io/migration-completed: "2025-10-25T12:00:00Z"
+data:
+  TENANT_ID: "demo"
+  MIGRATED: "true"
+  NEW_LOCATION: "hosted-tenants/demo-config"

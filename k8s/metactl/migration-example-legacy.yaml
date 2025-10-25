@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: tenant-demo-legacy
+  namespace: default
+  labels:
+    legacy.io/tenant: "true"
+  annotations:
+    legacy.io/controller: "nightscout-legacy"
+data:
+  TENANT_ID: "demo"
+  NS_IMAGE: "nightscout/cgm-remote-monitor:latest"
+  MONGO_STORAGE_GI: "10"
+  MONGO_SC: "standard"
+  CDC_ENABLED: "true"
