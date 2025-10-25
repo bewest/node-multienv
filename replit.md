@@ -42,7 +42,7 @@ Production-ready Kubernetes multi-tenant Nightscout platform using Metacontrolle
 ```
 /cmd/webhook/          # Node.js webhook server
   /handlers/           # Webhook request handlers
-    composite-sync.js  # Tenant resource orchestration
+    composite-sync.js  # Tenant resource orchestration (K8s-idiomatic)
     composite-finalize.js
     decorator-sync.js  # PVC backup policy
     decorator-finalize.js
@@ -57,10 +57,22 @@ Production-ready Kubernetes multi-tenant Nightscout platform using Metacontrolle
   LABELS-AND-ANNOTATIONS.md
   DATABASE-MIGRATION-AUTOMATED.md
   MIGRATION-FROM-LEGACY.md
+  WEBHOOK-ARCHITECTURE.md  # Architectural patterns and best practices
+/lib/webhook/          # Alternative state-machine pattern (reference)
+  tenant-webhook-handler.js
+  /tenant-phases/
 ```
 
 ## Recent Changes
 - **2025-10-25:** 
+  - **Kubernetes-Idiomatic Status**: Refactored webhook to use standard K8s conditions pattern
+    - Added `observedGeneration` tracking for reconciliation progress
+    - Implemented 4 condition types: MongoDBReady, MigrationComplete, CDCReady, Ready
+    - Status follows Deployment/DaemonSet pattern for kubectl compatibility
+  - **Child Preservation Pattern**: Implemented Metacontroller best practice
+    - Echoes back unmanaged children to prevent accidental deletion
+    - Protects external resources created by other operators/tools
+    - Logged preservation count for visibility
   - **Automated Database Migration**: Production-ready migration system with automatic completion tracking
     - Automatic completion tracking via `status.migration.complete` field (survives TTL cleanup)
     - Secure credential handling (no URIs in logs or annotations)
@@ -271,9 +283,40 @@ kubectl apply -f k8s/metactl/example-tenant-basic.yaml
 kubectl get all,kafkatopic,kafkaconnector -n hosted-tenants -l ns.mdn.io/tenant=demo
 ```
 
+## Webhook Architecture
+
+### Pattern: Concurrent Rendering with Readiness Gates
+Our webhook follows Kubernetes and Metacontroller best practices:
+
+1. **Kubernetes-Idiomatic Status**: Uses standard conditions like Deployments
+2. **Child Preservation**: Echoes back unmanaged children to prevent deletion
+3. **Observed State**: Status computed from actual resource state, not desired
+4. **ObservedGeneration**: Tracks which parent version was reconciled
+5. **Idempotent**: Safe to call multiple times with same inputs
+
+See [docs/WEBHOOK-ARCHITECTURE.md](docs/WEBHOOK-ARCHITECTURE.md) for detailed patterns.
+
+### Example Status Output
+
+```json
+{
+  "observedGeneration": 5,
+  "conditions": [
+    {"type": "MongoDBReady", "status": "True", "reason": "StatefulSetReady"},
+    {"type": "MigrationComplete", "status": "True", "reason": "JobSucceeded"},
+    {"type": "CDCReady", "status": "True", "reason": "ConnectorRunning"},
+    {"type": "Ready", "status": "True", "reason": "AllComponentsReady"}
+  ],
+  "mongodb": {"ready": true},
+  "migration": {"enabled": true, "phase": "Complete", "complete": true},
+  "cdc": {"name": "demo-cdc-source", "state": "RUNNING"}
+}
+```
+
 ## User Preferences
 - Prefer Node.js/JavaScript for webhook implementation
 - Use existing @kubernetes/client-node library
 - Follow Metacontroller webhook protocol specifications
-- Follow Kubernetes recommended labels and annotations
+- Follow Kubernetes recommended labels, annotations, and status patterns
 - Support tenant tiers via ConfigMap parameterization
+- Implement child preservation to protect external resources
