@@ -1,0 +1,62 @@
+{
+  "controller": {
+    "metadata": {
+      "name": "tenant-controller"
+    }
+  },
+  "parent": {
+    "apiVersion": "v1",
+    "kind": "ConfigMap",
+    "metadata": {
+      "name": "demo-config",
+      "namespace": "hosted-tenants",
+      "labels": {
+        "ns.mdn.io/enabled": "true",
+        "ns.mdn.io/tier": "basic"
+      },
+      "annotations": {
+        "ns.mdn.io/migration-complete": "true"
+      }
+    },
+    "data": {
+      "TENANT_ID": "demo",
+      "NS_IMAGE": "nightscout/cgm-remote-monitor:latest",
+      "MONGO_IMAGE": "mongo:6",
+      "MONGO_REPLICAS": "1",
+      "NS_REPLICAS": "2",
+      "CDC_ENABLED": "true",
+      "MIGRATION_ENABLED": "true",
+      "MIGRATION_SOURCE_URI": "mongodb://legacy-cluster.default.svc:27017/tenant-demo"
+    }
+  },
+  "children": {
+    "Secret.v1": {
+      "demo-mongo-auth": {
+        "apiVersion": "v1",
+        "kind": "Secret",
+        "metadata": {
+          "name": "demo-mongo-auth",
+          "namespace": "hosted-tenants"
+        },
+        "data": {}
+      }
+    },
+    "StatefulSet.apps/v1": {
+      "demo-mongo": {
+        "apiVersion": "apps/v1",
+        "kind": "StatefulSet",
+        "metadata": {
+          "name": "demo-mongo",
+          "namespace": "hosted-tenants",
+          "labels": {
+            "app.kubernetes.io/name": "mongodb"
+          }
+        },
+        "status": {
+          "replicas": 1,
+          "readyReplicas": 1
+        }
+      }
+    }
+  }
+}

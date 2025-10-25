@@ -1,0 +1,96 @@
+{
+  "controller": {
+    "metadata": {
+      "name": "tenant-controller"
+    }
+  },
+  "parent": {
+    "apiVersion": "v1",
+    "kind": "ConfigMap",
+    "metadata": {
+      "name": "demo-config",
+      "namespace": "hosted-tenants",
+      "labels": {
+        "ns.mdn.io/enabled": "true",
+        "ns.mdn.io/tier": "basic"
+      }
+    },
+    "data": {
+      "TENANT_ID": "demo",
+      "NS_IMAGE": "nightscout/cgm-remote-monitor:latest",
+      "MONGO_IMAGE": "mongo:6",
+      "MONGO_STORAGE_GI": "10",
+      "MONGO_SC": "standard",
+      "MONGO_REPLICAS": "1",
+      "NS_REPLICAS": "2",
+      "CDC_ENABLED": "true",
+      "CDC_COLLECTIONS": "entries,treatments",
+      "MIGRATION_ENABLED": "true",
+      "MIGRATION_SOURCE_URI": "mongodb://legacy-cluster.default.svc:27017/tenant-demo",
+      "MIGRATION_SOURCE_SECRET": "legacy-mongo-creds",
+      "MIGRATION_METHOD": "mongodump-restore"
+    }
+  },
+  "children": {
+    "Secret.v1": {
+      "demo-mongo-auth": {
+        "apiVersion": "v1",
+        "kind": "Secret",
+        "metadata": {
+          "name": "demo-mongo-auth",
+          "namespace": "hosted-tenants"
+        },
+        "data": {}
+      }
+    },
+    "Service.v1": {
+      "demo-mongo": {
+        "apiVersion": "v1",
+        "kind": "Service",
+        "metadata": {
+          "name": "demo-mongo",
+          "namespace": "hosted-tenants"
+        },
+        "spec": {}
+      },
+      "demo-nightscout": {
+        "apiVersion": "v1",
+        "kind": "Service",
+        "metadata": {
+          "name": "demo-nightscout",
+          "namespace": "hosted-tenants"
+        },
+        "spec": {}
+      }
+    },
+    "StatefulSet.apps/v1": {
+      "demo-mongo": {
+        "apiVersion": "apps/v1",
+        "kind": "StatefulSet",
+        "metadata": {
+          "name": "demo-mongo",
+          "namespace": "hosted-tenants",
+          "labels": {
+            "app.kubernetes.io/name": "mongodb"
+          }
+        },
+        "status": {
+          "replicas": 1,
+          "readyReplicas": 1,
+          "currentReplicas": 1
+        }
+      }
+    },
+    "Deployment.apps/v1": {
+      "demo-nightscout": {
+        "apiVersion": "apps/v1",
+        "kind": "Deployment",
+        "metadata": {
+          "name": "demo-nightscout",
+          "namespace": "hosted-tenants"
+        },
+        "status": {}
+      }
+    }
+  }
+}

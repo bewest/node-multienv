@@ -545,6 +545,154 @@ function renderKafkaConnector(parent) {
   return connector;
 }
 
+function renderMigrationJob(parent) {
+  const tenantId = parent.data.TENANT_ID;
+  const namespace = parent.metadata.namespace;
+  
+  const migrationSourceUri = parent.data.MIGRATION_SOURCE_URI;
+  const migrationSourceSecret = parent.data.MIGRATION_SOURCE_SECRET;
+  const migrationMethod = parent.data.MIGRATION_METHOD || 'mongodump-restore';
+  const migrationImage = parent.data.MIGRATION_IMAGE || 'mongo:6';
+  
+  if (!migrationSourceUri && !migrationSourceSecret) {
+    console.error(`Migration enabled for tenant ${tenantId} but neither MIGRATION_SOURCE_URI nor MIGRATION_SOURCE_SECRET provided`);
+    throw new Error('Migration enabled but no source configured. Provide either MIGRATION_SOURCE_URI or MIGRATION_SOURCE_SECRET.');
+  }
+  
+  const targetSecretName = `${tenantId}-mongo-auth`;
+  const targetHost = `${tenantId}-mongo-0.${tenantId}-mongo`;
+  const targetUri = `mongodb://nsuser:\${MONGO_PASSWORD}@${targetHost}:27017/ns?replicaSet=rs0&authSource=admin`;
+  
+  const standardLabels = () => ({
+    'app.kubernetes.io/name': 'migration-job',
+    'app.kubernetes.io/component': 'migration',
+    'app.kubernetes.io/part-of': 'nightscout-tenant',
+    'app.kubernetes.io/instance': tenantId,
+    'app.kubernetes.io/version': migrationImage.split(':')[1] || 'latest',
+    'app.kubernetes.io/managed-by': 'metacontroller',
+    'ns.mdn.io/tenant': tenantId,
+    'ns.mdn.io/migration-method': migrationMethod
+  });
+  
+  let command;
+  let args;
+  
+  if (migrationMethod === 'mongodump-restore') {
+    command = ['/bin/bash', '-c'];
+    args = [
+      `set -e
+      echo "Starting migration for tenant: ${tenantId}"
+      echo "Method: mongodump-restore"
+      
+      echo "Step 1: Dumping from source..."
+      mongodump --uri="$SOURCE_URI" --out=/tmp/dump --gzip
+      
+      echo "Step 2: Restoring to target..."
+      mongorestore --uri="$TARGET_URI" --nsFrom='*.*' --nsTo='ns.*' /tmp/dump --gzip --drop
+      
+      echo "Migration completed successfully"
+      exit 0`
+    ];
+  } else if (migrationMethod === 'mongodump-restore-single-db') {
+    const sourceDb = parent.data.MIGRATION_SOURCE_DB || 'nightscout';
+    command = ['/bin/bash', '-c'];
+    args = [
+      `set -e
+      echo "Starting single-database migration for tenant: ${tenantId}"
+      echo "Method: mongodump-restore-single-db"
+      echo "Source database: ${sourceDb}"
+      mongodump --uri="$SOURCE_URI" --db=${sourceDb} --out=/tmp/dump --gzip
+      mongorestore --uri="$TARGET_URI" --nsFrom='${sourceDb}.*' --nsTo='ns.*' /tmp/dump --gzip --drop
+      echo "Migration completed successfully"`
+    ];
+  } else {
+    command = ['/bin/bash', '-c'];
+    args = ['echo "Unknown migration method: ' + migrationMethod + '"; exit 1'];
+  }
+  
+  const env = [
+    {
+      name: 'TARGET_URI',
+      value: targetUri
+    },
+    {
+      name: 'MONGO_PASSWORD',
+      valueFrom: {
+        secretKeyRef: {
+          name: targetSecretName,
+          key: 'password'
+        }
+      }
+    }
+  ];
+  
+  if (migrationSourceSecret) {
+    env.push({
+      name: 'SOURCE_URI',
+      valueFrom: {
+        secretKeyRef: {
+          name: migrationSourceSecret,
+          key: 'uri'
+        }
+      }
+    });
+  } else {
+    env.push({
+      name: 'SOURCE_URI',
+      value: migrationSourceUri
+    });
+  }
+  
+  const job = {
+    apiVersion: 'batch/v1',
+    kind: 'Job',
+    metadata: {
+      name: `${tenantId}-migration`,
+      namespace: namespace,
+      labels: standardLabels(),
+      annotations: {
+        'ns.mdn.io/migration-started': new Date().toISOString(),
+        'ns.mdn.io/migration-method': migrationMethod,
+        'ns.mdn.io/migration-target': `${tenantId}-mongo`
+      }
+    },
+    spec: {
+      backoffLimit: 3,
+      activeDeadlineSeconds: 3600,
+      ttlSecondsAfterFinished: 86400,
+      template: {
+        metadata: {
+          labels: standardLabels()
+        },
+        spec: {
+          restartPolicy: 'OnFailure',
+          containers: [
+            {
+              name: 'migration',
+              image: migrationImage,
+              command: command,
+              args: args,
+              env: env,
+              resources: {
+                requests: {
+                  cpu: '100m',
+                  memory: '256Mi'
+                },
+                limits: {
+                  cpu: '500m',
+                  memory: '512Mi'
+                }
+              }
+            }
+          ]
+        }
+      }
+    }
+  };
+  
+  return job;
+}
+
 function generatePassword() {
   return Math.random().toString(36).slice(-16) + Math.random().toString(36).slice(-16);
 }
@@ -553,5 +701,6 @@ module.exports = {
   renderMongoDB,
   renderNightscout,
   renderKafkaTopics,
-  renderKafkaConnector
+  renderKafkaConnector,
+  renderMigrationJob
 };

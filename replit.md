@@ -55,13 +55,16 @@ Production-ready Kubernetes multi-tenant Nightscout platform using Metacontrolle
 /test/                 # Test fixtures and scripts
 /docs/                 # Documentation and runbooks
   LABELS-AND-ANNOTATIONS.md
+  DATABASE-MIGRATION-AUTOMATED.md
+  MIGRATION-FROM-LEGACY.md
 ```
 
 ## Recent Changes
 - **2025-10-25:** 
+  - **Automated Database Migration**: Added migration job support for moving tenants from legacy MongoDB
   - Added complete standard Kubernetes labels to all resources (including version)
   - Implemented tenant-prefixed naming for multi-tenant namespace deployment
-  - Added 18 new ConfigMap parameters for infrastructure, resource sizing, and tenant tiers
+  - Added 23 new ConfigMap parameters (18 core + 5 migration)
   - Fixed finalizer prefix to `ns.mdn.io/backup-protect`
   - Made DecoratorController tenant-aware to prevent cross-tenant PVC decoration
   - Added version labels extracted from container images and API versions
@@ -69,7 +72,7 @@ Production-ready Kubernetes multi-tenant Nightscout platform using Metacontrolle
 
 ## Tenant Configuration
 
-### ConfigMap Parameters (18 total)
+### ConfigMap Parameters (23 total)
 
 #### Core Configuration
 - **TENANT_ID** (required): Unique tenant identifier, used as resource name prefix
@@ -106,6 +109,14 @@ Production-ready Kubernetes multi-tenant Nightscout platform using Metacontrolle
 - **CDC_TASKS_MAX**: KafkaConnector tasks.max (default: `1`)
 - **CDC_URI_KEY**: Optional external configuration key for MongoDB URI
 - **KAFKA_TOPIC_REPLICAS**: Kafka topic replication factor (default: `3`)
+
+#### Migration Configuration (Optional)
+- **MIGRATION_ENABLED**: Enable automated database migration (default: `false`)
+- **MIGRATION_SOURCE_URI**: Source MongoDB connection URI (if not using secret)
+- **MIGRATION_SOURCE_SECRET**: Secret name containing source URI (recommended, key: `uri`)
+- **MIGRATION_METHOD**: Migration method (default: `mongodump-restore`, options: `mongodump-restore-single-db`)
+- **MIGRATION_IMAGE**: Docker image for migration job (default: `mongo:6`)
+- **MIGRATION_SOURCE_DB**: Source database name for single-db method (default: `nightscout`)
 
 ### Example: Basic Tier Tenant
 ```yaml
@@ -157,7 +168,7 @@ data:
   KAFKA_TOPIC_REPLICAS: "3"
 ```
 
-### Rendered Children (11 resources per tenant)
+### Rendered Children (11-12 resources per tenant)
 1. **Secret** (`{tenantId}-mongo-auth`) - MongoDB authentication
 2. **Service** (`{tenantId}-mongo`) - MongoDB headless service
 3. **StatefulSet** (`{tenantId}-mongo`) - MongoDB with configurable replicas
@@ -165,10 +176,11 @@ data:
 5. **Deployment** (`{tenantId}-nightscout`) - Nightscout application
 6. **Service** (`{tenantId}-nightscout`) - Nightscout service
 7. **PodDisruptionBudget** (`{tenantId}-nightscout-pdb`) - Nightscout availability
-8. **KafkaTopic** (`ns.{tenantId}.entries`) - CDC entries topic
-9. **KafkaTopic** (`ns.{tenantId}.treatments`) - CDC treatments topic
-10. **KafkaTopic** (`dlq.ns.{tenantId}`) - Dead letter queue
-11. **KafkaConnector** (`{tenantId}-cdc-source`) - MongoDB CDC connector (created only when MongoDB ready)
+8. **KafkaTopic** (`ns.{tenantId}.entries`) - CDC entries topic (if CDC enabled)
+9. **KafkaTopic** (`ns.{tenantId}.treatments`) - CDC treatments topic (if CDC enabled)
+10. **KafkaTopic** (`dlq.ns.{tenantId}`) - Dead letter queue (if CDC enabled)
+11. **KafkaConnector** (`{tenantId}-cdc-source`) - MongoDB CDC connector (created only when MongoDB ready and CDC enabled)
+12. **Job** (`{tenantId}-migration`) - Database migration job (created only when MIGRATION_ENABLED=true, MongoDB ready, and migration not complete)
 
 ### Standard Kubernetes Labels
 All resources include the recommended Kubernetes labels:
