@@ -61,7 +61,11 @@ Production-ready Kubernetes multi-tenant Nightscout platform using Metacontrolle
 
 ## Recent Changes
 - **2025-10-25:** 
-  - **Automated Database Migration**: Added migration job support for moving tenants from legacy MongoDB
+  - **Automated Database Migration**: Production-ready migration system with automatic completion tracking
+    - Automatic completion tracking via `status.migration.complete` field (survives TTL cleanup)
+    - Secure credential handling (no URIs in logs or annotations)
+    - Configuration validation (requires MIGRATION_SOURCE_URI or MIGRATION_SOURCE_SECRET)
+    - Prevents destructive re-runs after successful migration
   - Added complete standard Kubernetes labels to all resources (including version)
   - Implemented tenant-prefixed naming for multi-tenant namespace deployment
   - Added 23 new ConfigMap parameters (18 core + 5 migration)
@@ -117,6 +121,10 @@ Production-ready Kubernetes multi-tenant Nightscout platform using Metacontrolle
 - **MIGRATION_METHOD**: Migration method (default: `mongodump-restore`, options: `mongodump-restore-single-db`)
 - **MIGRATION_IMAGE**: Docker image for migration job (default: `mongo:6`)
 - **MIGRATION_SOURCE_DB**: Source database name for single-db method (default: `nightscout`)
+
+**Security:** Credentials never appear in job logs or annotations. Configuration validation prevents misconfigured migrations.
+
+**Completion Tracking:** Webhook automatically sets `status.migration.complete: true` when job succeeds, preventing re-runs even after TTL cleanup (24 hours). Manual override via annotation `ns.mdn.io/migration-complete: true` also supported.
 
 ### Example: Basic Tier Tenant
 ```yaml
