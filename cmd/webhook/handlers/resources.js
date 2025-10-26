@@ -108,23 +108,21 @@ function renderMongoDB(parent) {
           initContainers: [
             {
               name: 'init-replica-set',
-              image: mongoImage,
-              command: ['/bin/bash', '-c'],
-              args: [
-                `until mongosh --host ${pod0Hostname} --eval "rs.status()" > /dev/null 2>&1; do
-                  echo "Waiting for MongoDB to start...";
-                  sleep 2;
-                done;
-                mongosh --host ${pod0Hostname} --eval "
-                  try {
-                    rs.initiate({
-                      _id: 'rs0',
-                      members: [{ _id: 0, host: '${pod0Hostname}:27017' }]
-                    });
-                  } catch(e) {
-                    print('RS already initialized or error:', e);
-                  }
-                " || true`
+              image: parent.data.NS_UTILITY_IMAGE || 'ns-utility:latest',
+              command: ['init-replica-set.sh'],
+              env: [
+                {
+                  name: 'MONGO_HOST',
+                  value: pod0Hostname
+                },
+                {
+                  name: 'MONGO_PORT',
+                  value: '27017'
+                },
+                {
+                  name: 'MONGO_RS_NAME',
+                  value: 'rs0'
+                }
               ]
             }
           ],
@@ -574,46 +572,31 @@ function renderMigrationJob(parent) {
     'ns.mdn.io/migration-method': migrationMethod
   });
   
-  let command;
-  let args;
+  const command = ['migrate-database.sh'];
+  const args = [];
   
-  if (migrationMethod === 'mongodump-restore') {
-    command = ['/bin/bash', '-c'];
-    args = [
-      `set -e
-      echo "Starting migration for tenant: ${tenantId}"
-      echo "Method: mongodump-restore"
-      
-      echo "Step 1: Dumping from source..."
-      mongodump --uri="$SOURCE_URI" --out=/tmp/dump --gzip
-      
-      echo "Step 2: Restoring to target..."
-      mongorestore --uri="$TARGET_URI" --nsFrom='*.*' --nsTo='ns.*' /tmp/dump --gzip --drop
-      
-      echo "Migration completed successfully"
-      exit 0`
-    ];
-  } else if (migrationMethod === 'mongodump-restore-single-db') {
-    const sourceDb = parent.data.MIGRATION_SOURCE_DB || 'nightscout';
-    command = ['/bin/bash', '-c'];
-    args = [
-      `set -e
-      echo "Starting single-database migration for tenant: ${tenantId}"
-      echo "Method: mongodump-restore-single-db"
-      echo "Source database: ${sourceDb}"
-      mongodump --uri="$SOURCE_URI" --db=${sourceDb} --out=/tmp/dump --gzip
-      mongorestore --uri="$TARGET_URI" --nsFrom='${sourceDb}.*' --nsTo='ns.*' /tmp/dump --gzip --drop
-      echo "Migration completed successfully"`
-    ];
-  } else {
-    command = ['/bin/bash', '-c'];
-    args = ['echo "Unknown migration method: ' + migrationMethod + '"; exit 1'];
-  }
+  const sourceDb = parent.data.MIGRATION_SOURCE_DB || 'nightscout';
   
   const env = [
     {
-      name: 'TARGET_URI',
-      value: targetUri
+      name: 'TARGET_MONGO_HOST',
+      value: targetHost
+    },
+    {
+      name: 'TARGET_MONGO_PORT',
+      value: '27017'
+    },
+    {
+      name: 'MIGRATION_METHOD',
+      value: migrationMethod
+    },
+    {
+      name: 'MIGRATION_SOURCE_DB',
+      value: sourceDb
+    },
+    {
+      name: 'MIGRATION_TARGET_DB',
+      value: 'ns'
     },
     {
       name: 'MONGO_PASSWORD',
@@ -628,7 +611,7 @@ function renderMigrationJob(parent) {
   
   if (migrationSourceSecret) {
     env.push({
-      name: 'SOURCE_URI',
+      name: 'SOURCE_MONGO_URI',
       valueFrom: {
         secretKeyRef: {
           name: migrationSourceSecret,
@@ -638,7 +621,7 @@ function renderMigrationJob(parent) {
     });
   } else {
     env.push({
-      name: 'SOURCE_URI',
+      name: 'SOURCE_MONGO_URI',
       value: migrationSourceUri
     });
   }
@@ -669,7 +652,7 @@ function renderMigrationJob(parent) {
           containers: [
             {
               name: 'migration',
-              image: migrationImage,
+              image: parent.data.NS_UTILITY_IMAGE || 'ns-utility:latest',
               command: command,
               args: args,
               env: env,
