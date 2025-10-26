@@ -60,6 +60,17 @@ The platform provides two distinct, independent interfaces that evolved across g
 
 **Consul Update Evolution:** In Gen 1-3a, `master.js` manually updated Consul based on internal process state. Starting in Gen 3b, the deployment-operator watches pods and updates Consul automatically.
 
+### The Critical Insight: Why Gen 3b → Gen 4
+
+When the **second watch** (pod watch) was added to the ConfigMap watch in Gen 3b, it became clear that managing resources would need to handle an **arbitrarily large number of resources** per tenant - not just a single Deployment, but 11-12 resources:
+- MongoDB StatefulSet, Service, Secret
+- Nightscout Deployment, Service
+- Kafka Topic, Kafka Connector
+- PVCs, PodDisruptionBudgets
+- Migration Jobs, VolumeSnapshots
+
+This forced a fundamental design change: from **a single inline async callback using the k8s API** to needing to **expressively declare the set of desired resources**. This requirement tipped the design toward Metacontroller's declarative webhook pattern, where the webhook returns a complete manifest of all desired child resources for each tenant.
+
 ## External Dependencies
 - **Strimzi Kafka Operator**: Manages Kafka clusters and KafkaConnect for CDC.
 - **MongoDB**: The primary database, deployed as per-tenant StatefulSets.

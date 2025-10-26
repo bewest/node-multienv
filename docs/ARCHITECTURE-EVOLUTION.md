@@ -679,12 +679,27 @@ GET /scheduled/consul/cluster/demo/backends
 - **Service Discovery:** Consul integration for routing
 - **Production Ready:** HA, load balancing, health checks
 
-### Why We Evolved
+### Why We Evolved to Gen 4
 
 - **Complexity:** Dispatcher + controller + demuxer = 3 moving parts
 - **Imperative:** REST API calls, not declarative
 - **Custom Controller:** Reinventing Kubernetes patterns
 - **Operational Overhead:** Maintaining custom control plane
+
+**The Critical Insight:**
+When the second watch (pod watch) was added to the ConfigMap watch in Gen 3b, it became clear that the number of resources needing management would be **arbitrarily large** - not just a single Deployment per tenant, but:
+- MongoDB StatefulSet
+- MongoDB Service
+- MongoDB Secret
+- Kafka Topic
+- Kafka Connector
+- PVCs
+- PodDisruptionBudgets
+- Migration Jobs
+- VolumeSnapshots
+- (11-12 resources per tenant)
+
+This forced a fundamental design change: from **a single inline async callback using the k8s API** to needing to **expressively declare the set of desired resources**. This requirement tipped the design toward Metacontroller's declarative webhook pattern, where the webhook returns a complete manifest of all desired child resources.
 
 ---
 
