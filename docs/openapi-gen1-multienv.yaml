@@ -1,0 +1,568 @@
+openapi: 3.0.3
+info:
+  title: Nightscout MultiEnv (Generation 1) - Process-Based Multi-Tenant API
+  version: 1.0.0
+  description: |
+    Generation 1 of the Nightscout hosting platform. This implementation uses Node.js cluster-based
+    process forking to manage multiple Nightscout instances, each configured via `.env` files.
+    
+    **Key Characteristics:**
+    - Process-based multi-tenancy (one Node.js process per tenant)
+    - Environment files (.env) as configuration source
+    - File system watching for automatic process management
+    - Direct process lifecycle control via REST API
+    
+    **Architecture:**
+    - `master.js`: Watches WORKER_ENV directory for .env files, forks processes
+    - `server.js`: REST API for managing environments and processes
+    - Each tenant runs as a separate process with unique PORT
+    
+    **Use Cases:**
+    - Single-host deployments
+    - Development and testing
+    - Small-scale production (< 50 tenants)
+  contact:
+    email: bewest@gmail.com
+  license:
+    name: Affero GPL 3.0
+    url: https://www.gnu.org/licenses/agpl-3.0.en.html
+
+servers:
+  - url: 'http://localhost:3434'
+    description: Local multienv server (internal port)
+  - url: 'http://m0.internal.diabetes.watch'
+    description: Production multienv server
+
+tags:
+  - name: cluster
+    description: Process cluster management
+  - name: environs
+    description: Environment configuration management
+  - name: resolver
+    description: Tenant-to-process resolution and routing
+  - name: history
+    description: Historical process information
+
+paths:
+  /cluster:
+    get:
+      tags:
+        - cluster
+      summary: List all running processes
+      description: Returns details of all currently running worker processes in the cluster
+      operationId: listCluster
+      responses:
+        '200':
+          description: Successful operation
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties:
+                  $ref: '#/components/schemas/Process'
+              example:
+                "1234":
+                  id: "1234"
+                  custom_env:
+                    WEB_NAME: "demo"
+                    PORT: "5001"
+                    MONGODB_URI: "mongodb://localhost:27017/demo"
+                  state: "online"
+                  isDead: false
+                  url: "http://localhost:5001/"
+                  status_url: "http://localhost:5001/api/v1/status.json"
+
+  /cluster/{id}:
+    get:
+      tags:
+        - cluster
+      summary: Get process by cluster ID
+      description: Returns details of a specific worker process by its cluster ID
+      operationId: getProcessById
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Process cluster ID
+          schema:
+            type: string
+          example: "1234"
+      responses:
+        '200':
+          description: Successful operation
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Process'
+        '404':
+          description: Process not found
+
+  /stats/active:
+    get:
+      tags:
+        - cluster
+      summary: Get cluster statistics
+      description: Returns statistics about active processes and capacity
+      operationId: getClusterStats
+      responses:
+        '200':
+          description: Successful operation
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ClusterStats'
+              example:
+                name: "multienv"
+                total:
+                  active: 12
+                  expected: 12
+                  max: 50
+
+  /history:
+    get:
+      tags:
+        - history
+      summary: Get all managed processes (including dead)
+      description: |
+        Returns description of all processes ever seen by multienv,
+        including processes that may have died or been deleted. Useful for debugging.
+      operationId: getHistory
+      responses:
+        '200':
+          description: Successful operation
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties:
+                  $ref: '#/components/schemas/Process'
+
+  /resolve/{id}:
+    get:
+      tags:
+        - resolver
+      summary: Resolve process by ID (headers only)
+      description: |
+        Returns process resolution information as HTTP headers for nginx x-accel-redirect.
+        Used for internal routing/proxying.
+      operationId: resolveById
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Process ID to resolve
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Process resolved successfully
+          headers:
+            X-Backend-State:
+              description: State of the backend process
+              schema:
+                type: string
+                example: "online"
+            X-Backend-Name:
+              description: Name of the backend (tenant name)
+              schema:
+                type: string
+                example: "demo"
+            X-Backend:
+              description: URL of the backend process
+              schema:
+                type: string
+                example: "http://localhost:5001/"
+
+  /resolve/{id}/test:
+    get:
+      tags:
+        - resolver
+      summary: Test resolve with x-accel-redirect
+      description: |
+        Test endpoint that uses nginx x-accel-redirect for internal proxying.
+        Returns process information and sets x-accel-redirect header.
+      operationId: resolveTest
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Process ID to resolve
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Process resolved
+          headers:
+            X-Backend-State:
+              schema:
+                type: string
+            X-Backend-Name:
+              schema:
+                type: string
+            X-Backend:
+              schema:
+                type: string
+            X-Backend-Port:
+              schema:
+                type: string
+            x-accel-redirect:
+              description: nginx internal redirect path
+              schema:
+                type: string
+                example: "@proxy/5001/1234"
+
+  /environs:
+    get:
+      tags:
+        - environs
+      summary: List all environments
+      description: |
+        Scans WORKER_ENV directory and returns all managed environments (.env files),
+        whether they have running processes or not.
+      operationId: listEnvironments
+      responses:
+        '200':
+          description: Successful operation
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties:
+                  $ref: '#/components/schemas/Environment'
+
+  /environs/{name}:
+    get:
+      tags:
+        - environs
+      summary: Get environment by name
+      description: |
+        Returns environment configuration for a specific tenant.
+        The `name` is the basename of the .env file (without extension).
+      operationId: getEnvironment
+      parameters:
+        - $ref: '#/components/parameters/EnvironmentName'
+      responses:
+        '200':
+          description: Successful operation
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Environment'
+        '404':
+          description: Environment not found
+
+    post:
+      tags:
+        - environs
+      summary: Create new environment
+      description: |
+        Creates a new .env file and starts a process for it.
+        The environment variables are written to `$WORKER_ENV/{name}.env`.
+      operationId: createEnvironment
+      parameters:
+        - $ref: '#/components/parameters/EnvironmentName'
+      requestBody:
+        description: Environment variables to set
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EnvironmentData'
+            example:
+              MONGODB_URI: "mongodb://localhost:27017/demo"
+              API_SECRET: "my-secret-123"
+              ENABLE: "careportal basal"
+      responses:
+        '201':
+          description: Environment created successfully
+          headers:
+            Location:
+              description: URL of the created environment
+              schema:
+                type: string
+                example: "/environs/demo"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EnvironmentData'
+
+    delete:
+      tags:
+        - environs
+      summary: Delete environment
+      description: |
+        Deletes the .env file, which triggers the file watcher to stop the process.
+      operationId: deleteEnvironment
+      parameters:
+        - $ref: '#/components/parameters/EnvironmentName'
+      responses:
+        '204':
+          description: Environment deleted successfully
+
+  /environs/{name}/env:
+    get:
+      tags:
+        - environs
+      summary: Get all environment variables
+      description: Returns all environment variables for a specific tenant as a JSON object
+      operationId: getEnvironmentVariables
+      parameters:
+        - $ref: '#/components/parameters/EnvironmentName'
+      responses:
+        '200':
+          description: Successful operation
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EnvironmentData'
+
+  /environs/{name}/env/{field}:
+    get:
+      tags:
+        - environs
+      summary: Get single environment variable
+      description: Returns the value of a single environment variable
+      operationId: getEnvironmentVariable
+      parameters:
+        - $ref: '#/components/parameters/EnvironmentName'
+        - $ref: '#/components/parameters/FieldName'
+      responses:
+        '200':
+          description: Successful operation
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - type: string
+                  - type: number
+                  - type: boolean
+              example: "mongodb://localhost:27017/demo"
+        '404':
+          description: Field not found
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  msg:
+                    type: string
+                    example: "field unknown"
+                  field:
+                    type: string
+                    example: "UNKNOWN_VAR"
+
+    post:
+      tags:
+        - environs
+      summary: Set environment variable
+      description: |
+        Sets or updates a single environment variable in the .env file.
+        The process will be restarted automatically by the file watcher.
+      operationId: setEnvironmentVariable
+      parameters:
+        - $ref: '#/components/parameters/EnvironmentName'
+        - $ref: '#/components/parameters/FieldName'
+      requestBody:
+        description: New value for the environment variable
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties:
+                type: string
+            example:
+              API_SECRET: "new-secret-456"
+      responses:
+        '201':
+          description: Variable updated successfully
+          headers:
+            Location:
+              description: URL of the environment
+              schema:
+                type: string
+                example: "/environs/demo"
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - type: string
+                  - type: number
+                  - type: boolean
+
+    delete:
+      tags:
+        - environs
+      summary: Delete environment variable
+      description: Removes a single environment variable from the .env file
+      operationId: deleteEnvironmentVariable
+      parameters:
+        - $ref: '#/components/parameters/EnvironmentName'
+        - $ref: '#/components/parameters/FieldName'
+      responses:
+        '204':
+          description: Variable deleted successfully
+
+  /environs/{name}/assigned/{field}/{value}:
+    get:
+      tags:
+        - environs
+      summary: Check if variable has expected value
+      description: |
+        Validates that an environment variable has a specific value.
+        Returns 200 if match, 500 if mismatch.
+      operationId: checkAssignedValue
+      parameters:
+        - $ref: '#/components/parameters/EnvironmentName'
+        - $ref: '#/components/parameters/FieldName'
+        - name: value
+          in: path
+          required: true
+          description: Expected value
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Value matches
+          content:
+            application/json:
+              schema:
+                type: string
+              example: "demo"
+        '500':
+          description: Value does not match
+          content:
+            application/json:
+              schema:
+                type: string
+              example: "wrong-value"
+
+components:
+  parameters:
+    EnvironmentName:
+      name: name
+      in: path
+      required: true
+      description: |
+        Environment name (basename of .env file without extension).
+        Examples: "demo", "prod-alice", "test-123"
+      schema:
+        type: string
+        pattern: '^[a-z0-9-]+$'
+      example: "demo"
+
+    FieldName:
+      name: field
+      in: path
+      required: true
+      description: Environment variable name
+      schema:
+        type: string
+        pattern: '^[A-Z_][A-Z0-9_]*$'
+      example: "MONGODB_URI"
+
+  schemas:
+    Process:
+      type: object
+      description: A running worker process in the cluster
+      properties:
+        id:
+          type: string
+          description: Process cluster ID
+          example: "1234"
+        custom_env:
+          $ref: '#/components/schemas/EnvironmentData'
+        state:
+          type: string
+          description: Process state
+          enum: [online, stopping, stopped, errored, missing]
+          example: "online"
+        isDead:
+          type: boolean
+          description: Whether the process has died
+          example: false
+        url:
+          type: string
+          format: uri
+          description: Base URL where the process is listening
+          example: "http://localhost:5001/"
+        status_url:
+          type: string
+          format: uri
+          description: Nightscout status endpoint URL
+          example: "http://localhost:5001/api/v1/status.json"
+
+    Environment:
+      type: object
+      description: An environment configuration (may or may not have running process)
+      properties:
+        id:
+          type: string
+          nullable: true
+          description: Process ID if running, null if not
+          example: "1234"
+        custom_env:
+          $ref: '#/components/schemas/EnvironmentData'
+        state:
+          type: string
+          description: State of the environment/process
+          enum: [online, stopping, stopped, errored, missing]
+          example: "online"
+        isDead:
+          type: boolean
+          description: Whether the associated process (if any) has died
+          example: false
+
+    EnvironmentData:
+      type: object
+      description: Environment variables as key-value pairs
+      additionalProperties:
+        type: string
+      example:
+        WEB_NAME: "demo"
+        PORT: "5001"
+        MONGODB_URI: "mongodb://localhost:27017/demo"
+        API_SECRET: "my-secret-123"
+        ENABLE: "careportal basal"
+        DISPLAY_UNITS: "mg/dl"
+
+    ClusterStats:
+      type: object
+      description: Statistics about the process cluster
+      properties:
+        name:
+          type: string
+          description: Name of the cluster
+          example: "multienv"
+        total:
+          type: object
+          properties:
+            active:
+              type: integer
+              description: Number of currently running processes
+              example: 12
+            expected:
+              type: integer
+              description: Number of expected processes (environments found)
+              example: 12
+            max:
+              type: integer
+              description: Maximum tenant limit (from MAX_TENANT_LIMIT env)
+              example: 50
+
+externalDocs:
+  description: MultiEnv Node.js Library
+  url: https://github.com/bewest/node-multienv
+
+x-generation: 1
+x-implementation: process-based
+x-architecture:
+  - component: master.js
+    role: File watcher and process manager
+    description: Watches WORKER_ENV directory for .env files, forks worker processes
+  - component: server.js
+    role: REST API server
+    description: Provides HTTP API for environment and process management
+  - component: worker
+    role: Nightscout process
+    description: Individual Nightscout instance running with custom environment

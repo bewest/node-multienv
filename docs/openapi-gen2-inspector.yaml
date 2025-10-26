@@ -1,0 +1,490 @@
+openapi: 3.0.3
+info:
+  title: Nightscout Inspector (Generation 2) - ConfigMap-Based Multi-Tenant API
+  version: 2.0.0
+  description: |
+    Generation 2 of the Nightscout hosting platform. This implementation uses Kubernetes ConfigMaps
+    as the configuration source instead of .env files, making it cloud-native while maintaining
+    API compatibility with Generation 1.
+    
+    **Key Characteristics:**
+    - ConfigMap-based configuration (Kubernetes-native)
+    - Backward-compatible REST API with Generation 1
+    - Configuration persistence without process management
+    - Read/write access to ConfigMap data via familiar `/environs` API
+    
+    **Architecture:**
+    - `k8s-inspector.js`: REST API server using @kubernetes/client-node
+    - Kubernetes ConfigMaps replace .env files
+    - No deployment/process creation (persistence layer only)
+    - Designed as drop-in replacement for Generation 1 API
+    
+    **Use Cases:**
+    - Kubernetes-based deployments
+    - Separation of configuration from orchestration
+    - Testing Kubernetes integration
+    - Migration bridge from Gen 1 to Gen 3
+    
+    **Migration Path:**
+    - Gen 1 → Gen 2: Replace file-based config with ConfigMaps
+    - Gen 2 → Gen 3: Add deployment controller for actual pod management
+  contact:
+    email: bewest@gmail.com
+  license:
+    name: Affero GPL 3.0
+    url: https://www.gnu.org/licenses/agpl-3.0.en.html
+
+servers:
+  - url: 'http://localhost:2828'
+    description: Local inspector server
+  - url: 'http://inspector.hosted-tenants.svc.cluster.local'
+    description: Kubernetes service endpoint
+
+tags:
+  - name: inspect
+    description: Direct ConfigMap inspection (raw Kubernetes objects)
+  - name: environs
+    description: multienv-compatible environment API
+  - name: migration
+    description: Generation 1 compatibility layer
+
+paths:
+  /inspect/{name}:
+    get:
+      tags:
+        - inspect
+      summary: Get ConfigMap (raw)
+      description: Returns the raw Kubernetes ConfigMap object
+      operationId: inspectConfigMap
+      parameters:
+        - $ref: '#/components/parameters/ConfigMapName'
+      responses:
+        '200':
+          description: Successful operation
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConfigMap'
+
+    post:
+      tags:
+        - inspect
+      summary: Create or update ConfigMap
+      description: Creates a new ConfigMap or updates an existing one
+      operationId: createOrUpdateConfigMap
+      parameters:
+        - $ref: '#/components/parameters/ConfigMapName'
+      requestBody:
+        description: ConfigMap data fields
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties:
+                type: string
+            example:
+              WEB_NAME: "demo"
+              MONGODB_URI: "mongodb://demo-mongo:27017/nightscout"
+              API_SECRET: "my-secret-123"
+      responses:
+        '200':
+          description: ConfigMap updated
+          headers:
+            Location:
+              schema:
+                type: string
+                example: "/environs/demo"
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties:
+                  type: string
+        '201':
+          description: ConfigMap created
+          headers:
+            Location:
+              schema:
+                type: string
+                example: "/environs/demo"
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties:
+                  type: string
+
+    delete:
+      tags:
+        - inspect
+      summary: Delete ConfigMap
+      description: Deletes the ConfigMap from Kubernetes
+      operationId: deleteConfigMap
+      parameters:
+        - $ref: '#/components/parameters/ConfigMapName'
+      responses:
+        '204':
+          description: ConfigMap deleted successfully
+
+  /inspect/{name}/env:
+    get:
+      tags:
+        - inspect
+      summary: Get all ConfigMap data fields
+      description: Returns all data fields from the ConfigMap as a JSON object
+      operationId: inspectConfigMapData
+      parameters:
+        - $ref: '#/components/parameters/ConfigMapName'
+      responses:
+        '200':
+          description: Successful operation
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties:
+                  type: string
+
+  /inspect/{name}/env/{field}:
+    get:
+      tags:
+        - inspect
+      summary: Get single ConfigMap data field
+      description: Returns a single data field from the ConfigMap
+      operationId: inspectConfigMapField
+      parameters:
+        - $ref: '#/components/parameters/ConfigMapName'
+        - $ref: '#/components/parameters/FieldName'
+      responses:
+        '200':
+          description: Successful operation
+          content:
+            application/json:
+              schema:
+                type: string
+              example: "mongodb://demo-mongo:27017/nightscout"
+
+    post:
+      tags:
+        - inspect
+      summary: Set ConfigMap data field
+      description: Creates or updates a single data field in the ConfigMap
+      operationId: setConfigMapField
+      parameters:
+        - $ref: '#/components/parameters/ConfigMapName'
+        - $ref: '#/components/parameters/FieldName'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties:
+                type: string
+            example:
+              API_SECRET: "new-secret-456"
+      responses:
+        '200':
+          description: Field updated
+          content:
+            application/json:
+              schema:
+                type: string
+
+  /environs/{name}:
+    get:
+      tags:
+        - environs
+      summary: Get environment (multienv-compatible)
+      description: |
+        Returns environment configuration in Generation 1 compatible format.
+        Transforms ConfigMap into multienv-style response with `custom_env` and `state`.
+      operationId: getEnvironment
+      parameters:
+        - $ref: '#/components/parameters/ConfigMapName'
+      responses:
+        '200':
+          description: Successful operation
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MultienvCompatibleEnvironment'
+              example:
+                custom_env:
+                  WEB_NAME: "demo"
+                  MONGODB_URI: "mongodb://demo-mongo:27017/nightscout"
+                  API_SECRET: "my-secret-123"
+                state: "persisted"
+                metadata:
+                  name: "demo"
+                  namespace: "hosted-tenants"
+                  labels:
+                    managed: "multienv"
+                    app: "tenant"
+
+    post:
+      tags:
+        - environs
+      summary: Create environment (multienv-compatible)
+      description: |
+        Creates or updates a ConfigMap using Generation 1 compatible API.
+        Automatically sets `managed: multienv` and `app: tenant` labels.
+      operationId: createEnvironment
+      parameters:
+        - $ref: '#/components/parameters/ConfigMapName'
+      requestBody:
+        description: Environment variables
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties:
+                type: string
+            example:
+              MONGODB_URI: "mongodb://demo-mongo:27017/nightscout"
+              API_SECRET: "my-secret-123"
+              ENABLE: "careportal basal"
+      responses:
+        '200':
+          description: Environment updated
+          headers:
+            Location:
+              schema:
+                type: string
+                example: "/environs/demo"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MultienvCompatibleEnvironment'
+        '201':
+          description: Environment created
+          headers:
+            Location:
+              schema:
+                type: string
+                example: "/environs/demo"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MultienvCompatibleEnvironment'
+
+    delete:
+      tags:
+        - environs
+      summary: Delete environment
+      description: Deletes the ConfigMap (multienv-compatible endpoint)
+      operationId: deleteEnvironment
+      parameters:
+        - $ref: '#/components/parameters/ConfigMapName'
+      responses:
+        '204':
+          description: Environment deleted successfully
+
+  /environs/{name}/env:
+    get:
+      tags:
+        - environs
+      summary: Get environment variables
+      description: Returns all environment variables (ConfigMap data fields)
+      operationId: getEnvironmentVariables
+      parameters:
+        - $ref: '#/components/parameters/ConfigMapName'
+      responses:
+        '200':
+          description: Successful operation
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties:
+                  type: string
+
+  /environs/{name}/env/{field}:
+    get:
+      tags:
+        - environs
+      summary: Get environment variable
+      description: Returns a single environment variable value
+      operationId: getEnvironmentVariable
+      parameters:
+        - $ref: '#/components/parameters/ConfigMapName'
+        - $ref: '#/components/parameters/FieldName'
+      responses:
+        '200':
+          description: Successful operation
+          content:
+            application/json:
+              schema:
+                type: string
+
+    post:
+      tags:
+        - environs
+      summary: Set environment variable
+      description: Sets or updates a single environment variable
+      operationId: setEnvironmentVariable
+      parameters:
+        - $ref: '#/components/parameters/ConfigMapName'
+        - $ref: '#/components/parameters/FieldName'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties:
+                type: string
+            example:
+              API_SECRET: "new-secret-456"
+      responses:
+        '200':
+          description: Variable updated
+          content:
+            application/json:
+              schema:
+                type: string
+
+components:
+  parameters:
+    ConfigMapName:
+      name: name
+      in: path
+      required: true
+      description: |
+        ConfigMap name (tenant identifier).
+        Must be a valid Kubernetes resource name (lowercase alphanumeric + hyphens).
+      schema:
+        type: string
+        pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+      example: "demo"
+
+    FieldName:
+      name: field
+      in: path
+      required: true
+      description: ConfigMap data field name (environment variable name)
+      schema:
+        type: string
+      example: "MONGODB_URI"
+
+  schemas:
+    ConfigMap:
+      type: object
+      description: Kubernetes ConfigMap object
+      required:
+        - kind
+        - metadata
+        - data
+      properties:
+        kind:
+          type: string
+          example: "ConfigMap"
+        apiVersion:
+          type: string
+          example: "v1"
+        metadata:
+          type: object
+          properties:
+            name:
+              type: string
+              example: "demo"
+            namespace:
+              type: string
+              example: "hosted-tenants"
+            labels:
+              type: object
+              additionalProperties:
+                type: string
+              example:
+                managed: "multienv"
+                app: "tenant"
+            annotations:
+              type: object
+              additionalProperties:
+                type: string
+            resourceVersion:
+              type: string
+            uid:
+              type: string
+            creationTimestamp:
+              type: string
+              format: date-time
+        data:
+          type: object
+          description: Environment variables as key-value pairs
+          additionalProperties:
+            type: string
+          example:
+            WEB_NAME: "demo"
+            MONGODB_URI: "mongodb://demo-mongo:27017/nightscout"
+            API_SECRET: "my-secret-123"
+
+    MultienvCompatibleEnvironment:
+      type: object
+      description: |
+        Generation 1 compatible response format.
+        ConfigMap is transformed to match multienv API expectations.
+      properties:
+        custom_env:
+          type: object
+          description: Environment variables (from ConfigMap.data)
+          additionalProperties:
+            type: string
+        state:
+          type: string
+          description: Always "persisted" for ConfigMap-based environments
+          example: "persisted"
+        metadata:
+          type: object
+          description: Kubernetes metadata (optional, for debugging)
+          properties:
+            name:
+              type: string
+            namespace:
+              type: string
+            labels:
+              type: object
+              additionalProperties:
+                type: string
+            resourceVersion:
+              type: string
+
+externalDocs:
+  description: Kubernetes ConfigMaps Documentation
+  url: https://kubernetes.io/docs/concepts/configuration/configmap/
+
+x-generation: 2
+x-implementation: configmap-based
+x-kubernetes:
+  namespace: hosted-tenants (default), configurable via MULTIENV_K8S_NAMESPACE
+  auth: In-cluster or local kubeconfig
+  labels:
+    managed: "multienv"
+    app: "tenant"
+x-compatibility:
+  generation-1: |
+    /environs endpoints are backward-compatible with Generation 1 API.
+    Response format includes `custom_env` and `state` fields for compatibility.
+  differences: |
+    - No process management (just config persistence)
+    - No /cluster or /resolve endpoints
+    - state always "persisted" (no "online", "stopped" states)
+    - No isDead or url fields
+x-architecture:
+  - component: k8s-inspector.js
+    role: REST API server
+    description: Kubernetes ConfigMap CRUD via REST API
+  - component: ConfigMap
+    role: Configuration storage
+    description: Kubernetes-native config persistence
+x-migration:
+  from-gen1:
+    - Convert .env files to ConfigMaps
+    - Update WORKER_ENV paths to Kubernetes namespace
+    - No process management needed
+  to-gen3:
+    - Add deployment controller
+    - Add dispatcher for ConfigMap watching
+    - ConfigMaps trigger actual pod creation
