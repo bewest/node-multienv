@@ -46,6 +46,11 @@ async function decoratorFinalize(req, res) {
       const tenantId = object.metadata?.labels?.['ns.mdn.io/tenant'] || 'unknown';
       const version = object.metadata?.labels?.['app.kubernetes.io/version'] || 'unknown';
       
+      const tier = object.metadata?.labels?.['ns.mdn.io/tier'] || 'unknown';
+      const dataClass = object.metadata?.labels?.['ns.mdn.io/data-class'] || 'unknown';
+      const createdAt = object.metadata?.annotations?.['ns.mdn.io/created-at'] || '';
+      const tenantEmail = object.metadata?.annotations?.['ns.mdn.io/tenant-email'] || '';
+      
       const volumeSnapshot = {
         apiVersion: 'snapshot.storage.k8s.io/v1',
         kind: 'VolumeSnapshot',
@@ -60,7 +65,16 @@ async function decoratorFinalize(req, res) {
             'app.kubernetes.io/version': version,
             'app.kubernetes.io/managed-by': 'metacontroller',
             'ns.mdn.io/tenant': tenantId,
-            'ns.mdn.io/backup-type': 'final'
+            'ns.mdn.io/backup-type': 'final',
+            'ns.mdn.io/tier': tier,
+            'ns.mdn.io/data-class': dataClass
+          },
+          annotations: {
+            'ns.mdn.io/snapshot-created': new Date().toISOString(),
+            'ns.mdn.io/source-pvc': pvcName,
+            'ns.mdn.io/source-created-at': createdAt,
+            'ns.mdn.io/tenant-email': tenantEmail,
+            'ns.mdn.io/backup-trigger': 'pvc-deletion'
           }
         },
         spec: {

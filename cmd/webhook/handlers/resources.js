@@ -49,7 +49,11 @@ function renderMongoDB(parent) {
     metadata: {
       name: secretName,
       namespace: namespace,
-      labels: standardLabels('database')
+      labels: standardLabels('database'),
+      annotations: {
+        'ns.mdn.io/created-at': new Date().toISOString(),
+        'ns.mdn.io/credential-type': 'mongodb-auth'
+      }
     },
     type: 'Opaque',
     stringData: {
@@ -89,7 +93,15 @@ function renderMongoDB(parent) {
     metadata: {
       name: statefulSetName,
       namespace: namespace,
-      labels: standardLabels('database')
+      labels: {
+        ...standardLabels('database'),
+        'ns.mdn.io/tier': parent.metadata.labels?.['ns.mdn.io/tier'] || 'basic'
+      },
+      annotations: {
+        'ns.mdn.io/created-at': new Date().toISOString(),
+        'ns.mdn.io/replicas': String(mongoReplicas),
+        'ns.mdn.io/storage-gi': storageGi
+      }
     },
     spec: {
       serviceName: serviceName,
@@ -190,7 +202,20 @@ function renderMongoDB(parent) {
         {
           metadata: {
             name: 'data',
-            labels: standardLabels('database')
+            labels: {
+              ...standardLabels('database'),
+              'ns.mdn.io/tier': parent.metadata.labels?.['ns.mdn.io/tier'] || 'basic',
+              'ns.mdn.io/data-class': 'production',
+              'ns.mdn.io/region': parent.data.REGION || 'default'
+            },
+            annotations: {
+              'ns.mdn.io/created-at': new Date().toISOString(),
+              'ns.mdn.io/parent-generation': String(parent.metadata.generation || 1),
+              'ns.mdn.io/tenant-email': parent.data.TENANT_EMAIL || '',
+              'ns.mdn.io/backup-schedule': parent.data.BACKUP_SCHEDULE || 'daily',
+              'ns.mdn.io/storage-class': storageClass,
+              'ns.mdn.io/size-gi': storageGi
+            }
           },
           spec: {
             accessModes: ['ReadWriteOnce'],
@@ -636,7 +661,10 @@ function renderMigrationJob(parent) {
       annotations: {
         'ns.mdn.io/migration-started': new Date().toISOString(),
         'ns.mdn.io/migration-method': migrationMethod,
-        'ns.mdn.io/migration-target': `${tenantId}-mongo`
+        'ns.mdn.io/migration-target': `${tenantId}-mongo`,
+        'ns.mdn.io/migration-source-db': sourceDb,
+        'ns.mdn.io/migrated-from': migrationSourceSecret ? `secret:${migrationSourceSecret}` : 'uri-provided',
+        'ns.mdn.io/parent-generation': String(parent.metadata.generation || 1)
       }
     },
     spec: {
