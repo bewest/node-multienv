@@ -465,6 +465,29 @@ Evolved significantly across generations:
 
 **Consul Update Evolution:** In Gen 1-3a, `master.js` manually updated Consul based on internal process state. Starting in Gen 3b, the deployment-operator watches pods and updates Consul automatically.
 
+**Technical Implementation (redirector-server):**
+
+The redirector-server component provides persistent traffic routing across all generations and mixed deployment environments:
+
+1. **Consul SRV Lookup:** Looks up the desired tenant SRV record in Consul to find the backend
+2. **Header-Based Proxying:** Uses a header to communicate the endpoint to nginx for efficient proxy
+3. **Worker Node Load:** Keeps the workload on horizontally scalable worker nodes instead of the control plane
+4. **Mixed Environments:** Works seamlessly across all generations regardless of backend implementation
+
+**Performance Characteristics:**
+
+While the workload is DNS-heavy, several optimizations reduce throughput to negligible amounts:
+- **Consul:** Provides efficient service discovery with built-in caching
+- **Kubernetes DNS Caching:** Reduces external DNS queries
+- **Unix Socket Colocation:** Containers sharing unix sockets reduce network overhead
+
+**DNS Load Sources:**
+- Tenant resolution requests from redirector-server
+- Consul health checks performing DNS lookups to execute the check
+- Health check endpoints themselves issuing DNS requests during validation
+
+**Note:** Metacontroller produces a greater volume of API traffic than a simple single-resource watch and API pairing, but the resolver's DNS optimization strategies keep overhead low.
+
 ### Key Components
 
 #### 1. ConfigMap Dispatcher (`k8s-dispatcher.js`)

@@ -150,6 +150,32 @@ spec:
       targetPort: 3636
 ```
 
+**Technical Implementation:**
+
+The redirector-server is the **persistent traffic routing component** used across all generations and mixed deployment environments. It provides a critical separation of concerns that keeps the workload on horizontally scalable worker nodes instead of the control plane.
+
+**Architecture:**
+1. **Consul SRV Lookup:** Looks up the desired tenant SRV record in Consul to find the backend
+2. **Header-Based Proxying:** Uses a header (`X-Accel-Redirect` or similar) to communicate the endpoint to nginx
+3. **Efficient Proxy:** nginx performs the actual proxy, keeping compute on worker nodes
+4. **Mixed Environments:** Works across all generations (Gen 1-4) regardless of backend implementation
+
+**Performance Characteristics:**
+
+While the workload is **DNS-heavy**, several optimizations reduce throughput to negligible amounts:
+- **Consul:** Provides efficient service discovery with built-in caching
+- **Kubernetes DNS Caching:** Reduces external DNS queries
+- **Unix Socket Colocation:** Containers sharing unix sockets reduce network overhead
+- **Result:** Negligible throughput impact despite high DNS request volume
+
+**DNS Load Sources:**
+- Tenant resolution requests from redirector-server
+- Consul health checks performing DNS lookups to execute the check
+- Health check endpoints themselves issuing DNS requests during validation
+
+**Comparison to Metacontroller:**
+Metacontroller produces a greater volume of API traffic than a simple single-resource watch and API pairing, but redirector-server's DNS optimization strategies keep its overhead low.
+
 ### Generation 2: ConfigMap-Based Persistence
 
 #### Mode: `inspector`

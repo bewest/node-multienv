@@ -60,6 +60,9 @@ The platform provides two distinct, independent interfaces that evolved across g
 
 **Consul Update Evolution:** In Gen 1-3a, `master.js` manually updated Consul based on internal process state. Starting in Gen 3b, the deployment-operator watches pods and updates Consul automatically.
 
+**Technical Implementation (redirector-server):**
+The redirector-server looks up the desired tenant SRV record in Consul. This pairing is used to resolve all Nightscout traffic across all tenants and works in mixed deployment environments. It uses a header to communicate the endpoint to nginx for an efficient proxy that keeps the load on horizontally scalable worker nodes instead of the control plane. While the workload is DNS-heavy, Consul, DNS caching in Kubernetes, and colocating some containers to share unix sockets reduces throughput to negligible amounts. Consul registers health checks which cause Consul itself to perform DNS lookups to execute the DNS check, and the health check itself will also issue a DNS request during validation. Metacontroller also produces a greater volume of API traffic than a simple single-resource watch and API pairing.
+
 ### The Critical Insight: Why Gen 3b → Gen 4
 
 When the **second watch** (pod watch) was added to the ConfigMap watch in Gen 3b, it became clear that managing resources would need to handle an **arbitrarily large number of resources** per tenant - not just a single Deployment, but 11-12 resources:
