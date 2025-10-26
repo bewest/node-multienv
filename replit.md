@@ -1,7 +1,7 @@
 # Nightscout Multi-Tenant Kubernetes Platform
 
 ## Overview
-This project establishes a production-grade, multi-tenant Nightscout platform on Kubernetes. It orchestrates tenant deployments using Metacontroller, integrating MongoDB, Change Data Capture (CDC) via Strimzi Kafka, and automated backup solutions. The platform prioritizes scalability and isolation, with all tenants residing in a dedicated `hosted-tenants` namespace and utilizing tenant-prefixed resources. The architectural evolution through a "Facade Pattern" approach allowed for progressive migration and zero-downtime upgrades across four generations, culminating in a fully declarative, Kubernetes-native system capable of hosting an unlimited number of tenants.
+This project delivers a production-grade, multi-tenant Nightscout platform built on Kubernetes. It utilizes Metacontroller for orchestrating tenant deployments, integrating MongoDB, Change Data Capture (CDC) via Strimzi Kafka, and automated backup solutions. The platform is designed for high scalability and strong tenant isolation, with all tenants residing in a dedicated `hosted-tenants` namespace using tenant-prefixed resources. The architecture evolved through a "Facade Pattern" across five generations, culminating in a fully declarative, Kubernetes-native system capable of hosting a large number of tenants with zero-downtime upgrades and progressive migration.
 
 ## User Preferences
 - Prefer Node.js/JavaScript for webhook implementation
@@ -12,39 +12,31 @@ This project establishes a production-grade, multi-tenant Nightscout platform on
 - Implement child preservation to protect external resources
 
 ## System Architecture
+The platform is built around a multi-tenant design, deploying all tenants within a single `hosted-tenants` namespace. Resources are uniquely identified and isolated using a tenant ID prefix and standard Kubernetes labels.
 
-### Multi-Tenant Design
-All tenants are deployed within a single `hosted-tenants` namespace. Resources are uniquely identified and isolated using a tenant ID prefix (e.g., `demo-mongo`), and standard Kubernetes labels are uniformly applied.
-
-### Controllers (Metacontroller)
-
-#### CompositeController (Tenant Orchestration)
-Manages tenant-specific resources (Nightscout deployments, MongoDB StatefulSets, Kafka topics, Kafka connectors) based on Kubernetes ConfigMaps labeled `ns.mdn.io/enabled: "true"`. Uses `/composite/sync` for resource rendering and `/composite/finalize` for cleanup.
-
-#### DecoratorController (PVC Backup Policy)
-Enforces backup policies for MongoDB PVCs by injecting annotations, finalizers, and triggering VolumeSnapshot creation upon PVC deletion. Uses `/decorator/sync` for injection and `/decorator/finalize` for snapshot creation.
-
-### Key Technologies
-- **Orchestration**: Kubernetes, Metacontroller.
-- **Messaging**: Strimzi Kafka for CDC.
-- **Database**: MongoDB (per-tenant replica sets).
-- **Webhook Implementation**: Node.js with Express and `@kubernetes/client-node`.
-
-### Project Structure
-The project includes a `/cmd/webhook` directory for the Node.js webhook server, `/k8s/metactl` for Metacontroller manifests, and `/container-images/ns-utility` for a utility container housing database operations and health checks.
-
-### Features & Design Choices
-- **Kubernetes-Idiomatic Status**: Webhooks report status using standard Kubernetes conditions (e.g., `MongoDBReady`, `MigrationComplete`, `CDCReady`, `Ready`).
-- **Child Preservation**: Ensures external resources managed by the webhook are not accidentally deleted.
-- **Automated Database Migration**: Secure, automated migration system with credential handling and validation.
-- **Comprehensive Labeling & Annotations**: Extensive metadata for audit, recovery, compliance, and filtering (e.g., `ns.mdn.io/created-at`, `ns.mdn.io/tenant-email`, `ns.mdn.io/backup-schedule`).
-- **Configurable Tenants**: Tenant configurations via ConfigMaps allow for parameterized resource sizing (CPU, memory, storage), image versions, and support for multi-tier offerings. Each tenant generates 11-12 Kubernetes resources.
-- **Facade Pattern**: The architecture evolved through four generations, maintaining a consistent "tenant configuration" abstraction while allowing the underlying implementation to change, enabling progressive migration and interface stability.
-- **Cloud-Native Startup**: A single multi-mode container image (`start_container.sh`) allows running different architectural components from the same image, providing flexibility and aiding migration.
+### Core Components
+- **Controllers**: Metacontroller is central to orchestration.
+    - **CompositeController**: Manages tenant-specific resources (Nightscout deployments, MongoDB StatefulSets, Kafka topics, Kafka connectors) based on Kubernetes ConfigMaps.
+    - **DecoratorController**: Enforces backup policies for MongoDB PVCs, injecting annotations, finalizers, and triggering VolumeSnapshot creation.
+- **Key Technologies**:
+    - **Orchestration**: Kubernetes, Metacontroller.
+    - **Messaging**: Strimzi Kafka for CDC.
+    - **Database**: MongoDB (per-tenant replica sets).
+    - **Webhook Implementation**: Node.js with Express and `@kubernetes/client-node`.
+    - **Traffic Serving**: Resolver + Consul coordination for persistent traffic management across all architectural generations.
+- **UI/UX Decisions**: Not directly applicable as this is a backend platform, but Kubernetes-idiomatic status conditions (e.g., `MongoDBReady`, `MigrationComplete`, `CDCReady`, `Ready`) provide clear state for operators.
+- **Design Choices & Features**:
+    - **Child Preservation**: Protects external resources managed by the webhook from accidental deletion.
+    - **Automated Database Migration**: Secure, automated system with credential handling and validation.
+    - **Comprehensive Labeling & Annotations**: Extensive metadata for audit, recovery, compliance, and filtering.
+    - **Configurable Tenants**: ConfigMaps enable parameterized resource sizing, image versions, and multi-tier offerings. Each tenant generates 11-12 Kubernetes resources.
+    - **Facade Pattern**: The architecture's evolution across five generations maintains a consistent "tenant configuration" abstraction, allowing underlying implementations to change for progressive migration and zero-downtime evolution.
+    - **Cloud-Native Startup**: A single multi-mode container image (`start_container.sh`) allows running different architectural components from the same image, providing flexibility.
+    - **Two-Interface Design**: Separate administration interface (managing configurations) and resolver interface (serving Nightscout traffic), ensuring independent scalability and evolution.
 
 ## External Dependencies
-
-- **Strimzi Kafka Operator**: Manages Kafka clusters and KafkaConnect for CDC.
-- **MongoDB**: Primary database, deployed as per-tenant StatefulSets.
-- **CSI Driver with Snapshot Support**: Enables VolumeSnapshots for PVC backups.
-- **Metacontroller**: A Kubernetes add-on facilitating custom controller development.
+- **Strimzi Kafka Operator**: Manages Kafka clusters and Kafka Connect for Change Data Capture (CDC).
+- **MongoDB**: The primary database, deployed as per-tenant StatefulSets.
+- **CSI Driver with Snapshot Support**: Required for VolumeSnapshot creation to facilitate PVC backups.
+- **Metacontroller**: A Kubernetes add-on used for custom controller development and tenant orchestration.
+- **Consul**: Utilized for service discovery and health checking within the resolver interface for traffic serving.

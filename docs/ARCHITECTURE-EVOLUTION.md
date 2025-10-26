@@ -368,27 +368,28 @@ function elect_runner(runners) {
 - **Configuration:** ConfigMaps trigger Deployment creation via dispatcher
 - **Orchestration:** Per-tenant Deployments (one Deployment per tenant)
 - **Resource Scope:** Deployment controller creates Deployments ONLY (experimental code for additional resources exists but not used)
-- **Consul Registration:** deployment-operator watches pods and registers with Consul (optional)
+- **Consul Registration:** deployment-operator watches pods and registers with Consul
 - **Isolation:** Full Kubernetes resource isolation per tenant
-- **Demuxer Role:** Largely obsolete - can be scaled down or removed (Kubernetes Services handle traffic routing)
+- **Resolver Interface:** Continues using resolver + Consul coordination for traffic serving
 
 ### Two-Interface Architecture
 
-The platform offers two distinct interfaces:
+The platform offers two distinct, independent interfaces:
 
-1. **Administration Interface**: Managing tenant configurations
-   - Gen 3a: Demuxer routes ConfigMap changes to StatefulSet members
-   - Gen 3b: Dispatcher → deployment-controller → creates Deployments
-   - Operates on ConfigMaps (source of truth)
-   
-2. **Traffic Serving Interface**: Routing user HTTP requests to Nightscout instances
-   - Gen 3a: Demuxer routes traffic to appropriate StatefulSet member (required)
-   - Gen 3b: Kubernetes Services route directly to per-tenant Deployments (demuxer optional/scalable to 0)
-   - Gen 4: Standard Kubernetes Service/Ingress (demuxer not needed)
+#### 1. Administration Interface: Managing Tenant Configurations/Environments
+Evolved significantly across generations:
+- **Gen 3a**: Demuxer routes ConfigMap changes to StatefulSet members
+- **Gen 3b**: Dispatcher → deployment-controller → creates Deployments
+- **Gen 4**: Metacontroller → webhooks (fully declarative)
 
-**Key Transition:** Once per-tenant Deployments replaced StatefulSet runners, demuxer's role in both interfaces became redundant:
-- **Admin interface**: Dispatcher pattern replaced demuxer for ConfigMap routing
-- **Traffic interface**: Kubernetes native Service discovery replaced demuxer for HTTP routing
+#### 2. Resolver Interface: Routing and Serving Nightscout Traffic
+**Persistent pattern across ALL generations** - resolver + Consul coordination:
+- **Gen 1**: `redirector-server.js` resolves to tenant processes
+- **Gen 3a**: `tenant-availability-keeper.js` (demuxer) routes to StatefulSet members via Consul
+- **Gen 3b**: Resolver routes to per-tenant Deployments via Consul
+- **Gen 4**: Resolver routes to Deployments via Consul
+
+**Critical Design Choice:** The resolver interface + Consul coordination ensures workload is performed by scalable worker nodes, rather than the control plane. This architectural pattern is fundamental and persists across all generations regardless of how the administration interface evolves.
 
 ### Key Components
 
