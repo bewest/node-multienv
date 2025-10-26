@@ -8,6 +8,7 @@ function renderMongoDB(parent) {
   
   // MongoDB configuration
   const mongoImage = parent.data.MONGO_IMAGE || 'mongo:6';
+  const mongoImagePullPolicy = parent.data.MONGO_IMAGE_PULL_POLICY || 'IfNotPresent';
   const mongoReplicas = parseInt(parent.data.MONGO_REPLICAS || '1');
   
   // Extract version from image
@@ -117,10 +118,14 @@ function renderMongoDB(parent) {
           labels: standardLabels('database')
         },
         spec: {
+          imagePullSecrets: parent.data.IMAGE_PULL_SECRET 
+            ? [{ name: parent.data.IMAGE_PULL_SECRET }] 
+            : undefined,
           initContainers: [
             {
               name: 'init-replica-set',
               image: parent.data.NS_UTILITY_IMAGE || 'ns-utility:latest',
+              imagePullPolicy: parent.data.NS_UTILITY_IMAGE_PULL_POLICY || 'IfNotPresent',
               command: ['init-replica-set.sh'],
               env: [
                 {
@@ -142,6 +147,7 @@ function renderMongoDB(parent) {
             {
               name: 'mongodb',
               image: mongoImage,
+              imagePullPolicy: mongoImagePullPolicy,
               command: ['mongod', '--replSet', 'rs0', '--bind_ip_all'],
               ports: [
                 {
@@ -260,6 +266,7 @@ function renderNightscout(parent) {
   
   // Nightscout configuration
   const nsImage = parent.data.NS_IMAGE || 'nightscout/cgm-remote-monitor:latest';
+  const nsImagePullPolicy = parent.data.NS_IMAGE_PULL_POLICY || 'IfNotPresent';
   const nsReplicas = parseInt(parent.data.NS_REPLICAS || '1');
   const nsServiceType = parent.data.NS_SERVICE_TYPE || 'ClusterIP';
   
@@ -317,10 +324,14 @@ function renderNightscout(parent) {
           labels: standardLabels('application')
         },
         spec: {
+          imagePullSecrets: parent.data.IMAGE_PULL_SECRET 
+            ? [{ name: parent.data.IMAGE_PULL_SECRET }] 
+            : undefined,
           containers: [
             {
               name: 'nightscout',
               image: nsImage,
+              imagePullPolicy: nsImagePullPolicy,
               ports: [
                 {
                   containerPort: 1337,
@@ -575,7 +586,13 @@ function renderMigrationJob(parent) {
   const migrationSourceUri = parent.data.MIGRATION_SOURCE_URI;
   const migrationSourceSecret = parent.data.MIGRATION_SOURCE_SECRET;
   const migrationMethod = parent.data.MIGRATION_METHOD || 'mongodump-restore';
-  const migrationImage = parent.data.MIGRATION_IMAGE || 'mongo:6';
+  const utilityImage = parent.data.NS_UTILITY_IMAGE || 'ns-utility:latest';
+  const utilityImagePullPolicy = parent.data.NS_UTILITY_IMAGE_PULL_POLICY || 'IfNotPresent';
+  const utilityImagePullSecret = parent.data.IMAGE_PULL_SECRET;
+  const utilityCpuRequest = parent.data.NS_UTILITY_CPU_REQUEST || '100m';
+  const utilityCpuLimit = parent.data.NS_UTILITY_CPU_LIMIT || '500m';
+  const utilityMemRequest = parent.data.NS_UTILITY_MEM_REQUEST || '256Mi';
+  const utilityMemLimit = parent.data.NS_UTILITY_MEM_LIMIT || '512Mi';
   
   if (!migrationSourceUri && !migrationSourceSecret) {
     console.error(`Migration enabled for tenant ${tenantId} but neither MIGRATION_SOURCE_URI nor MIGRATION_SOURCE_SECRET provided`);
@@ -677,21 +694,25 @@ function renderMigrationJob(parent) {
         },
         spec: {
           restartPolicy: 'OnFailure',
+          imagePullSecrets: utilityImagePullSecret 
+            ? [{ name: utilityImagePullSecret }] 
+            : undefined,
           containers: [
             {
               name: 'migration',
-              image: parent.data.NS_UTILITY_IMAGE || 'ns-utility:latest',
+              image: utilityImage,
+              imagePullPolicy: utilityImagePullPolicy,
               command: command,
               args: args,
               env: env,
               resources: {
                 requests: {
-                  cpu: '100m',
-                  memory: '256Mi'
+                  cpu: utilityCpuRequest,
+                  memory: utilityMemRequest
                 },
                 limits: {
-                  cpu: '500m',
-                  memory: '512Mi'
+                  cpu: utilityCpuLimit,
+                  memory: utilityMemLimit
                 }
               }
             }
