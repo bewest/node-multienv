@@ -11,9 +11,9 @@ This project demonstrates a textbook implementation of the **Facade Pattern** ac
 | Generation | Implementation | Configuration Source | Orchestration | API Type | Status |
 |------------|----------------|----------------------|---------------|----------|--------|
 | **Gen 1** | Process-based | `.env` files | Node.js cluster | REST | Legacy |
-| **Gen 2** | ConfigMap persistence | Kubernetes ConfigMaps | None (persistence only) | REST (compatible) | Legacy |
-| **Gen 3a** | StatefulSet runners | ConfigMaps (streamed) | Demuxer load balancing | REST | Legacy |
-| **Gen 3b** | Deployment controller | ConfigMaps + Dispatcher | Deployment + operator | REST + Webhooks | Legacy |
+| **Gen 2** | StatefulSet + demuxer | Kubernetes ConfigMaps | Demuxer routes admin changes | REST (compatible) | Legacy |
+| **Gen 3a** | StatefulSet + ConfigMap watch | ConfigMaps (watched) | Demuxer propagates ConfigMap changes | REST | Legacy |
+| **Gen 3b** | Deployment controller | ConfigMaps + Dispatcher | Per-tenant Deployments | REST + Webhooks | Legacy |
 | **Gen 4** | Metacontroller webhooks | ConfigMaps (declarative) | Metacontroller | Webhooks only | Current |
 
 ---
@@ -98,9 +98,9 @@ GET  /stats/active               # Get cluster statistics
 
 ---
 
-## Generation 2: Inspector (ConfigMap-Based Persistence)
+## Generation 2: Inspector (StatefulSet Runners + Demuxer for Admin)
 
-**Implementation:** `k8s-inspector.js`  
+**Implementation:** `k8s-inspector.js` + StatefulSet of `master.js` runners + demuxer  
 **Configuration:** Kubernetes ConfigMaps  
 **OpenAPI Spec:** [docs/openapi-gen2-inspector.yaml](openapi-gen2-inspector.yaml)
 
@@ -120,15 +120,30 @@ GET  /stats/active               # Get cluster statistics
 │  - prod (enabled=true)  │
 │  - test (enabled=true)  │
 └─────────────────────────┘
-    (No pods created - persistence only)
+         │
+         v
+    ┌────────┐     Internal admin change
+    │ Demuxer│ ────────────────────────────┐
+    └────────┘                             │
+         │                                 │
+         ├─────────────────────────────────┤
+         v                                 v
+┌──────────────────┐          ┌──────────────────┐
+│ master.js        │          │ master.js        │
+│ (StatefulSet-0)  │          │ (StatefulSet-1)  │
+│                  │          │                  │
+│ Consul update    │          │ Consul update    │
+└──────────────────┘          └──────────────────┘
 ```
 
 ### Key Characteristics
 
 - **Configuration:** Kubernetes ConfigMaps instead of .env files
-- **Process Management:** None (persistence layer only)
+- **Process Management:** StatefulSet of master.js runners
+- **Admin Routing:** Demuxer globally routes internal admin change requests across StatefulSet runners
 - **API Compatibility:** Maintains Gen 1 `/environs` endpoints
 - **Kubernetes-Native:** Uses @kubernetes/client-node
+- **Consul Update:** `master.js` manually updates Consul based on internal process state
 - **Migration Bridge:** Designed as stepping stone to Gen 3
 
 ### REST API Endpoints
@@ -195,10 +210,10 @@ POST /environs/:name/env/:field  # Set environment variable
 
 ---
 
-## Generation 3a: StatefulSet Runners (Multi-Instance Load Balancing)
+## Generation 3a: StatefulSet Runners (ConfigMap Watch + Demuxer Propagation)
 
 **Implementation:** `master.js` StatefulSet + `tenant-availability-keeper.js` (demuxer)  
-**Configuration:** ConfigMaps streamed as updates to running instances  
+**Configuration:** ConfigMap watch triggers demuxer to propagate changes to runners  
 **Timeframe:** Early Kubernetes adoption
 
 ### Architecture
@@ -206,9 +221,18 @@ POST /environs/:name/env/:field  # Set environment variable
 ```
 ┌─────────────────────┐
 │  Kubernetes API     │
-│  (ConfigMap events) │
+│  (ConfigMap watch)  │
 └──────────┬──────────┘
-           │ watch/stream
+           │ watch events
+           v
+┌─────────────────────────────────┐
+│ tenant-availability-keeper.js   │
+│  (Demuxer)                      │
+│  - Watches ConfigMaps           │
+│  - Propagates changes to        │
+│    runners                      │
+└──────────┬──────────────────────┘
+           │ propagate
            v
 ┌─────────────────────────────────┐
 │   StatefulSet: master.js        │
@@ -220,6 +244,7 @@ POST /environs/:name/env/:field  # Set environment variable
 │                                 │
 │   Each pod runs server.js       │
 │   Manages tenant processes      │
+│   Manually updates Consul       │
 └──────────┬──────────────────────┘
            │ register with Consul
            v
@@ -229,24 +254,26 @@ POST /environs/:name/env/:field  # Set environment variable
 │   - cluster service             │
 │   - tenant tags                 │
 └──────────┬──────────────────────┘
-           │ query capacity
+           │ query for routing
            v
 ┌─────────────────────────────────┐
-│ tenant-availability-keeper.js   │
-│  (Demuxer / Load Balancer)      │
-│  - Route change requests        │
-│  - Assign to least loaded       │
+│  Resolver (demuxer)             │
+│  - Routes traffic to            │
+│    StatefulSet members          │
+│  - Uses Consul for discovery    │
 └─────────────────────────────────┘
 ```
 
 ### Key Characteristics
 
-- **Configuration:** ConfigMaps streamed as updates to running StatefulSet members
-- **Orchestration:** Demuxer routes ConfigMap changes to appropriate master.js instance
+- **Configuration:** ConfigMap watch triggers demuxer to propagate changes to runners
+- **Orchestration:** Demuxer watches ConfigMaps and propagates changes to appropriate master.js instance
 - **Load Balancing:** New tenants assigned to least loaded/dense runner
 - **Isolation:** Each StatefulSet member manages multiple tenant processes
 - **Scaling:** Horizontal scaling via StatefulSet replicas
 - **State:** Runners maintain in-memory state of their tenants
+- **Consul Update:** `master.js` manually updates Consul based on internal process state
+- **Resolver:** Demuxer routes traffic to StatefulSet members via Consul
 
 ### How It Worked
 
@@ -356,11 +383,13 @@ function elect_runner(runners) {
                 │ query for routing
                 v
      ┌──────────────────────────────┐
-     │ tenant-availability-keeper   │
-     │     (Demuxer / LB)           │
-     │  - Routes user requests      │
-     │  - No longer routes changes  │
+     │   Resolver + Consul          │
+     │   (Routes traffic to         │
+     │    per-tenant Deployments)   │
      └──────────────────────────────┘
+
+Note: In Gen 3b, demuxer and StatefulSet runners from Gen 3a
+are scaled down and no longer used.
 ```
 
 ### Key Characteristics
@@ -368,9 +397,11 @@ function elect_runner(runners) {
 - **Configuration:** ConfigMaps trigger Deployment creation via dispatcher
 - **Orchestration:** Per-tenant Deployments (one Deployment per tenant)
 - **Resource Scope:** Deployment controller creates Deployments ONLY (experimental code for additional resources exists but not used)
-- **Consul Registration:** deployment-operator watches pods and registers with Consul
+- **Consul Registration:** deployment-operator watches pods and automatically updates Consul
 - **Isolation:** Full Kubernetes resource isolation per tenant
 - **Resolver Interface:** Continues using resolver + Consul coordination for traffic serving
+- **Demuxer & Runners:** Scaled down from Gen 3a (no longer needed)
+- **Consul Update Evolution:** Changed from manual updates by `master.js` to automatic updates by deployment-operator
 
 ### Two-Interface Architecture
 
@@ -378,18 +409,22 @@ The platform offers two distinct, independent interfaces:
 
 #### 1. Administration Interface: Managing Tenant Configurations/Environments
 Evolved significantly across generations:
-- **Gen 3a**: Demuxer routes ConfigMap changes to StatefulSet members
-- **Gen 3b**: Dispatcher → deployment-controller → creates Deployments
-- **Gen 4**: Metacontroller → webhooks (fully declarative)
+- **Gen 1**: REST API (`/environs`) operates on `.env` files
+- **Gen 2**: REST API (`/environs`, `/inspect`) operates on ConfigMaps; demuxer globally routes internal admin change requests across StatefulSet of runners
+- **Gen 3a**: ConfigMap watch triggers demuxer to propagate ConfigMap changes to StatefulSet runners
+- **Gen 3b**: Dispatcher watches ConfigMaps → deployment-controller creates per-tenant Deployments (demuxer and runners scaled down)
+- **Gen 4**: Metacontroller watches ConfigMaps, calls webhook (fully declarative)
 
 #### 2. Resolver Interface: Routing and Serving Nightscout Traffic
 **Persistent pattern across ALL generations** - resolver + Consul coordination:
-- **Gen 1**: `redirector-server.js` resolves to tenant processes
+- **Gen 1, Gen 2, Gen 3a**: `master.js` manually updates Consul based on internal process state
 - **Gen 3a**: `tenant-availability-keeper.js` (demuxer) routes to StatefulSet members via Consul
-- **Gen 3b**: Resolver routes to per-tenant Deployments via Consul
+- **Gen 3b**: Resolver routes to per-tenant Deployments via Consul; deployment-operator watches pods and updates Consul automatically
 - **Gen 4**: Resolver routes to Deployments via Consul
 
 **Critical Design Choice:** The resolver interface + Consul coordination ensures workload is performed by scalable worker nodes, rather than the control plane. This architectural pattern is fundamental and persists across all generations regardless of how the administration interface evolves.
+
+**Consul Update Evolution:** In Gen 1-3a, `master.js` manually updated Consul based on internal process state. Starting in Gen 3b, the deployment-operator watches pods and updates Consul automatically.
 
 ### Key Components
 
