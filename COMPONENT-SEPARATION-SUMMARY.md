@@ -5,18 +5,20 @@
 This document clarifies the separation between two distinct components that serve different interfaces:
 
 ### 1. Demuxer / tenant-availability-keeper
-**Purpose:** Routes **internal admin change requests** to StatefulSet runners  
+**Purpose:** Routes **internal admin change requests** to the correct runner's environs API  
 **Interface:** Administration Interface  
 **Technology:** Uses cluster's nginx config  
-**Generations:** Gen 2, Gen 3a only  
-**Scaled Down:** Gen 3b (replaced by dispatcher + deployment-controller)
+**Generations:** Gen 2, Gen 3a **ONLY**  
+**Not used in:** Gen 1 (single master.js, no routing needed), Gen 3b+ (replaced by direct k8s API)  
+**Why introduced (Gen 2):** StatefulSet with multiple runner pods needed routing infrastructure to mesh configuration changes to tenant instances  
+**Why eliminated (Gen 3b):** Switch from runners to deployment-per-tenant meant routing infrastructure wasn't needed; ConfigMap changes directly influence deployment runtime through k8s API (not through runner admin API)
 
-### 2. Resolver
+### 2. Resolver (redirector-server)
 **Purpose:** Proxies **external user traffic** from service port to NS instance backends  
 **Interface:** Traffic Serving Interface  
+**Generations:** ALL (Gen 1, Gen 2, Gen 3a, Gen 3b, Gen 4) - persistent across **all** generations  
 **Technology:** Consul + nginx coupling  
-**Generations:** ALL (Gen 1, Gen 2, Gen 3a, Gen 3b, Gen 4)  
-**Persistent:** Never scaled down, fundamental to all architectures
+**Persistent:** Never scaled down, fundamental to all architectures, unchanged across generations
 
 ---
 
@@ -159,9 +161,24 @@ This forced evolving from **a single inline async callback using the k8s API** t
 
 ---
 
+## Current State
+
+**Production:** Gen 3b (Deployment controller with ConfigMap/pod watches)  
+**Work-in-Progress:** Gen 4 (Metacontroller-based)
+
+### Gen 3b Key Innovations
+- ConfigMap changes → k8s API → Deployments (direct control)
+- Both runners and demuxer mesh infrastructure **eliminated**
+- Resolver component remains unchanged from previous generations
+- deployment-operator watches pods and automatically updates Consul
+
+---
+
 ## Documentation Updated
 
-✅ **replit.md** - Two-Interface Design section corrected  
+✅ **replit.md** - Two-Interface Design section corrected, current state noted  
 ✅ **docs/ARCHITECTURE-EVOLUTION.md** - Gen 2, Gen 3a, Gen 3b architecture diagrams updated  
 ✅ **docs/ARCHITECTURE-EVOLUTION.md** - Key Characteristics sections clarified  
-✅ **docs/ARCHITECTURE-EVOLUTION.md** - Two-Interface Architecture section corrected
+✅ **docs/ARCHITECTURE-EVOLUTION.md** - Two-Interface Architecture section corrected  
+✅ **docs/ARCHITECTURE-EVOLUTION.md** - Status table updated (Gen 3b = Current, Gen 4 = WIP)  
+✅ **COMPONENT-SEPARATION-SUMMARY.md** - Demuxer usage clarified (Gen 2-3a only)

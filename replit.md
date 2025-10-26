@@ -3,6 +3,10 @@
 ## Overview
 This project establishes a production-grade, multi-tenant Nightscout platform on Kubernetes. It orchestrates tenant deployments using Metacontroller, integrating MongoDB, Change Data Capture (CDC) via Strimzi Kafka, and automated backup solutions. The platform prioritizes scalability and isolation, with all tenants residing in a dedicated `hosted-tenants` namespace and utilizing tenant-prefixed resources. The architectural evolution through a "Facade Pattern" approach allowed for progressive migration and zero-downtime upgrades across five generations (Gen 1, Gen 2, Gen 3a, Gen 3b, Gen 4), culminating in a fully declarative, Kubernetes-native system capable of hosting an unlimited number of tenants.
 
+**Current State:**
+- **Gen 3b** is the current production implementation (Deployment controller with ConfigMap/pod watches)
+- **Gen 4** (Metacontroller-based) is work-in-progress
+
 ## User Preferences
 - Prefer Node.js/JavaScript for webhook implementation
 - Use existing @kubernetes/client-node library

@@ -6,15 +6,19 @@ This project demonstrates a textbook implementation of the **Facade Pattern** ac
 
 **Key Insight:** By wisely configuring components and maintaining interface compatibility, the project stayed flexible and evolved over time without breaking existing integrations.
 
+**Current State:**
+- **Gen 3b** is the current production implementation
+- **Gen 4** (Metacontroller-based) is work-in-progress
+
 ## The Generations
 
 | Generation | Implementation | Configuration Source | Orchestration | API Type | Status |
 |------------|----------------|----------------------|---------------|----------|--------|
 | **Gen 1** | Process-based | `.env` files | Node.js cluster | REST | Legacy |
-| **Gen 2** | StatefulSet + demuxer | Kubernetes ConfigMaps | Demuxer routes admin changes | REST (compatible) | Legacy |
-| **Gen 3a** | StatefulSet + ConfigMap watch | ConfigMaps (watched) | Demuxer propagates changes (tenant per process) | REST | Legacy |
-| **Gen 3b** | Deployment controller | ConfigMaps (watched) + pods (watched) | Dispatcher + deployment-operator (tenant per deployment) | REST + Webhooks | Legacy |
-| **Gen 4** | Metacontroller webhooks | ConfigMaps (declarative) | Metacontroller | Webhooks only | Current |
+| **Gen 2** | StatefulSet + demuxer | Kubernetes ConfigMaps | Demuxer routes admin changes to runners | REST (compatible) | Legacy |
+| **Gen 3a** | StatefulSet + ConfigMap watch | ConfigMaps (watched) | Demuxer propagates changes to runners | REST | Legacy |
+| **Gen 3b** | Deployment controller | ConfigMaps (watched) + pods (watched) | ConfigMap → k8s API → Deployments (tenant per deployment) | k8s API | **Current** |
+| **Gen 4** | Metacontroller webhooks | ConfigMaps (declarative) | Metacontroller webhooks | Webhooks only | **WIP** |
 
 ---
 
@@ -55,6 +59,8 @@ This project demonstrates a textbook implementation of the **Facade Pattern** ac
 - **Isolation:** Each tenant runs as separate process with unique PORT
 - **Orchestration:** File system watching triggers process lifecycle
 - **Scaling Limit:** Single host, ~50 tenants max
+- **Admin Interface:** Direct REST API to master.js (no demuxer routing needed)
+- **Traffic Routing:** Resolver + Consul coordination for serving user traffic
 
 ### REST API Endpoints
 
@@ -163,7 +169,8 @@ TRAFFIC SERVING INTERFACE (External User Requests):
 
 - **Configuration:** Kubernetes ConfigMaps instead of .env files
 - **Process Management:** StatefulSet of master.js runners
-- **Admin Routing:** Demuxer/tenant-availability-keeper routes internal admin change requests across StatefulSet runners (uses cluster's nginx config)
+- **Admin Routing (NEW):** Demuxer/tenant-availability-keeper introduced to route internal admin change requests across StatefulSet runners (uses cluster's nginx config)
+  - **Why needed:** With multiple runner pods in StatefulSet, need routing infrastructure to find the right runner's environs API
 - **Traffic Serving:** Resolver proxies external user requests to NS instance backends via Consul + nginx coupling
 - **API Compatibility:** Maintains Gen 1 `/environs` endpoints
 - **Kubernetes-Native:** Uses @kubernetes/client-node
@@ -296,7 +303,7 @@ TRAFFIC SERVING INTERFACE (External User Requests):
 ### Key Characteristics
 
 - **Configuration:** ConfigMap watch triggers demuxer to propagate changes to runners
-- **Admin Routing:** Demuxer/tenant-availability-keeper routes internal admin change requests to appropriate master.js instance (uses cluster's nginx config)
+- **Admin Routing:** Demuxer/tenant-availability-keeper continues from Gen 2, routing internal admin change requests to appropriate master.js instance's environs API (uses cluster's nginx config)
 - **Traffic Serving:** Resolver proxies external user requests to NS instance backends via Consul + nginx coupling
 - **Load Balancing:** New tenants assigned to least loaded/dense runner
 - **Isolation:** Each StatefulSet member manages multiple tenant processes
@@ -430,15 +437,18 @@ are scaled down and no longer used.
 ### Key Characteristics
 
 - **Configuration:** ConfigMaps trigger Deployment creation via dispatcher
-- **Orchestration:** Per-tenant Deployments (one Deployment per tenant)
+- **Orchestration:** Per-tenant Deployments (one Deployment per tenant) - **direct k8s API control**
 - **Watch Architecture:** Kept ConfigMap watches, added pod watches (more declarative than Gen 3a)
-  - Dispatcher watches ConfigMaps → creates Deployments
+  - Dispatcher watches ConfigMaps → creates Deployments via k8s API
   - deployment-operator watches pods → updates Consul
 - **Resource Scope:** Deployment controller creates Deployments ONLY (experimental code for additional resources exists but not used)
 - **Consul Registration:** deployment-operator watches pods and automatically updates Consul
 - **Isolation:** Full Kubernetes resource isolation per tenant
-- **Resolver Interface:** Continues using resolver + Consul coordination for traffic serving
-- **Scaled Down:** Runners, clusters, and demuxers from Gen 3a (no longer needed)
+- **Resolver Interface:** Continues using resolver + Consul coordination for traffic serving (unchanged from previous generations)
+- **Key Innovation:** ConfigMap changes directly influence deployment runtime through k8s API, eliminating need for runner admin API
+- **Infrastructure Eliminated:**
+  - ❌ **Runners** (master.js StatefulSet) - No longer needed; replaced by per-tenant Deployments
+  - ❌ **Demuxer mesh** - No longer needed; was only used in Gen 2 and Gen 3a to route admin config changes to runners' environs API
 - **Consul Update Evolution:** Changed from manual updates by `master.js` to automatic updates by deployment-operator
 
 ### Two-Interface Architecture
