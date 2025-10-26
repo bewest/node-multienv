@@ -43,17 +43,18 @@ The platform provides two distinct, independent interfaces that evolved across g
 
 ### 1. Administration Interface: Managing Tenant Configurations
 - **Gen 1**: REST API (`/environs`) operates on `.env` files
-- **Gen 2**: REST API operates on ConfigMaps; demuxer globally routes internal admin change requests across StatefulSet of runners
-- **Gen 3a**: ConfigMap watch triggers demuxer to propagate ConfigMap changes to StatefulSet runners
+- **Gen 2**: REST API operates on ConfigMaps; demuxer/tenant-availability-keeper routes internal admin change requests across StatefulSet of runners (uses cluster's nginx config)
+- **Gen 3a**: ConfigMap watch triggers demuxer/tenant-availability-keeper to propagate internal admin change requests to StatefulSet runners (uses cluster's nginx config)
 - **Gen 3b**: Dispatcher watches ConfigMaps → deployment-controller creates per-tenant Deployments (demuxer and runners scaled down)
 - **Gen 4**: Metacontroller watches ConfigMaps, calls webhook (fully declarative)
 
 ### 2. Resolver Interface: Routing and Serving Nightscout Traffic
-**Persistent pattern across ALL generations** - resolver + Consul coordination:
-- **Gen 1, Gen 2, Gen 3a**: `master.js` manually updates Consul based on internal process state
-- **Gen 3a**: `tenant-availability-keeper.js` (demuxer) routes to StatefulSet members via Consul
+**Persistent pattern across ALL generations** - resolver proxies from external service port to correct NS instance backend via Consul + nginx coupling:
+- **Gen 1**: Resolver routes to tenant processes; `master.js` manually updates Consul
+- **Gen 2**: Resolver routes to StatefulSet runners; `master.js` manually updates Consul
+- **Gen 3a**: Resolver routes to StatefulSet runners; `master.js` manually updates Consul
 - **Gen 3b**: Resolver routes to per-tenant Deployments via Consul; deployment-operator watches pods and updates Consul automatically
-- **Gen 4**: Resolver routes to Deployments via Consul
+- **Gen 4**: Resolver routes to per-tenant Deployments via Consul
 
 **Critical Design Choice:** The resolver interface + Consul coordination ensures workload is performed by worker nodes that can be scaled horizontally, rather than the control plane. This architectural pattern persists across all generations for efficient, scalable traffic serving.
 

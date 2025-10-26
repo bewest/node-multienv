@@ -107,6 +107,7 @@ GET  /stats/active               # Get cluster statistics
 ### Architecture
 
 ```
+ADMIN INTERFACE (ConfigMap Management + Internal Change Routing):
 ┌──────────────────┐       ┌──────────────────┐
 │ k8s-inspector.js │<──────│  REST API Client │
 │   (REST API)     │       └──────────────────┘
@@ -122,25 +123,48 @@ GET  /stats/active               # Get cluster statistics
 └─────────────────────────┘
          │
          v
-    ┌────────┐     Internal admin change
-    │ Demuxer│ ────────────────────────────┐
-    └────────┘                             │
-         │                                 │
-         ├─────────────────────────────────┤
-         v                                 v
+┌─────────────────────────────────┐
+│ tenant-availability-keeper.js   │
+│  (Demuxer for Admin Routing)    │
+│  - Routes internal admin        │
+│    change requests              │
+│  - Uses cluster's nginx config  │
+└──────────┬──────────────────────┘
+           │ propagate changes
+           ├─────────────────────────────────┤
+           v                                 v
 ┌──────────────────┐          ┌──────────────────┐
 │ master.js        │          │ master.js        │
 │ (StatefulSet-0)  │          │ (StatefulSet-1)  │
 │                  │          │                  │
-│ Consul update    │          │ Consul update    │
-└──────────────────┘          └──────────────────┘
+│ Manually updates │          │ Manually updates │
+│ Consul           │          │ Consul           │
+└──────────┬───────┘          └────────┬─────────┘
+           │                           │
+           └───────────┬───────────────┘
+                       v
+                 ┌─────────┐
+                 │ Consul  │
+                 └────┬────┘
+                      │ query for routing
+                      v
+
+TRAFFIC SERVING INTERFACE (External User Requests):
+┌─────────────────────────────────┐
+│  Resolver                       │
+│  - Proxies from external        │
+│    service port to correct      │
+│    NS instance backend          │
+│  - Uses Consul + nginx coupling │
+└─────────────────────────────────┘
 ```
 
 ### Key Characteristics
 
 - **Configuration:** Kubernetes ConfigMaps instead of .env files
 - **Process Management:** StatefulSet of master.js runners
-- **Admin Routing:** Demuxer globally routes internal admin change requests across StatefulSet runners
+- **Admin Routing:** Demuxer/tenant-availability-keeper routes internal admin change requests across StatefulSet runners (uses cluster's nginx config)
+- **Traffic Serving:** Resolver proxies external user requests to NS instance backends via Consul + nginx coupling
 - **API Compatibility:** Maintains Gen 1 `/environs` endpoints
 - **Kubernetes-Native:** Uses @kubernetes/client-node
 - **Consul Update:** `master.js` manually updates Consul based on internal process state
@@ -219,6 +243,7 @@ POST /environs/:name/env/:field  # Set environment variable
 ### Architecture
 
 ```
+ADMIN INTERFACE (Internal Change Requests):
 ┌─────────────────────┐
 │  Kubernetes API     │
 │  (ConfigMap watch)  │
@@ -227,12 +252,13 @@ POST /environs/:name/env/:field  # Set environment variable
            v
 ┌─────────────────────────────────┐
 │ tenant-availability-keeper.js   │
-│  (Demuxer)                      │
+│  (Demuxer for Admin Routing)    │
 │  - Watches ConfigMaps           │
-│  - Propagates changes to        │
-│    runners                      │
+│  - Routes internal admin        │
+│    change requests to runners   │
+│  - Uses cluster's nginx config  │
 └──────────┬──────────────────────┘
-           │ propagate
+           │ propagate change requests
            v
 ┌─────────────────────────────────┐
 │   StatefulSet: master.js        │
@@ -251,29 +277,32 @@ POST /environs/:name/env/:field  # Set environment variable
 ┌─────────────────────────────────┐
 │         Consul                  │
 │   (Service Discovery)           │
-│   - cluster service             │
+│   - backends service            │
 │   - tenant tags                 │
 └──────────┬──────────────────────┘
            │ query for routing
            v
+
+TRAFFIC SERVING INTERFACE (External User Requests):
 ┌─────────────────────────────────┐
-│  Resolver (demuxer)             │
-│  - Routes traffic to            │
-│    StatefulSet members          │
-│  - Uses Consul for discovery    │
+│  Resolver                       │
+│  - Proxies from external        │
+│    service port to correct      │
+│    NS instance backend          │
+│  - Uses Consul + nginx coupling │
 └─────────────────────────────────┘
 ```
 
 ### Key Characteristics
 
 - **Configuration:** ConfigMap watch triggers demuxer to propagate changes to runners
-- **Orchestration:** Demuxer watches ConfigMaps and propagates changes to appropriate master.js instance
+- **Admin Routing:** Demuxer/tenant-availability-keeper routes internal admin change requests to appropriate master.js instance (uses cluster's nginx config)
+- **Traffic Serving:** Resolver proxies external user requests to NS instance backends via Consul + nginx coupling
 - **Load Balancing:** New tenants assigned to least loaded/dense runner
 - **Isolation:** Each StatefulSet member manages multiple tenant processes
 - **Scaling:** Horizontal scaling via StatefulSet replicas
 - **State:** Runners maintain in-memory state of their tenants
 - **Consul Update:** `master.js` manually updates Consul based on internal process state
-- **Resolver:** Demuxer routes traffic to StatefulSet members via Consul
 
 ### How It Worked
 
@@ -410,17 +439,18 @@ The platform offers two distinct, independent interfaces:
 #### 1. Administration Interface: Managing Tenant Configurations/Environments
 Evolved significantly across generations:
 - **Gen 1**: REST API (`/environs`) operates on `.env` files
-- **Gen 2**: REST API (`/environs`, `/inspect`) operates on ConfigMaps; demuxer globally routes internal admin change requests across StatefulSet of runners
-- **Gen 3a**: ConfigMap watch triggers demuxer to propagate ConfigMap changes to StatefulSet runners
+- **Gen 2**: REST API (`/environs`, `/inspect`) operates on ConfigMaps; demuxer/tenant-availability-keeper routes internal admin change requests across StatefulSet of runners (uses cluster's nginx config)
+- **Gen 3a**: ConfigMap watch triggers demuxer/tenant-availability-keeper to propagate internal admin change requests to StatefulSet runners (uses cluster's nginx config)
 - **Gen 3b**: Dispatcher watches ConfigMaps → deployment-controller creates per-tenant Deployments (demuxer and runners scaled down)
 - **Gen 4**: Metacontroller watches ConfigMaps, calls webhook (fully declarative)
 
 #### 2. Resolver Interface: Routing and Serving Nightscout Traffic
-**Persistent pattern across ALL generations** - resolver + Consul coordination:
-- **Gen 1, Gen 2, Gen 3a**: `master.js` manually updates Consul based on internal process state
-- **Gen 3a**: `tenant-availability-keeper.js` (demuxer) routes to StatefulSet members via Consul
-- **Gen 3b**: Resolver routes to per-tenant Deployments via Consul; deployment-operator watches pods and updates Consul automatically
-- **Gen 4**: Resolver routes to Deployments via Consul
+**Persistent pattern across ALL generations** - resolver proxies from external service port to correct NS instance backend via Consul + nginx coupling:
+- **Gen 1**: Resolver routes to tenant processes; `master.js` manually updates Consul
+- **Gen 2**: Resolver routes to StatefulSet runners; `master.js` manually updates Consul
+- **Gen 3a**: Resolver routes to StatefulSet runners; `master.js` manually updates Consul
+- **Gen 3b**: Resolver routes to per-tenant Deployments; deployment-operator watches pods and updates Consul automatically
+- **Gen 4**: Resolver routes to per-tenant Deployments
 
 **Critical Design Choice:** The resolver interface + Consul coordination ensures workload is performed by scalable worker nodes, rather than the control plane. This architectural pattern is fundamental and persists across all generations regardless of how the administration interface evolves.
 
