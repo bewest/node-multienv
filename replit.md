@@ -49,13 +49,14 @@ The project is structured with a `/cmd/webhook` directory for the Node.js webhoo
 
 This project represents a **textbook implementation of the Facade Pattern**, evolving through four distinct architectural generations. Each generation improved upon the previous while maintaining interface compatibility where possible, enabling the platform to progress from simple process-based hosting to fully declarative Kubernetes-native orchestration.
 
-### The Four Generations
+### The Generations
 
 | Generation | Name | Implementation | Configuration | API | Status |
 |------------|------|----------------|---------------|-----|--------|
 | **Gen 1** | multienv | Process-based | `.env` files | REST | Legacy |
 | **Gen 2** | Inspector | ConfigMap persistence | Kubernetes ConfigMaps | REST (compatible) | Legacy |
-| **Gen 3** | Deployment Controller | Full K8s orchestration | ConfigMaps + Dispatcher | REST + Webhooks | Transitioning |
+| **Gen 3a** | StatefulSet runners | ConfigMaps (streamed) | Demuxer load balancing | REST | Legacy |
+| **Gen 3b** | Deployment Controller | ConfigMaps + Dispatcher | Deployment + operator | REST + Webhooks | Legacy |
 | **Gen 4** | Metacontroller | Declarative webhooks | ConfigMaps (declarative) | Webhooks only | **Current** |
 
 ### Facade Pattern Benefits

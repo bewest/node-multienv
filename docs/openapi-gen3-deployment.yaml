@@ -1,23 +1,28 @@
 openapi: 3.0.3
 info:
-  title: Nightscout Deployment Controller (Generation 3) - Full Kubernetes Orchestration API
+  title: Nightscout Deployment Controller (Generation 3b) - Per-Tenant Kubernetes Resources API
   version: 3.0.0
   description: |
-    Generation 3 of the Nightscout hosting platform. This implementation provides full Kubernetes
-    orchestration with Deployments, StatefulSets, Services, and Consul-based service discovery.
+    **Generation 3b** of the Nightscout hosting platform. This represents the **Deployment Controller** phase,
+    where each tenant gets isolated Kubernetes resources (one Deployment per tenant).
     
-    **Key Characteristics:**
-    - Full Kubernetes resource creation (Deployments, StatefulSets, PVCs, Services)
+    **Generation 3 Evolution:**
+    - **Gen 3a (StatefulSet Runners)**: Multiple master.js instances in StatefulSet, demuxer routes changes to runners
+    - **Gen 3b (Deployment Controller)**: This API - per-tenant Deployments, dispatcher watches ConfigMaps, deployment-operator registers with Consul
+    
+    **Gen 3b Key Characteristics:**
+    - Per-tenant Deployments (one Deployment per tenant, full resource isolation)
     - ConfigMap-triggered orchestration via dispatcher pattern
-    - Consul integration for service discovery and load balancing
-    - Early metacontroller webhook support
+    - deployment-controller creates Deployments ONLY (experimental code for more resources exists but not used)
+    - deployment-operator watches pods and registers with Consul
+    - Consul integration for service discovery
     - REST API for manual operations and debugging
     
     **Architecture:**
-    - `k8s-deployment-controller.js`: Creates/manages Kubernetes Deployments + MongoDB
-    - `k8s-dispatcher.js`: Watches ConfigMaps, dispatches events to controllers
-    - `tenant-availability-keeper.js` (demuxer): Consul-based tenant routing and load balancing
-    - Integration with early metacontroller webhooks
+    - `k8s-deployment-controller.js`: Creates per-tenant Deployments (limited scope)
+    - `k8s-dispatcher.js`: Watches ConfigMaps, dispatches ADDED/MODIFIED/DELETED events
+    - `k8s-dispatcher.js` (deployment-operator mode): Watches pods, registers with Consul
+    - `tenant-availability-keeper.js` (demuxer): Routes user requests (no longer routes ConfigMap changes)
     
     **Components:**
     1. **Deployment Controller**: Receives sync events, creates K8s resources
