@@ -45,7 +45,7 @@ The platform provides two distinct, independent interfaces that evolved across g
 - **Gen 1**: REST API (`/environs`) operates on `.env` files
 - **Gen 2**: REST API operates on ConfigMaps; demuxer/tenant-availability-keeper routes internal admin change requests across StatefulSet of runners (uses cluster's nginx config)
 - **Gen 3a**: ConfigMap watch triggers demuxer/tenant-availability-keeper to propagate internal admin change requests to StatefulSet runners (uses cluster's nginx config)
-- **Gen 3b**: Dispatcher watches ConfigMaps → deployment-controller creates per-tenant Deployments (demuxer and runners scaled down)
+- **Gen 3b**: Dispatcher watches ConfigMaps → deployment-controller creates per-tenant Deployments; deployment-operator watches pods. **Kept the watches, added another watch, made work more declarative** (runners, clusters, and demuxers scaled down)
 - **Gen 4**: Metacontroller watches ConfigMaps, calls webhook (fully declarative)
 
 ### 2. Resolver Interface: Routing and Serving Nightscout Traffic

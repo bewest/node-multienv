@@ -30,7 +30,7 @@ How tenant configurations are managed and updated:
 | Gen 1 | REST API on `.env` files | N/A (file-based) |
 | Gen 2 | REST API on ConfigMaps | Demuxer routes admin changes to StatefulSet runners |
 | Gen 3a | ConfigMap watch | Demuxer propagates ConfigMap changes to StatefulSet runners |
-| Gen 3b | Dispatcher + deployment-controller | Creates per-tenant Deployments (demuxer scaled down) |
+| Gen 3b | Dispatcher + deployment-controller | Dispatcher watches ConfigMaps, deployment-operator watches pods. **Kept the watches, added another watch, made work more declarative** (runners, clusters, demuxers scaled down) |
 | Gen 4 | Metacontroller webhooks | Fully declarative |
 
 ### Traffic Serving Interface (External User Requests)
@@ -82,6 +82,42 @@ TRAFFIC SERVING INTERFACE:
   Resolver → Deployments via Consul + nginx coupling
   (deployment-operator watches pods, updates Consul)
 ```
+
+---
+
+## The Gen 3a → Gen 3b Transition
+
+### What Changed: Tenant Per Process → Tenant Per Deployment
+
+**Gen 3a (Tenant per process):**
+- StatefulSet of master.js runners
+- Each runner manages multiple tenant processes
+- Demuxer routes admin changes to runners
+- ConfigMap watch triggers demuxer propagation
+
+**Gen 3b (Tenant per deployment):**
+- Per-tenant Kubernetes Deployments
+- Each tenant gets isolated Deployment
+- Dispatcher watches ConfigMaps → creates Deployments
+- deployment-operator watches pods → updates Consul
+
+### What Was Kept vs Scaled Down
+
+**Scaled Down:**
+- ❌ Runners (StatefulSet of master.js)
+- ❌ Clusters (multi-instance coordination)
+- ❌ Demuxers (tenant-availability-keeper for admin routing)
+
+**Kept:**
+- ✅ ConfigMap watches (dispatcher continues watching ConfigMaps)
+
+**Added:**
+- ✅ Pod watches (deployment-operator watches pods for Consul registration)
+
+**Made More Declarative:**
+- Instead of streaming changes to stateful runners
+- Declaratively create/update per-tenant Deployments
+- Let Kubernetes manage pod lifecycle
 
 ---
 
