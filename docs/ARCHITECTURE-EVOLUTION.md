@@ -368,9 +368,27 @@ function elect_runner(runners) {
 - **Configuration:** ConfigMaps trigger Deployment creation via dispatcher
 - **Orchestration:** Per-tenant Deployments (one Deployment per tenant)
 - **Resource Scope:** Deployment controller creates Deployments ONLY (experimental code for additional resources exists but not used)
-- **Consul Registration:** deployment-operator watches pods and registers with Consul
+- **Consul Registration:** deployment-operator watches pods and registers with Consul (optional)
 - **Isolation:** Full Kubernetes resource isolation per tenant
-- **Demuxer Role:** Routes user requests only (no longer routes ConfigMap changes)
+- **Demuxer Role:** Largely obsolete - can be scaled down or removed (Kubernetes Services handle traffic routing)
+
+### Two-Interface Architecture
+
+The platform offers two distinct interfaces:
+
+1. **Administration Interface**: Managing tenant configurations
+   - Gen 3a: Demuxer routes ConfigMap changes to StatefulSet members
+   - Gen 3b: Dispatcher → deployment-controller → creates Deployments
+   - Operates on ConfigMaps (source of truth)
+   
+2. **Traffic Serving Interface**: Routing user HTTP requests to Nightscout instances
+   - Gen 3a: Demuxer routes traffic to appropriate StatefulSet member (required)
+   - Gen 3b: Kubernetes Services route directly to per-tenant Deployments (demuxer optional/scalable to 0)
+   - Gen 4: Standard Kubernetes Service/Ingress (demuxer not needed)
+
+**Key Transition:** Once per-tenant Deployments replaced StatefulSet runners, demuxer's role in both interfaces became redundant:
+- **Admin interface**: Dispatcher pattern replaced demuxer for ConfigMap routing
+- **Traffic interface**: Kubernetes native Service discovery replaced demuxer for HTTP routing
 
 ### Key Components
 
