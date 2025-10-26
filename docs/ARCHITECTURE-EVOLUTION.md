@@ -2,17 +2,18 @@
 
 ## Overview
 
-This project demonstrates a textbook implementation of the **Facade Pattern** across four architectural generations. Each generation improved on the previous implementation while maintaining compatibility where possible, allowing the platform to evolve from a simple process-based system to a fully declarative Kubernetes-native orchestration platform.
+This project demonstrates a textbook implementation of the **Facade Pattern** across five architectural generations (Gen 1, Gen 2, Gen 3a, Gen 3b, Gen 4). Each generation improved on the previous implementation while maintaining compatibility where possible, allowing the platform to evolve from a simple process-based system to a fully declarative Kubernetes-native orchestration platform.
 
 **Key Insight:** By wisely configuring components and maintaining interface compatibility, the project stayed flexible and evolved over time without breaking existing integrations.
 
-## The Four Generations
+## The Generations
 
 | Generation | Implementation | Configuration Source | Orchestration | API Type | Status |
 |------------|----------------|----------------------|---------------|----------|--------|
 | **Gen 1** | Process-based | `.env` files | Node.js cluster | REST | Legacy |
 | **Gen 2** | ConfigMap persistence | Kubernetes ConfigMaps | None (persistence only) | REST (compatible) | Legacy |
-| **Gen 3** | Deployment controller | ConfigMaps + Dispatcher | Full Kubernetes | REST + Webhooks | Transitioning |
+| **Gen 3a** | StatefulSet runners | ConfigMaps (streamed) | Demuxer load balancing | REST | Legacy |
+| **Gen 3b** | Deployment controller | ConfigMaps + Dispatcher | Deployment + operator | REST + Webhooks | Legacy |
 | **Gen 4** | Metacontroller webhooks | ConfigMaps (declarative) | Metacontroller | Webhooks only | Current |
 
 ---
@@ -194,11 +195,11 @@ POST /environs/:name/env/:field  # Set environment variable
 
 ---
 
-## Generation 3: Deployment Controller (Full Kubernetes Orchestration)
+## Generation 3a: StatefulSet Runners (Multi-Instance Load Balancing)
 
-**Implementation:** `k8s-deployment-controller.js` + `k8s-dispatcher.js` + `tenant-availability-keeper.js`  
-**Configuration:** ConfigMaps trigger Deployments via dispatcher  
-**OpenAPI Spec:** [docs/openapi-gen3-deployment.yaml](openapi-gen3-deployment.yaml)
+**Implementation:** `master.js` StatefulSet + `tenant-availability-keeper.js` (demuxer)  
+**Configuration:** ConfigMaps streamed as updates to running instances  
+**Timeframe:** Early Kubernetes adoption
 
 ### Architecture
 
@@ -207,47 +208,175 @@ POST /environs/:name/env/:field  # Set environment variable
 │  Kubernetes API     │
 │  (ConfigMap events) │
 └──────────┬──────────┘
-           │ watch
-           v
-┌──────────────────────┐
-│  k8s-dispatcher.js   │ (Watches ConfigMaps)
-│  (Event Dispatcher)  │
-└──────────┬───────────┘
-           │ POST /sync/additions
-           │ POST /sync/updates
-           │ POST /sync/deletions
-           v
-┌─────────────────────────────────┐       ┌──────────────────┐
-│ k8s-deployment-controller.js    │<──────│  REST API Client │
-│  (Deployment Orchestration)     │       │  (Manual Ops)    │
-└──────────┬──────────────────────┘       └──────────────────┘
-           │ creates/updates
+           │ watch/stream
            v
 ┌─────────────────────────────────┐
-│   Kubernetes Resources          │
-│  - PVC (MongoDB data)            │
-│  - Deployment (Nightscout + DB)  │
-│  - Service                       │
+│   StatefulSet: master.js        │
+│   (Multi-Instance Runners)      │
+│                                 │
+│   master-0 (10 tenants)         │
+│   master-1 (15 tenants)         │
+│   master-2 (8 tenants)          │
+│                                 │
+│   Each pod runs server.js       │
+│   Manages tenant processes      │
 └──────────┬──────────────────────┘
-           │ registers
+           │ register with Consul
            v
 ┌─────────────────────────────────┐
 │         Consul                  │
 │   (Service Discovery)           │
+│   - cluster service             │
+│   - tenant tags                 │
 └──────────┬──────────────────────┘
-           │ queries
+           │ query capacity
            v
 ┌─────────────────────────────────┐
 │ tenant-availability-keeper.js   │
 │  (Demuxer / Load Balancer)      │
+│  - Route change requests        │
+│  - Assign to least loaded       │
 └─────────────────────────────────┘
 ```
 
+### Key Characteristics
+
+- **Configuration:** ConfigMaps streamed as updates to running StatefulSet members
+- **Orchestration:** Demuxer routes ConfigMap changes to appropriate master.js instance
+- **Load Balancing:** New tenants assigned to least loaded/dense runner
+- **Isolation:** Each StatefulSet member manages multiple tenant processes
+- **Scaling:** Horizontal scaling via StatefulSet replicas
+- **State:** Runners maintain in-memory state of their tenants
+
+### How It Worked
+
+**ConfigMap Change Flow:**
+1. User creates/updates ConfigMap
+2. Demuxer detects change
+3. Demuxer queries Consul for tenant location
+4. If existing tenant: Route to current runner (sticky routing)
+5. If new tenant: Elect least loaded runner
+6. Stream change request to elected runner
+7. Runner updates tenant process
+
+**Load Distribution:**
+```javascript
+// Demuxer assigns new tenant to least loaded runner
+function elect_runner(runners) {
+  return _.sortBy(runners, (r) => {
+    return r.activeCount / r.maxCapacity;
+  })[0];
+}
+
+// Example:
+// master-0: 10/50 = 0.20 ← ELECTED
+// master-1: 15/50 = 0.30
+// master-2:  8/50 = 0.16 ← Actually ELECTED (least dense)
+```
+
+### Use Cases
+
+✅ Multi-instance process management  
+✅ Load balancing across runners  
+✅ Horizontal scaling of runners  
+✅ Sticky routing for existing tenants  
+
+❌ Per-tenant Kubernetes resources  
+❌ Full resource isolation  
+❌ Declarative infrastructure  
+
+### Why It Worked
+
+- **Scalability:** Multiple runner instances vs single Gen 1 host
+- **Load Balancing:** Intelligent tenant assignment
+- **State Preservation:** Runners maintain tenant state
+- **Consul Integration:** Service discovery and health checking
+
+### Why We Evolved to Gen 3b
+
+- **Resource Isolation:** Tenants share runner pods, not isolated
+- **Complexity:** Streaming changes to stateful runners
+- **Operational Overhead:** Managing StatefulSet state
+- **Kubernetes-Native:** Per-tenant Deployments more idiomatic
+
+---
+
+## Generation 3b: Deployment Controller (Per-Tenant Kubernetes Resources)
+
+**Implementation:** `k8s-deployment-controller.js` + `k8s-dispatcher.js` (deployment-operator)  
+**Configuration:** ConfigMaps trigger Deployments via dispatcher  
+**OpenAPI Spec:** [docs/openapi-gen3-deployment.yaml](openapi-gen3-deployment.yaml)  
+**Note:** API spec represents Gen 3b architecture
+
+### Architecture
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                     Kubernetes Cluster                      │
+│                                                             │
+│  ┌────────────────┐                                         │
+│  │   ConfigMaps   │ (Tenant Configuration)                  │
+│  └────────┬───────┘                                         │
+│           │ watch                                           │
+│           v                                                 │
+│  ┌──────────────────────────────┐                           │
+│  │   k8s-dispatcher.js          │ (Watches ConfigMaps)      │
+│  │   (Event Dispatcher)         │                           │
+│  └──────────┬───────────────────┘                           │
+│             │ POST /sync/additions                          │
+│             │ POST /sync/updates                            │
+│             │ POST /sync/deletions                          │
+│             v                                               │
+│  ┌──────────────────────────────┐                           │
+│  │ k8s-deployment-controller.js │                           │
+│  │ (Creates Deployments ONLY)   │                           │
+│  └──────────┬───────────────────┘                           │
+│             │ creates Deployment                            │
+│             v                                               │
+│  ┌─────────────────────────────────────────┐                │
+│  │     Per-Tenant Deployment               │                │
+│  │  - Deployment (Nightscout + MongoDB)    │                │
+│  │  - PVC (MongoDB data)                   │                │
+│  └──────────┬──────────────────────────────┘                │
+│             │ pod becomes Running                           │
+│             v                                               │
+│  ┌──────────────────────────────┐                           │
+│  │  k8s-dispatcher.js           │ (deployment-operator mode)│
+│  │  (Watches Pods)              │                           │
+│  └──────────┬───────────────────┘                           │
+└─────────────┼───────────────────────────────────────────────┘
+              │ register pod
+              v
+     ┌─────────────────────┐
+     │      Consul         │
+     │  Service Catalog    │
+     │  - backends         │
+     │    - tags: [demo]   │
+     └──────────┬──────────┘
+                │ query for routing
+                v
+     ┌──────────────────────────────┐
+     │ tenant-availability-keeper   │
+     │     (Demuxer / LB)           │
+     │  - Routes user requests      │
+     │  - No longer routes changes  │
+     └──────────────────────────────┘
+```
+
+### Key Characteristics
+
+- **Configuration:** ConfigMaps trigger Deployment creation via dispatcher
+- **Orchestration:** Per-tenant Deployments (one Deployment per tenant)
+- **Resource Scope:** Deployment controller creates Deployments ONLY (experimental code for additional resources exists but not used)
+- **Consul Registration:** deployment-operator watches pods and registers with Consul
+- **Isolation:** Full Kubernetes resource isolation per tenant
+- **Demuxer Role:** Routes user requests only (no longer routes ConfigMap changes)
+
 ### Key Components
 
-#### 1. Dispatcher (`k8s-dispatcher.js`)
+#### 1. ConfigMap Dispatcher (`k8s-dispatcher.js`)
 
-**Role:** Watches ConfigMaps, dispatches events to controllers
+**Role:** Watches ConfigMaps, dispatches events to deployment-controller
 
 ```javascript
 // Watches ConfigMaps with labels: managed=multienv, app=tenant
@@ -277,14 +406,15 @@ SYNC_CONTROLLER=deployment  # or 'runner', 'consul'
 
 #### 2. Deployment Controller (`k8s-deployment-controller.js`)
 
-**Role:** Receives sync events, creates Kubernetes resources
+**Role:** Receives sync events, creates Deployments
 
-**Resources Created Per Tenant:**
-1. PersistentVolumeClaim (MongoDB data)
-2. Deployment with 2 containers:
+**Resources Created Per Tenant (Current Scope):**
+1. Deployment with 2 containers:
    - `nightscout`: nightscout/cgm-remote-monitor
    - `mongodb`: mongo:4.4
-3. Service (optional)
+2. PersistentVolumeClaim (MongoDB data)
+
+**Note:** Experimental code exists for creating additional resources (Services, StatefulSets, etc.), but current production usage is limited to Deployments only. Future Gen 4 (Metacontroller) will handle multi-resource orchestration declaratively.
 
 **Sync Endpoints:**
 ```
@@ -302,9 +432,32 @@ DELETE /deployments/:name      # Delete deployment
 POST /template/:name           # Generate template (no creation)
 ```
 
-#### 3. Tenant Availability Keeper (`tenant-availability-keeper.js`)
+#### 3. Deployment Operator (`k8s-dispatcher.js` in pod-watch mode)
 
-**Role:** Consul-based service discovery and load balancing (demuxer)
+**Role:** Watches pods, registers with Consul
+
+**Configuration:**
+```bash
+SYNC_CONTROLLER=deployment  # Enables deployment-operator mode
+# Watches pods created by deployment-controller
+# Registers running pods with Consul
+```
+
+**Workflow:**
+1. Deployment controller creates Deployment
+2. Kubernetes creates pod(s)
+3. Deployment-operator detects pod Running
+4. Registers pod in Consul with tenant tags
+5. Demuxer can now route traffic to pod
+
+**Why Separate from Dispatcher:**
+- Dispatcher watches ConfigMaps (source of truth)
+- Deployment-operator watches Pods (runtime state)
+- Clean separation of concerns
+
+#### 4. Tenant Availability Keeper (`tenant-availability-keeper.js`)
+
+**Role (Gen 3b):** User request routing via Consul (no longer routes ConfigMap changes)
 
 **Endpoints:**
 ```
@@ -859,33 +1012,97 @@ curl http://inspector:2828/environs/demo
 
 4. Cutover: Point clients to inspector instead of multienv
 
-### Gen 2 → Gen 3
+### Gen 2 → Gen 3a
 
-**Goal:** Add actual pod orchestration
+**Goal:** Add multi-instance runner orchestration with load balancing
 
 **Steps:**
-1. Deploy dispatcher:
+1. Deploy StatefulSet of master.js runners:
 ```bash
-kubectl apply -f k8s/dispatcher-deployment.yaml
+kubectl apply -f k8s/multienv-statefulset.yaml
+# Creates master-0, master-1, master-2, etc.
 ```
 
-2. Deploy deployment controller:
-```bash
-kubectl apply -f k8s/deployment-controller.yaml
-```
-
-3. Deploy Consul (optional):
+2. Deploy Consul for service discovery:
 ```bash
 kubectl apply -f k8s/consul.yaml
 ```
 
-4. Test: Create ConfigMap, watch for Deployment:
+3. Deploy demuxer for load balancing:
 ```bash
-kubectl create configmap test --from-literal=WEB_NAME=test
-kubectl get deployment test -w
+kubectl apply -f k8s/demuxer-deployment.yaml
 ```
 
-### Gen 3 → Gen 4
+4. Configure demuxer to stream changes to runners:
+```bash
+# Demuxer watches ConfigMaps
+# Routes changes to appropriate StatefulSet member
+# Assigns new tenants to least loaded runner
+```
+
+5. Test: Create ConfigMap, watch demuxer assign to runner:
+```bash
+kubectl create configmap test --from-literal=WEB_NAME=test
+# Demuxer routes to master-2 (least loaded)
+```
+
+### Gen 3a → Gen 3b
+
+**Goal:** Transition from StatefulSet runners to per-tenant Deployments
+
+**Motivation:**
+- Full resource isolation per tenant
+- Kubernetes-native per-tenant resources
+- Eliminate stateful runner complexity
+- Per-tenant PVCs for data isolation
+
+**Steps:**
+1. Deploy dispatcher (ConfigMap watcher):
+```bash
+kubectl apply -f k8s/dispatcher-deployment.yaml
+```
+
+2. Deploy deployment-controller:
+```bash
+kubectl apply -f k8s/deployment-controller.yaml
+# Limited to creating Deployments only
+```
+
+3. Deploy deployment-operator (pod watcher):
+```bash
+kubectl apply -f k8s/deployment-operator.yaml
+# Watches pods, registers with Consul
+```
+
+4. Test side-by-side:
+```bash
+# Old: ConfigMap → demuxer → StatefulSet runner
+# New: ConfigMap → dispatcher → deployment-controller → Deployment
+
+kubectl create configmap new-tenant --from-literal=WEB_NAME=new-tenant
+kubectl get deployment new-tenant -w
+```
+
+5. Migrate existing tenants:
+```bash
+# For each tenant in StatefulSet:
+# - Create corresponding ConfigMap (if not exists)
+# - Dispatcher creates Deployment
+# - Wait for pod Ready
+# - Migrate PVC data (if applicable)
+# - Remove from StatefulSet runner
+```
+
+6. Decomission StatefulSet runners:
+```bash
+kubectl delete statefulset master
+```
+
+**Key Difference:**
+- Gen 3a: Multiple tenants per runner pod (shared resources)
+- Gen 3b: One Deployment per tenant (isolated resources)
+
+### Gen 3b → Gen 4
 
 **Goal:** Move to declarative metacontroller
 
