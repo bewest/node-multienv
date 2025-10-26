@@ -2,13 +2,23 @@
 
 ## Overview
 
-Generation 3 represents the **full Kubernetes orchestration** generation, featuring:
-- **Dispatcher:** Watches ConfigMaps, dispatches events
-- **Deployment Controller:** Creates Kubernetes resources
-- **Demuxer (tenant-availability-keeper):** Consul-based load balancing
-- **Consul:** Service discovery and health checking
+Generation 3 represents the **full Kubernetes orchestration** generation. It evolved through two distinct phases:
 
-This document explains how these components work together to provide production-ready multi-tenant Nightscout hosting.
+### Generation 3a: StatefulSet Runners (Early Kubernetes)
+- **StatefulSet**: Multiple master.js instances managing tenant processes
+- **Demuxer**: Routed ConfigMap changes to appropriate runner, assigned new tenants to least loaded instance
+- **Consul**: Service discovery for runners and tenants
+- **Architecture**: Multiple tenants per runner pod (shared resources)
+
+### Generation 3b: Deployment Controller (Current Gen 3)
+- **Dispatcher**: Watches ConfigMaps, dispatches events to deployment-controller
+- **Deployment Controller**: Creates per-tenant Deployments (limited scope)
+- **Deployment-Operator**: Watches pods, registers with Consul
+- **Demuxer**: Routes user requests only (no longer routes ConfigMap changes)
+- **Consul**: Service discovery and health checking
+- **Architecture**: One Deployment per tenant (isolated resources)
+
+**This document primarily covers Generation 3b architecture.** For Gen 3a details and migration path, see [ARCHITECTURE-EVOLUTION.md](ARCHITECTURE-EVOLUTION.md).
 
 ## High-Level Architecture
 
