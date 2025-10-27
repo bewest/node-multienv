@@ -2,7 +2,13 @@
 
 ## Overview
 
-This document explains the architectural patterns used in our Metacontroller webhook handlers and how they align with Kubernetes best practices.
+This document explains the architectural patterns used in our **two-composite Metacontroller webhook handlers** (Gen 4) and how they align with Kubernetes best practices.
+
+**Applies to**:
+- Storage Composite: `storage-composite-sync.js` (Secret → MongoDB + Migration)
+- Compute Composite: `compute-composite-sync.js` (ConfigMap → Nightscout + CDC)
+
+**See also**: `docs/TWO-COMPOSITE-ARCHITECTURE.md` for the overall Gen 4 architecture.
 
 ## Core Patterns
 
