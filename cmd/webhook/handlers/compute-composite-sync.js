@@ -139,8 +139,31 @@ function findStorageSecret(related, storageAccountLabel) {
 
 /**
  * Check MongoDB readiness from related StatefulSet
+ * Note: Shared storage (no StatefulSet) is considered ready
  */
 function checkMongoReadinessFromRelated(related, storageAccountLabel) {
+  // Check if using shared storage (no StatefulSet expected)
+  const storageSecrets = related?.['Secret.v1'] || {};
+  for (const [name, secret] of Object.entries(storageSecrets)) {
+    const accountLabel = secret.metadata?.labels?.['storage.nightscout.org/account'];
+    const storageType = secret.metadata?.annotations?.['ns.mdn.io/storage-type'];
+    
+    if (accountLabel === storageAccountLabel && storageType === 'shared') {
+      console.log(`  Shared storage detected - MongoDB assumed ready (no StatefulSet check)`);
+      return {
+        ready: true,
+        condition: {
+          type: 'MongoDBReady',
+          status: 'True',
+          reason: 'SharedMongoDB',
+          message: 'Using shared MongoDB cluster (no dedicated StatefulSet)',
+          lastTransitionTime: new Date().toISOString()
+        }
+      };
+    }
+  }
+  
+  // Dedicated storage - check StatefulSet readiness
   if (!related || !related['StatefulSet.apps/v1']) {
     return {
       ready: false,
@@ -148,7 +171,7 @@ function checkMongoReadinessFromRelated(related, storageAccountLabel) {
         type: 'MongoDBReady',
         status: 'False',
         reason: 'StatefulSetNotFound',
-        message: 'MongoDB StatefulSet not found in related resources',
+        message: 'MongoDB StatefulSet not found in related resources (dedicated storage expected)',
         lastTransitionTime: new Date().toISOString()
       }
     };
