@@ -87,15 +87,22 @@ This forced a fundamental design change: from **a single inline async callback u
 
 ## Gen 4 Implementation Details
 
-### Two-Composite Architecture
-- **Storage Composite**: Secret → MongoDB StatefulSet + Service
+### Two-Composite Architecture (Canonical Implementation)
+Gen 4 uses a **two-composite architecture** that separates storage concerns from compute concerns. This is the shipped implementation.
+
+- **Storage Composite**: Secret → MongoDB StatefulSet + Service + Migration Jobs
   - Annotation-driven behavior via `ns.mdn.io/storage-type` (shared/dedicated)
   - Migration support via `ns.mdn.io/migration-needed` annotation
   - Renders migration Job when annotations present
-- **Compute Composite**: ConfigMap → Nightscout Deployment
+  - Credentials isolated in Secrets (not visible to environs API)
+  
+- **Compute Composite**: ConfigMap → Nightscout Deployment + Service + CDC resources
   - Discovers storage via `storage.nightscout.org/account` label
   - Treats shared storage as ready (no StatefulSet check)
   - Uses related resources for blast radius protection
+  - No credential access (security boundary)
+
+**Alternative Considered (Not Shipped)**: A monolithic composite approach (ConfigMap → all resources) was explored but archived due to security concerns (credentials would be in ConfigMaps, visible to environs API). See `archive/monolithic-composite/README.md` for detailed rationale.
 
 ### Annotation-Driven Migration Pattern
 - Migration is a **storage-layer concern** (not deployment lifecycle)
