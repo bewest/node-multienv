@@ -25,8 +25,14 @@ The two-composite architecture separates storage (MongoDB) from compute (Nightsc
 
 **Related** (discovered, NOT deleted with parent):
 - PersistentVolumeClaim (created by StatefulSet volumeClaimTemplates)
+- ConfigMap (tenants using this storage account - for auditing)
 
 **Webhook**: `POST /composite/storage/sync`
+
+**Status Reporting**:
+- MongoDB readiness (`MongoDBReady` condition)
+- Migration progress (`MigrationComplete` condition)
+- Tenant usage count (how many tenants use this storage account)
 
 ### Compute Composite
 
@@ -71,14 +77,66 @@ metadata:
 | `shared` | ❌ No (uses external cluster) | ❌ No | ❌ No (source only) |
 | `dedicated` | ✅ Yes (per-tenant) | ✅ Yes (via volumeClaimTemplates) | ✅ Yes |
 
-### Compute Composite Labels
+## Label Strategy: Storage Account vs Tenant ID
+
+**Critical distinction**:
+- **Storage Account ID**: ObjectID from provisioner system (e.g., `507f1f77bcf86cd799439011`)
+- **Tenant ID**: 8-character DNS-friendly ID (e.g., `demo1234`, `prod9999`)
+
+**Cardinality**:
+- **Shared storage**: 1 storage account → N tenants (no StatefulSet/PVCs)
+- **Dedicated storage**: 1 storage account → 1 tenant (has StatefulSet/PVCs)
+
+### Storage Resource Labels
+
+```yaml
+# Storage Secret
+metadata:
+  labels:
+    ns.mdn.io/composite: storage
+    storage.nightscout.org/account: "507f1f77bcf86cd799439011"  # Storage account ObjectID
+
+# MongoDB StatefulSet (dedicated only)
+metadata:
+  labels:
+    storage.nightscout.org/account: "507f1f77bcf86cd799439011"  # Storage account
+    app.kubernetes.io/name: mongodb
+
+# PersistentVolumeClaim (created by StatefulSet)
+metadata:
+  labels:
+    storage.nightscout.org/account: "507f1f77bcf86cd799439011"  # Belongs to storage account
+    app.kubernetes.io/name: mongodb
+    # NO ns.mdn.io/tenant label - PVCs belong to storage, not specific tenant
+```
+
+### Compute ConfigMap Labels
 
 ```yaml
 metadata:
   labels:
     ns.mdn.io/composite: compute  # Triggers compute controller
-    storage.nightscout.org/account: demo-account  # Links to storage Secret
+    ns.mdn.io/tenant: "demo1234"  # 8-char tenant ID
+    storage.nightscout.org/account: "507f1f77bcf86cd799439011"  # Links to storage account
 ```
+
+### PVC Decorator Controller
+
+Watches PVCs by **storage account**, not tenant:
+
+```yaml
+labelSelector:
+  matchExpressions:
+    - key: app.kubernetes.io/name
+      operator: In
+      values: ["mongodb"]
+    - key: storage.nightscout.org/account
+      operator: Exists  # Matches any storage account
+```
+
+This works because:
+- Dedicated storage: PVCs labeled with storage account
+- Shared storage: No PVCs created (decorator never sees them)
 
 ## Blast Radius Protection
 

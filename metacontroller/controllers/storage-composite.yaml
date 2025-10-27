@@ -40,6 +40,21 @@ spec:
     # If Secret deleted → StatefulSet deleted, but PVCs survive
     - apiVersion: v1
       resource: persistentvolumeclaims
+      labelSelector:
+        matchLabels:
+          storage.nightscout.org/account: ${parent.metadata.labels.storage\.nightscout\.org/account}
+    
+    # ConfigMaps using this storage account (for auditing/reporting)
+    # Shows how many tenants are using shared or dedicated storage
+    - apiVersion: v1
+      resource: configmaps
+      labelSelector:
+        matchExpressions:
+          - key: storage.nightscout.org/account
+            operator: Exists
+          - key: ns.mdn.io/composite
+            operator: In
+            values: ["compute"]
   
   hooks:
     sync:

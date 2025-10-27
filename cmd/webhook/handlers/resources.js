@@ -32,6 +32,9 @@ function renderMongoDB(parent) {
 
   const resources = [];
 
+  // Storage account ID from parent labels
+  const storageAccount = parent.metadata.labels?.['storage.nightscout.org/account'] || tenantId;
+
   // Helper function for standard labels
   const standardLabels = (component, additionalLabels = {}) => ({
     'app.kubernetes.io/name': 'mongodb',
@@ -40,7 +43,7 @@ function renderMongoDB(parent) {
     'app.kubernetes.io/instance': tenantId,
     'app.kubernetes.io/version': mongoVersion,
     'app.kubernetes.io/managed-by': 'metacontroller',
-    'ns.mdn.io/tenant': tenantId,
+    'storage.nightscout.org/account': storageAccount,
     ...additionalLabels
   });
 

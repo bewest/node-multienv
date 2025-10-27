@@ -95,12 +95,24 @@ Gen 4 uses a **two-composite architecture** that separates storage concerns from
   - Migration support via `ns.mdn.io/migration-needed` annotation
   - Renders migration Job when annotations present
   - Credentials isolated in Secrets (not visible to environs API)
+  - Discovers tenant ConfigMaps for usage auditing/reporting
   
 - **Compute Composite**: ConfigMap → Nightscout Deployment + Service + CDC resources
   - Discovers storage via `storage.nightscout.org/account` label
   - Treats shared storage as ready (no StatefulSet check)
   - Uses related resources for blast radius protection
   - No credential access (security boundary)
+
+- **PVC Decorator**: Adds backup policy to MongoDB PVCs
+  - Watches PVCs by `storage.nightscout.org/account` (not tenant ID)
+  - Adds finalizers and creates VolumeSnapshots on deletion
+  - Works for both shared (no PVCs) and dedicated (has PVCs) storage
+
+**Label Strategy**:
+- **Storage Account ID**: ObjectID (e.g., `507f1f77bcf86cd799439011`) - identifies storage resources
+- **Tenant ID**: 8-char DNS ID (e.g., `demo1234`) - identifies compute instances
+- **Cardinality**: Shared storage (1:N), Dedicated storage (1:1)
+- **PVCs belong to storage accounts**, not specific tenants
 
 **Alternative Considered (Not Shipped)**: A monolithic composite approach (ConfigMap → all resources) was explored but archived due to security concerns (credentials would be in ConfigMaps, visible to environs API). See `archive/monolithic-composite/README.md` for detailed rationale.
 

@@ -21,9 +21,10 @@
 const { renderMongoDB } = require('./resources');
 
 async function storageCompositeSync(req, res) {
-  const { parent, children } = req.body;
+  const { parent, children, related } = req.body;
   
   const storageAccount = parent.metadata.name;
+  const storageAccountLabel = parent.metadata.labels?.['storage.nightscout.org/account'];
   console.log('Storage composite sync for account:', storageAccount);
   
   try {
@@ -37,8 +38,26 @@ async function storageCompositeSync(req, res) {
           resource: 'persistentvolumeclaims',
           labelSelector: {
             matchLabels: {
-              'storage.nightscout.org/account': parent.metadata.labels?.['storage.nightscout.org/account']
+              'storage.nightscout.org/account': storageAccountLabel
             }
+          }
+        },
+        {
+          // Discover tenant ConfigMaps using this storage (for auditing)
+          apiVersion: 'v1',
+          resource: 'configmaps',
+          labelSelector: {
+            matchExpressions: [
+              {
+                key: 'storage.nightscout.org/account',
+                operator: 'Exists'
+              },
+              {
+                key: 'ns.mdn.io/composite',
+                operator: 'In',
+                values: ['compute']
+              }
+            ]
           }
         }
       ]
@@ -87,6 +106,9 @@ async function storageCompositeSync(req, res) {
     // Check migration state
     const migrationState = checkMigrationState(children, parent);
     
+    // Count tenants using this storage account (from related ConfigMaps)
+    const tenantUsage = countTenantUsage(related, storageAccountLabel);
+    
     // Build status
     const mongoHost = storageType === 'shared' 
       ? (Buffer.from(parent.data?.mongoHost || '', 'base64').toString('utf-8') || 'shared-mongodb')
@@ -105,6 +127,10 @@ async function storageCompositeSync(req, res) {
         host: mongoHost,
         ready: mongoReadiness.ready,
         replicas: mongoReadiness.replicas
+      },
+      tenantUsage: {
+        count: tenantUsage.count,
+        tenants: tenantUsage.tenantIds
       },
       migration: migrationState.enabled ? {
         enabled: true,
@@ -378,6 +404,39 @@ function checkMigrationState(children, parent) {
     phase: 'NotStarted',
     complete: false,
     condition: null
+  };
+}
+
+/**
+ * Count tenant usage from related ConfigMaps
+ * Reports how many tenants are using this storage account
+ */
+function countTenantUsage(related, storageAccountLabel) {
+  if (!related || !related['ConfigMap.v1']) {
+    return {
+      count: 0,
+      tenantIds: []
+    };
+  }
+  
+  const configMaps = related['ConfigMap.v1'];
+  const tenants = [];
+  
+  for (const [name, cm] of Object.entries(configMaps)) {
+    const cmStorageAccount = cm.metadata?.labels?.['storage.nightscout.org/account'];
+    const tenantId = cm.metadata?.labels?.['ns.mdn.io/tenant'] || name;
+    
+    // Only count ConfigMaps that match this storage account
+    if (cmStorageAccount === storageAccountLabel) {
+      tenants.push(tenantId);
+    }
+  }
+  
+  console.log(`  Tenant usage: ${tenants.length} tenant(s) using storage account ${storageAccountLabel}`);
+  
+  return {
+    count: tenants.length,
+    tenantIds: tenants
   };
 }
 
