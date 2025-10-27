@@ -8,12 +8,17 @@
  *   - Nightscout Deployment
  *   - Nightscout Service
  *   - PodDisruptionBudget (optional)
+ *   - KafkaTopic (if CDC_ENABLED)
+ *   - KafkaConnector (if CDC_ENABLED)
  * Related (not owned):
  *   - Storage Secret (discovered via storage.nightscout.org/account label)
- *   - MongoDB StatefulSet (learned from Secret, provides blast radius protection)
+ *   - MongoDB StatefulSet (blast radius protection)
+ * 
+ * Note: Migration is a storage-layer concern handled by storage composite.
+ *       This controller never renders migration Jobs.
  */
 
-const { renderNightscout, renderKafkaTopics, renderKafkaConnector, renderMigrationJob } = require('./resources');
+const { renderNightscout, renderKafkaTopics, renderKafkaConnector } = require('./resources');
 
 async function computeCompositeSync(req, res) {
   const { parent, children, related } = req.body;
@@ -88,21 +93,9 @@ async function computeCompositeSync(req, res) {
       response.children.push(renderKafkaConnector(enrichedParent));
     }
 
-    // Optional: Migration job if enabled
-    const migrationEnabled = parent.data?.MIGRATION_ENABLED === 'true';
-    const migrationState = checkMigrationState(children);
-    const migrationCompleteMarker = parent.metadata?.annotations?.['ns.mdn.io/migration-complete'];
-    
-    if (migrationEnabled && mongoReadiness.ready && migrationState.phase !== 'Complete' && !migrationCompleteMarker) {
-      console.log(`Rendering migration job for tenant ${tenantId}`);
-      response.children.push(renderMigrationJob(enrichedParent));
-    }
-
     // Build status
     response.status = buildStatus(parent, {
       mongoReadiness,
-      migrationState,
-      migrationEnabled,
       cdcEnabled,
       storageAccount: storageAccountLabel,
       children
@@ -248,71 +241,26 @@ function enrichWithStorageInfo(parent, storageSecret, storageAccountLabel) {
 }
 
 /**
- * Check migration job state
- */
-function checkMigrationState(children) {
-  const jobs = children['Job.batch/v1'] || {};
-  
-  for (const [name, job] of Object.entries(jobs)) {
-    if (name.endsWith('-migration')) {
-      const conditions = job.status?.conditions || [];
-      const succeeded = job.status?.succeeded || 0;
-      const active = job.status?.active || 0;
-      
-      const completeCondition = conditions.find(c => c.type === 'Complete' && c.status === 'True');
-      const failedCondition = conditions.find(c => c.type === 'Failed' && c.status === 'True');
-      
-      if (completeCondition || succeeded > 0) {
-        return { phase: 'Complete' };
-      } else if (failedCondition) {
-        return { phase: 'Failed' };
-      } else if (active > 0) {
-        return { phase: 'Running' };
-      } else {
-        return { phase: 'Pending' };
-      }
-    }
-  }
-  
-  return { phase: 'NotStarted' };
-}
-
-/**
  * Build Kubernetes-idiomatic status
  */
 function buildStatus(parent, state) {
-  const { mongoReadiness, migrationState, migrationEnabled, cdcEnabled, storageAccount } = state;
+  const { mongoReadiness, cdcEnabled, storageAccount } = state;
   
   const conditions = [];
   
   // MongoDB readiness (from related resources)
   conditions.push(mongoReadiness.condition);
   
-  // Migration condition if enabled
-  if (migrationEnabled && migrationState.phase !== 'NotStarted') {
-    const migrationComplete = migrationState.phase === 'Complete';
-    conditions.push({
-      type: 'MigrationComplete',
-      status: migrationComplete ? 'True' : 'False',
-      reason: migrationComplete ? 'JobSucceeded' : `Job${migrationState.phase}`,
-      message: migrationComplete 
-        ? 'Database migration completed successfully'
-        : `Migration ${migrationState.phase.toLowerCase()}`,
-      lastTransitionTime: new Date().toISOString()
-    });
-  }
-  
   // Overall Ready condition
-  const allReady = mongoReadiness.ready && 
-                   (!migrationEnabled || migrationState.phase === 'Complete' || migrationState.phase === 'NotStarted');
+  const allReady = mongoReadiness.ready;
   
   conditions.push({
     type: 'Ready',
     status: allReady ? 'True' : 'False',
-    reason: allReady ? 'AllComponentsReady' : 'WaitingForComponents',
+    reason: allReady ? 'AllComponentsReady' : 'WaitingForMongoDB',
     message: allReady 
       ? 'Tenant is ready and operational'
-      : 'Waiting for storage or migration to complete',
+      : 'Waiting for MongoDB to become ready',
     lastTransitionTime: new Date().toISOString()
   });
   
@@ -322,12 +270,6 @@ function buildStatus(parent, state) {
     storage: {
       account: storageAccount,
       mongoReady: mongoReadiness.ready
-    },
-    migration: migrationEnabled ? {
-      enabled: true,
-      phase: migrationState.phase
-    } : {
-      enabled: false
     }
   };
 }
