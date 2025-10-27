@@ -48,6 +48,11 @@ COMMANDS:
     needs-migration <tenant>            Check if migration is needed
     tenant-health <tenant>              Overall tenant health check
 
+  Reconciliation Patterns:
+    cycle-storage <tenant>              Remove/re-add storage composite label (exercises webhook)
+    cycle-compute <tenant>              Remove/re-add compute composite label (exercises webhook)
+    force-reconcile <tenant>            Cycle both storage and compute (full reconciliation)
+
 EXAMPLES:
   # List all tenants
   $0 list-tenants
@@ -63,6 +68,11 @@ EXAMPLES:
 
   # Check migration status
   $0 get-secret-status storage-demo | json status.conditions
+
+  # Exercise reconciliation without deletion
+  $0 cycle-storage demo          # Recreate MongoDB resources
+  $0 cycle-compute demo          # Recreate Nightscout resources
+  $0 force-reconcile demo        # Full reconciliation (storage + compute)
 EOF
       ;;
 
@@ -250,6 +260,67 @@ EOF
       if [ -n "$migration_complete" ]; then
         echo "Migration complete: $migration_complete"
       fi
+      ;;
+
+    # Reconciliation patterns (exercise controller without deletion)
+    cycle-storage)
+      tenant=$2
+      test -z "$tenant" && (echo "Error: Missing tenant name" && exit 1)
+      
+      echo "Cycling storage composite for $tenant (triggers reconciliation)..."
+      
+      # Remove from watch
+      echo "1. Removing from storage composite watch..."
+      curl -s -X DELETE "$CONTROLLER/secrets/storage-$tenant/metadata/labels/ns.mdn.io%2Fcomposite"
+      sleep 5
+      
+      # Add back to watch
+      echo "2. Re-adding to storage composite watch..."
+      curl -s -X POST -H "Content-Type: application/json" \
+        -d '{"ns.mdn.io/composite":"storage"}' \
+        "$CONTROLLER/secrets/storage-$tenant/metadata/labels/ns.mdn.io%2Fcomposite"
+      
+      echo "✓ Storage reconciliation triggered for $tenant"
+      echo "  - Storage webhook finalize called (children deleted)"
+      echo "  - Storage webhook sync called (children recreated)"
+      ;;
+
+    cycle-compute)
+      tenant=$2
+      test -z "$tenant" && (echo "Error: Missing tenant name" && exit 1)
+      
+      echo "Cycling compute composite for $tenant (triggers reconciliation)..."
+      
+      # Remove from watch
+      echo "1. Removing from compute composite watch..."
+      curl -s -X DELETE "$CONTROLLER/configmaps/$tenant/metadata/labels/ns.mdn.io%2Fcomposite"
+      sleep 5
+      
+      # Add back to watch
+      echo "2. Re-adding to compute composite watch..."
+      curl -s -X POST -H "Content-Type: application/json" \
+        -d '{"ns.mdn.io/composite":"compute"}' \
+        "$CONTROLLER/configmaps/$tenant/metadata/labels/ns.mdn.io%2Fcomposite"
+      
+      echo "✓ Compute reconciliation triggered for $tenant"
+      echo "  - Compute webhook finalize called (Nightscout deleted)"
+      echo "  - Compute webhook sync called (Nightscout recreated)"
+      ;;
+
+    force-reconcile)
+      tenant=$2
+      test -z "$tenant" && (echo "Error: Missing tenant name" && exit 1)
+      
+      echo "Force full reconciliation for $tenant..."
+      
+      # Cycle storage first (MongoDB)
+      $0 cycle-storage "$tenant"
+      sleep 10
+      
+      # Then cycle compute (Nightscout)
+      $0 cycle-compute "$tenant"
+      
+      echo "✓ Full reconciliation complete for $tenant"
       ;;
 
     *)
