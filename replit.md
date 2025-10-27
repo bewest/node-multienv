@@ -4,8 +4,8 @@
 This project establishes a production-grade, multi-tenant Nightscout platform on Kubernetes. It orchestrates tenant deployments using Metacontroller, integrating MongoDB, Change Data Capture (CDC) via Strimzi Kafka, and automated backup solutions. The platform prioritizes scalability and isolation, with all tenants residing in a dedicated `hosted-tenants` namespace and utilizing tenant-prefixed resources. The architectural evolution through a "Facade Pattern" approach allowed for progressive migration and zero-downtime upgrades across five generations (Gen 1, Gen 2, Gen 3a, Gen 3b, Gen 4), culminating in a fully declarative, Kubernetes-native system capable of hosting an unlimited number of tenants.
 
 **Current State:**
-- **Gen 3b** is the current production implementation (Deployment controller with ConfigMap/pod watches)
-- **Gen 4** (Metacontroller-based) is work-in-progress
+- **Gen 3b** is the current production implementation (Deployment controller with ConfigMap/pod watches) - 1300 sites
+- **Gen 4** (Metacontroller-based two-composite architecture) is implemented with annotation-driven migration support
 
 ## User Preferences
 - Prefer Node.js/JavaScript for webhook implementation
@@ -85,7 +85,27 @@ This forced a fundamental design change: from **a single inline async callback u
 - **Metacontroller**: A Kubernetes add-on used for custom controller development and orchestration.
 - **Consul**: Utilized for service discovery and health checking within the resolver interface for traffic serving.
 
+## Gen 4 Implementation Details
+
+### Two-Composite Architecture
+- **Storage Composite**: Secret → MongoDB StatefulSet + Service
+  - Annotation-driven behavior via `ns.mdn.io/storage-type` (shared/dedicated)
+  - Migration support via `ns.mdn.io/migration-needed` annotation
+  - Renders migration Job when annotations present
+- **Compute Composite**: ConfigMap → Nightscout Deployment
+  - Discovers storage via `storage.nightscout.org/account` label
+  - Treats shared storage as ready (no StatefulSet check)
+  - Uses related resources for blast radius protection
+
+### Annotation-Driven Migration Pattern
+- Migration is a **storage-layer concern** (not deployment lifecycle)
+- Annotations on Secret trigger conditional resource rendering
+- Storage controller checks annotations and renders migration Job
+- Migration state tracked in Secret status
+- Supports shared → dedicated MongoDB migration workflow
+
 ## Documentation
+- **[Two-Composite Architecture](docs/TWO-COMPOSITE-ARCHITECTURE.md)** - Storage/compute separation, annotation-driven behavior, migration workflow
 - **[Architecture Evolution](docs/ARCHITECTURE-EVOLUTION.md)** - Complete story of the 5 generations, facade pattern benefits, migration paths
 - **[Component Relationships](docs/COMPONENT-RELATIONSHIPS.md)** - How components work together across generations
 - **[Container Parameters](docs/CONTAINER-PARAMETERS.md)** - Comprehensive configuration parameters
