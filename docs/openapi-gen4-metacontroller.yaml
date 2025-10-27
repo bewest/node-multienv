@@ -1,44 +1,27 @@
 openapi: 3.0.3
 info:
-  title: Nightscout Metacontroller Webhooks (Generation 4) - Declarative Kubernetes Orchestration
+  title: Nightscout Gen 4 Metacontroller Webhooks - Two-Composite Architecture
   version: 4.0.0
   description: |
-    Generation 4 of the Nightscout hosting platform. This implementation uses Metacontroller webhooks
-    for fully declarative, Kubernetes-native orchestration. No REST API - pure webhook-based control plane.
-    
-    **Key Characteristics:**
-    - Declarative webhook-based orchestration (no imperative REST API)
-    - CompositeController for tenant lifecycle management
-    - DecoratorController for PVC backup policies
-    - Kubernetes-idiomatic status conditions
-    - Full audit trail via labels and annotations
+    Generation 4 uses a **two-composite architecture** that separates storage concerns from compute concerns.
     
     **Architecture:**
-    - `cmd/webhook/server.js`: Express server handling webhook requests
-    - `handlers/composite-sync.js`: Creates 11-12 Kubernetes resources per tenant
-    - `handlers/decorator-sync.js`: Adds backup policies to PVCs
-    - Metacontroller watches ConfigMaps, calls webhooks
-    - Zero REST API - pure Kubernetes control plane
+    - **Storage Composite**: Secret → MongoDB StatefulSet + Migration Jobs
+    - **Compute Composite**: ConfigMap → Nightscout Deployment + CDC resources
     
-    **Components Created Per Tenant:**
-    1. Secret (MongoDB credentials)
-    2. Service (MongoDB headless service)
-    3. StatefulSet (MongoDB replica set)
-    4. PodDisruptionBudget (MongoDB availability)
-    5. Service (Nightscout service)
-    6. Deployment (Nightscout application)
-    7. PodDisruptionBudget (Nightscout availability)
-    8. KafkaTopic (CDC events)
-    9. KafkaConnector (MongoDB CDC)
-    10. Job (optional migration)
-    11. VolumeSnapshot (on PVC deletion via decorator)
+    **Key Design Decisions:**
+    1. Credential isolation (Secrets not visible to environs API)
+    2. Independent lifecycles (delete compute without affecting storage)
+    3. Blast radius protection (related resources, not owned children)
+    4. Annotation-driven migration (storage-layer concern only)
+    5. Shared/dedicated storage support (Gen 3b → Gen 4 migration path)
     
-    **Use Cases:**
-    - Production Kubernetes clusters
-    - GitOps workflows
-    - Declarative infrastructure
-    - Multi-tenant SaaS platforms
-    - Full lifecycle automation
+    **Shipped Implementation:**
+    - `cmd/webhook/handlers/storage-composite-sync.js` - Storage orchestration
+    - `cmd/webhook/handlers/compute-composite-sync.js` - Compute orchestration
+    - `cmd/webhook/handlers/decorator-sync.js` - PVC backup policies
+    
+    See `docs/TWO-COMPOSITE-ARCHITECTURE.md` for complete architecture details.
   contact:
     email: bewest@gmail.com
   license:
@@ -51,8 +34,10 @@ servers:
     description: Kubernetes service endpoint
 
 tags:
-  - name: composite
-    description: Composite controller webhooks (tenant orchestration)
+  - name: storage
+    description: Storage composite webhooks (MongoDB + migration)
+  - name: compute
+    description: Compute composite webhooks (Nightscout + CDC)
   - name: decorator
     description: Decorator controller webhooks (PVC backup policies)
   - name: health
@@ -77,38 +62,55 @@ paths:
                   status:
                     type: string
                     example: "healthy"
-                  timestamp:
-                    type: string
-                    format: date-time
 
-  /composite/sync:
+  /storage-composite/sync:
     post:
       tags:
-        - composite
-      summary: Composite controller sync webhook
+        - storage
+      summary: Storage composite sync webhook
       description: |
-        Called by Metacontroller to synchronize desired state.
+        Called by Metacontroller to synchronize storage resources.
         
-        **Trigger:** ConfigMap with label `ns.mdn.io/enabled: "true"` created/updated
+        **Parent Resource**: Secret with label `ns.mdn.io/composite: storage`
         
         **Creates:**
-        - MongoDB Secret, Service, StatefulSet, PodDisruptionBudget
-        - Nightscout Service, Deployment, PodDisruptionBudget
-        - KafkaTopic, KafkaConnector (if CDC enabled)
-        - Job (if migration enabled)
+        - MongoDB StatefulSet (if `storage-type: dedicated`)
+        - MongoDB Service (headless)
+        - Migration Job (if `migration-needed: true` annotation)
+        
+        **Annotation-Driven Behavior:**
+        - `ns.mdn.io/storage-type: shared` → No StatefulSet, marks ready immediately
+        - `ns.mdn.io/storage-type: dedicated` → Creates StatefulSet + Service
+        - `ns.mdn.io/migration-needed: true` → Renders migration Job
+        - `ns.mdn.io/migration-source-uri` → Source MongoDB connection string
         
         **Status Conditions:**
-        - MongoDBReady: MongoDB StatefulSet ready
+        - Ready: MongoDB StatefulSet ready (or shared storage marked ready)
         - MigrationComplete: Database migration finished
-        - CDCReady: Kafka connector operational
-        - Ready: Overall tenant readiness
-      operationId: compositeSync
+      operationId: storageCompositeSync
       requestBody:
         required: true
         content:
           application/json:
             schema:
               $ref: '#/components/schemas/CompositeSyncRequest'
+            example:
+              parent:
+                apiVersion: v1
+                kind: Secret
+                metadata:
+                  name: storage-demo
+                  namespace: hosted-tenants
+                  labels:
+                    ns.mdn.io/composite: storage
+                    storage.nightscout.org/account: demo
+                  annotations:
+                    ns.mdn.io/storage-type: dedicated
+                stringData:
+                  replicas: "1"
+                  storageGi: "2"
+                  mongoImage: "mongo:6"
+              children: {}
       responses:
         '200':
           description: Sync successful
@@ -119,49 +121,35 @@ paths:
               example:
                 status:
                   conditions:
-                    - type: "MongoDBReady"
-                      status: "True"
-                      reason: "StatefulSetReady"
-                      message: "MongoDB StatefulSet has 1/1 replicas ready"
-                    - type: "MigrationComplete"
-                      status: "True"
-                      reason: "JobCompleted"
-                      message: "Migration job completed successfully"
-                    - type: "CDCReady"
-                      status: "True"
-                      reason: "ConnectorRunning"
-                      message: "Kafka connector is running"
                     - type: "Ready"
                       status: "True"
-                      reason: "AllComponentsReady"
-                      message: "Tenant is fully operational"
+                      reason: "StatefulSetReady"
+                  storage:
+                    type: "dedicated"
+                    host: "demo-mongodb"
                 children:
-                  - apiVersion: "v1"
-                    kind: "Secret"
-                    metadata:
-                      name: "demo-mongo-credentials"
                   - apiVersion: "apps/v1"
                     kind: "StatefulSet"
                     metadata:
-                      name: "demo-mongo"
-                  - apiVersion: "apps/v1"
-                    kind: "Deployment"
+                      name: "demo-mongodb"
+                  - apiVersion: "v1"
+                    kind: "Service"
                     metadata:
-                      name: "demo-nightscout"
+                      name: "demo-mongodb"
 
-  /composite/finalize:
+  /storage-composite/finalize:
     post:
       tags:
-        - composite
-      summary: Composite controller finalize webhook
+        - storage
+      summary: Storage composite finalize webhook
       description: |
-        Called by Metacontroller when parent ConfigMap is being deleted.
+        Called when storage Secret is being deleted.
         
         **Actions:**
-        - Ensures child resources are properly cleaned up
-        - Can perform pre-deletion operations (backups, notifications)
-        - Returns whether finalization is complete
-      operationId: compositeFinalize
+        - Deletes MongoDB StatefulSet
+        - PVCs survive (created by StatefulSet, not owned by Secret)
+        - Allows recreation with same Secret → reattaches to existing data
+      operationId: storageCompositeFinalize
       requestBody:
         required: true
         content:
@@ -175,14 +163,117 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/CompositeFinalizeResponse'
+
+  /compute-composite/sync:
+    post:
+      tags:
+        - compute
+      summary: Compute composite sync webhook
+      description: |
+        Called by Metacontroller to synchronize compute resources.
+        
+        **Parent Resource**: ConfigMap with label `ns.mdn.io/composite: compute`
+        
+        **Discovers Storage**: Uses related resources with `storage.nightscout.org/account` label
+        
+        **Creates:**
+        - Nightscout Deployment
+        - Nightscout Service
+        - PodDisruptionBudget
+        - KafkaTopic (if CDC enabled)
+        - KafkaConnector (if CDC enabled and MongoDB ready)
+        
+        **Related Resources Pattern:**
+        - Discovers storage Secret via label selector (not ownership)
+        - Blast radius protection: delete ConfigMap → Nightscout deleted, MongoDB survives
+        
+        **Status Conditions:**
+        - MongoDBReady: Storage is ready (from related Secret status)
+        - Ready: Nightscout deployment ready
+      operationId: computeCompositeSync
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CompositeSyncRequest'
+            example:
+              parent:
+                apiVersion: v1
+                kind: ConfigMap
+                metadata:
+                  name: demo
+                  namespace: hosted-tenants
+                  labels:
+                    ns.mdn.io/composite: compute
+                    storage.nightscout.org/account: demo
+                data:
+                  TENANT_ID: demo
+                  NS_IMAGE: nightscout/cgm-remote-monitor:latest
+              relatedResources:
+                Secret.v1:
+                  storage-demo:
+                    apiVersion: v1
+                    kind: Secret
+                    status:
+                      conditions:
+                        - type: Ready
+                          status: "True"
+      responses:
+        '200':
+          description: Sync successful
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CompositeSyncResponse'
               example:
-                finalized: true
                 status:
                   conditions:
+                    - type: "MongoDBReady"
+                      status: "True"
+                      reason: "StatefulSetReady"
                     - type: "Ready"
-                      status: "False"
-                      reason: "Terminating"
-                      message: "Tenant is being terminated"
+                      status: "True"
+                      reason: "AllComponentsReady"
+                  storage:
+                    account: demo
+                    mongoReady: true
+                children:
+                  - apiVersion: "apps/v1"
+                    kind: "Deployment"
+                    metadata:
+                      name: "demo-nightscout"
+                  - apiVersion: "v1"
+                    kind: "Service"
+                    metadata:
+                      name: "demo-nightscout"
+
+  /compute-composite/finalize:
+    post:
+      tags:
+        - compute
+      summary: Compute composite finalize webhook
+      description: |
+        Called when compute ConfigMap is being deleted.
+        
+        **Actions:**
+        - Deletes Nightscout Deployment
+        - Deletes CDC resources (KafkaConnector, KafkaTopics)
+        - Storage Secret and MongoDB **survive** (related, not owned)
+      operationId: computeCompositeFinalize
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CompositeFinalizeRequest'
+      responses:
+        '200':
+          description: Finalization status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CompositeFinalizeResponse'
 
   /decorator/sync:
     post:
@@ -190,17 +281,11 @@ paths:
         - decorator
       summary: Decorator controller sync webhook
       description: |
-        Called by Metacontroller to add backup policies to PVCs.
-        
-        **Trigger:** PVC created that matches labelSelector
+        Adds backup policies to MongoDB PVCs.
         
         **Actions:**
         - Adds finalizer to prevent immediate deletion
-        - Adds annotations:
-          - `ns.mdn.io/backup-schedule`: When to take backups
-          - `ns.mdn.io/backup-retention`: How long to keep backups
-          - `ns.mdn.io/tenant-email`: Owner contact info
-        - Preserves existing annotations from other operators
+        - Adds backup annotations
       operationId: decoratorSync
       requestBody:
         required: true
@@ -215,19 +300,6 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/DecoratorSyncResponse'
-              example:
-                status: {}
-                attachments:
-                  - apiVersion: "v1"
-                    kind: "PersistentVolumeClaim"
-                    metadata:
-                      name: "data-demo-mongo-0"
-                      finalizers:
-                        - "ns.mdn.io/backup-finalizer"
-                      annotations:
-                        ns.mdn.io/backup-schedule: "daily"
-                        ns.mdn.io/backup-retention: "30d"
-                        ns.mdn.io/tenant-email: "admin@example.com"
 
   /decorator/finalize:
     post:
@@ -235,15 +307,7 @@ paths:
         - decorator
       summary: Decorator controller finalize webhook
       description: |
-        Called by Metacontroller when PVC is being deleted.
-        
-        **Actions:**
-        - Creates VolumeSnapshot before PVC deletion
-        - Snapshot includes labels for data recovery:
-          - `ns.mdn.io/tenant-id`: Tenant identifier
-          - `ns.mdn.io/backup-type`: "pre-deletion"
-          - `ns.mdn.io/source-pvc`: Original PVC name
-        - Returns finalized=true when snapshot is created
+        Creates VolumeSnapshot before PVC deletion.
       operationId: decoratorFinalize
       requestBody:
         required: true
@@ -258,17 +322,6 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/DecoratorFinalizeResponse'
-              example:
-                finalized: true
-                attachments:
-                  - apiVersion: "snapshot.storage.k8s.io/v1"
-                    kind: "VolumeSnapshot"
-                    metadata:
-                      name: "demo-mongo-final-snapshot-1234567890"
-                      labels:
-                        ns.mdn.io/tenant-id: "demo"
-                        ns.mdn.io/backup-type: "pre-deletion"
-                        ns.mdn.io/source-pvc: "data-demo-mongo-0"
 
 components:
   schemas:
@@ -277,157 +330,70 @@ components:
       description: Metacontroller CompositeController sync request
       required:
         - parent
-        - children
       properties:
         parent:
-          $ref: '#/components/schemas/ConfigMapParent'
+          type: object
+          description: Parent resource (Secret or ConfigMap)
         children:
           type: object
-          description: Existing child resources grouped by API group/kind
-          additionalProperties:
-            type: object
-          example:
-            Secret.v1:
-              demo-mongo-credentials:
-                apiVersion: "v1"
-                kind: "Secret"
-                metadata:
-                  name: "demo-mongo-credentials"
-            StatefulSet.apps/v1:
-              demo-mongo:
-                apiVersion: "apps/v1"
-                kind: "StatefulSet"
-                metadata:
-                  name: "demo-mongo"
-                status:
-                  readyReplicas: 1
-                  replicas: 1
+          description: Existing child resources
+        relatedResources:
+          type: object
+          description: Related resources (for compute composite)
         finalizing:
           type: boolean
-          description: Whether parent is being deleted
-          example: false
 
     CompositeSyncResponse:
       type: object
-      description: Metacontroller CompositeController sync response
       properties:
         status:
           type: object
-          description: Status to write to parent ConfigMap
           properties:
             conditions:
               type: array
               items:
                 $ref: '#/components/schemas/Condition'
-            observedGeneration:
-              type: integer
-            tenantId:
-              type: string
-            mongoReplicas:
-              type: integer
-            nsReplicas:
-              type: integer
         children:
           type: array
-          description: Desired child resources to create/update
           items:
             type: object
-            description: Kubernetes resource manifest
-        resyncAfterSeconds:
-          type: number
-          description: How soon to call sync again
-          example: 60
 
     CompositeFinalizeRequest:
       type: object
       required:
         - parent
-        - children
       properties:
         parent:
-          $ref: '#/components/schemas/ConfigMapParent'
+          type: object
         children:
           type: object
-          description: Existing child resources
         finalizing:
           type: boolean
-          example: true
 
     CompositeFinalizeResponse:
       type: object
       properties:
         finalized:
           type: boolean
-          description: Whether finalization is complete
-          example: true
         status:
           type: object
-          description: Final status to write
-          properties:
-            conditions:
-              type: array
-              items:
-                $ref: '#/components/schemas/Condition'
 
     DecoratorSyncRequest:
       type: object
-      description: Metacontroller DecoratorController sync request
       required:
         - object
       properties:
         object:
           type: object
           description: The PVC being decorated
-          properties:
-            apiVersion:
-              type: string
-              example: "v1"
-            kind:
-              type: string
-              example: "PersistentVolumeClaim"
-            metadata:
-              type: object
-              properties:
-                name:
-                  type: string
-                namespace:
-                  type: string
-                labels:
-                  type: object
-                annotations:
-                  type: object
-            spec:
-              type: object
-            status:
-              type: object
-        attachments:
-          type: object
-          description: Existing decorator attachments
-        finalizing:
-          type: boolean
 
     DecoratorSyncResponse:
       type: object
       properties:
-        status:
-          type: object
-          description: Status to write to decorated object
         attachments:
           type: array
-          description: Modified version of the decorated object
           items:
             type: object
-        labels:
-          type: object
-          description: Labels to add/update
-        annotations:
-          type: object
-          description: Annotations to add/update
-        finalizers:
-          type: array
-          description: Finalizers to add
-          items:
-            type: string
 
     DecoratorFinalizeRequest:
       type: object
@@ -436,139 +402,85 @@ components:
       properties:
         object:
           type: object
-          description: The PVC being deleted
-        attachments:
-          type: object
-        finalizing:
-          type: boolean
-          example: true
 
     DecoratorFinalizeResponse:
       type: object
       properties:
         finalized:
           type: boolean
-          description: Whether finalization is complete
-          example: true
         attachments:
           type: array
-          description: Resources to create (e.g., VolumeSnapshot)
           items:
             type: object
 
-    ConfigMapParent:
-      type: object
-      description: Parent ConfigMap that triggers tenant creation
-      properties:
-        apiVersion:
-          type: string
-          example: "v1"
-        kind:
-          type: string
-          example: "ConfigMap"
-        metadata:
-          type: object
-          properties:
-            name:
-              type: string
-            namespace:
-              type: string
-            labels:
-              type: object
-              properties:
-                ns.mdn.io/enabled:
-                  type: string
-                  example: "true"
-                ns.mdn.io/tier:
-                  type: string
-                  example: "premium"
-            annotations:
-              type: object
-              properties:
-                ns.mdn.io/tenant-email:
-                  type: string
-                ns.mdn.io/created-at:
-                  type: string
-        data:
-          type: object
-          description: Tenant configuration parameters
-          additionalProperties:
-            type: string
-          example:
-            TENANT_ID: "demo"
-            MONGO_IMAGE: "mongo:6"
-            NS_IMAGE: "nightscout/cgm-remote-monitor:latest"
-            MONGO_REPLICAS: "1"
-            MONGO_STORAGE_GI: "10"
-            MIGRATION_ENABLED: "true"
-        status:
-          type: object
-          description: Tenant status (written by webhook)
-          properties:
-            conditions:
-              type: array
-              items:
-                $ref: '#/components/schemas/Condition'
-
     Condition:
       type: object
-      description: Kubernetes status condition
       required:
         - type
         - status
       properties:
         type:
           type: string
-          description: Condition type
-          enum: [MongoDBReady, MigrationComplete, CDCReady, Ready]
-          example: "Ready"
+          enum: [Ready, MongoDBReady, MigrationComplete, CDCReady]
         status:
           type: string
           enum: ["True", "False", "Unknown"]
-          example: "True"
         reason:
           type: string
-          description: Machine-readable reason code
-          example: "AllComponentsReady"
         message:
           type: string
-          description: Human-readable message
-          example: "Tenant is fully operational"
-        lastTransitionTime:
-          type: string
-          format: date-time
-          description: When condition last changed
-        lastUpdateTime:
-          type: string
-          format: date-time
-          description: When condition was last updated
 
 externalDocs:
-  description: Metacontroller Documentation
-  url: https://metacontroller.github.io/metacontroller/
+  description: Two-Composite Architecture Documentation
+  url: https://github.com/nightscout/hosted/blob/main/docs/TWO-COMPOSITE-ARCHITECTURE.md
 
 x-generation: 4
-x-implementation: metacontroller-webhooks
+x-architecture: two-composite
+x-shipped: true
+
 x-metacontroller-config:
-  CompositeController:
+  StorageCompositeController:
     apiVersion: metacontroller.k8s.io/v1alpha1
     kind: CompositeController
     metadata:
-      name: nightscout-tenant-controller
+      name: nightscout-storage-controller
+    spec:
+      parentResource:
+        apiVersion: v1
+        resource: secrets
+        labelSelector:
+          matchLabels:
+            ns.mdn.io/composite: storage
+      childResources:
+        - apiVersion: v1
+          resource: services
+        - apiVersion: apps/v1
+          resource: statefulsets
+        - apiVersion: batch/v1
+          resource: jobs
+      hooks:
+        sync:
+          webhook:
+            url: http://webhook-server.hosted-tenants.svc.cluster.local:3000/storage-composite/sync
+        finalize:
+          webhook:
+            url: http://webhook-server.hosted-tenants.svc.cluster.local:3000/storage-composite/finalize
+
+  ComputeCompositeController:
+    apiVersion: metacontroller.k8s.io/v1alpha1
+    kind: CompositeController
+    metadata:
+      name: nightscout-compute-controller
     spec:
       parentResource:
         apiVersion: v1
         resource: configmaps
         labelSelector:
           matchLabels:
-            ns.mdn.io/enabled: "true"
+            ns.mdn.io/composite: compute
       childResources:
         - apiVersion: v1
-          resource: secrets
-        - apiVersion: v1
           resource: services
-        - apiVersion: apps/v1
-          resource: statefulsets
         - apiVersion: apps/v1
           resource: deployments
         - apiVersion: policy/v1
@@ -577,68 +489,50 @@ x-metacontroller-config:
           resource: kafkatopics
         - apiVersion: kafka.strimzi.io/v1beta2
           resource: kafkaconnectors
-        - apiVersion: batch/v1
-          resource: jobs
-      hooks:
-        sync:
-          webhook:
-            url: http://webhook-server.hosted-tenants.svc.cluster.local:3000/composite/sync
-        finalize:
-          webhook:
-            url: http://webhook-server.hosted-tenants.svc.cluster.local:3000/composite/finalize
-
-  DecoratorController:
-    apiVersion: metacontroller.k8s.io/v1alpha1
-    kind: DecoratorController
-    metadata:
-      name: pvc-backup-decorator
-    spec:
-      resources:
+      relatedResources:
         - apiVersion: v1
-          resource: persistentvolumeclaims
+          resource: secrets
           labelSelector:
-            matchLabels:
-              app.kubernetes.io/component: database
-      attachments:
-        - apiVersion: v1
-          resource: persistentvolumeclaims
+            matchExpressions:
+              - key: ns.mdn.io/composite
+                operator: In
+                values: [storage]
       hooks:
         sync:
           webhook:
-            url: http://webhook-server.hosted-tenants.svc.cluster.local:3000/decorator/sync
+            url: http://webhook-server.hosted-tenants.svc.cluster.local:3000/compute-composite/sync
         finalize:
           webhook:
-            url: http://webhook-server.hosted-tenants.svc.cluster.local:3000/decorator/finalize
+            url: http://webhook-server.hosted-tenants.svc.cluster.local:3000/compute-composite/finalize
 
-x-workflow:
+x-migration-workflow:
   description: |
-    **Tenant Creation:**
-    1. User creates ConfigMap with label `ns.mdn.io/enabled: "true"`
-    2. Metacontroller detects ConfigMap, calls /composite/sync
-    3. Webhook returns 11-12 child resources
-    4. Metacontroller creates/updates children
-    5. Webhook updates ConfigMap status with conditions
-    6. Tenant becomes Ready when all components healthy
+    **Shared → Dedicated MongoDB Migration:**
+    1. Create storage Secret with `storage-type: shared` (existing 1300 sites)
+    2. Add migration annotations:
+       - `ns.mdn.io/migration-needed: true`
+       - `ns.mdn.io/migration-source-uri: mongodb://...`
+    3. Update annotation to `storage-type: dedicated`
+    4. Storage composite renders migration Job
+    5. Job copies data from shared → dedicated MongoDB
+    6. On success, adds `ns.mdn.io/migration-complete: true`
+    7. Storage composite creates StatefulSet
+    8. Compute ConfigMap discovers storage and deploys Nightscout
+
+x-design-decisions:
+  two-composite:
+    reason: Credential isolation, independent lifecycles, blast radius protection
+    alternative: Monolithic composite (ConfigMap → all resources)
+    archived: archive/monolithic-composite/README.md
+  
+  annotation-driven-migration:
+    reason: Migration is storage concern, not deployment lifecycle
+    pattern: Annotations trigger conditional Job rendering
     
-    **PVC Backup:**
-    1. MongoDB StatefulSet creates PVC
-    2. Metacontroller calls /decorator/sync
-    3. Webhook adds finalizer + backup annotations
-    4. User deletes ConfigMap (tenant deletion)
-    5. Metacontroller calls /decorator/finalize
-    6. Webhook creates VolumeSnapshot
-    7. PVC is deleted after snapshot completes
+  related-resources:
+    reason: Blast radius protection - delete compute without affecting storage
+    implementation: Label-based discovery, not ownership
     
-x-migration:
-  from-gen3:
-    - Remove deployment controller REST API
-    - Remove dispatcher (Metacontroller watches ConfigMaps)
-    - Add Metacontroller CRDs
-    - Deploy webhook server
-    - ConfigMaps trigger webhooks automatically
-  benefits:
-    - Declarative (no imperative REST calls)
-    - GitOps friendly
-    - Kubernetes-native control loop
-    - Automatic reconciliation
-    - Standard status conditions
+  storage-in-secret:
+    reason: Credentials not visible to environs API
+    security: Secret access restricted, ConfigMap widely accessible

@@ -1,5 +1,7 @@
 # Component Relationships: Generation 3 Architecture
 
+> **Note**: This document describes **Generation 3 (Gen 3b)** architecture, which is the current production implementation with 1300 sites. For **Generation 4** (Metacontroller two-composite architecture), see [TWO-COMPOSITE-ARCHITECTURE.md](TWO-COMPOSITE-ARCHITECTURE.md) and [ARCHITECTURE-EVOLUTION.md](ARCHITECTURE-EVOLUTION.md).
+
 ## Overview
 
 Generation 3 represents the **full Kubernetes orchestration** generation. It evolved through two distinct phases:

@@ -1,8 +1,10 @@
-# Migration Guide: Legacy Controller → Metacontroller
+# Migration Guide: Gen 3b → Gen 4 (Two-Composite Architecture)
+
+> **Note**: This guide describes migration from **Gen 3b** (deployment-controller) to **Gen 4** (Metacontroller two-composite). For complete Gen 4 architecture details, see [TWO-COMPOSITE-ARCHITECTURE.md](TWO-COMPOSITE-ARCHITECTURE.md).
 
 ## Overview
 
-This guide helps you safely migrate existing tenants from your legacy controller system to the new Metacontroller-based platform without downtime.
+This guide helps you safely migrate 1300 existing tenants from Gen 3b to the new Gen 4 two-composite Metacontroller platform without downtime. The migration uses annotation-driven storage migration from shared MongoDB to dedicated StatefulSets.
 
 ## Migration Strategy: Shadow ConfigMaps
 

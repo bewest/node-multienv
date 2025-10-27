@@ -1,8 +1,10 @@
 # Metacontroller Integration Guide
 
+> **Note**: This is a technical reference for Metacontroller webhook protocol. For Gen 4 architecture and implementation, see [TWO-COMPOSITE-ARCHITECTURE.md](TWO-COMPOSITE-ARCHITECTURE.md).
+
 ## Overview
 
-This document describes how the webhook server integrates with Metacontroller and provides the technical details for the webhook protocol implementation.
+This document describes how the webhook server integrates with Metacontroller and provides the technical details for the webhook protocol implementation in the **two-composite architecture**.
 
 ## Metacontroller Webhook Protocol
 
