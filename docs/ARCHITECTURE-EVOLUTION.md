@@ -1370,6 +1370,420 @@ Each generation improved on the previous while maintaining core abstractions. Th
 
 ---
 
+## Design Decisions & Alternatives Considered
+
+This section documents key architectural decisions made during Gen 4 development, capturing the context, alternatives evaluated, rationale, and trade-offs. This ADR-style documentation helps understand why certain approaches were chosen over others.
+
+### Decision 1: Two-Composite Architecture vs Monolithic Composite
+
+**Context:**
+When transitioning from Gen 3b to Gen 4, we needed to declaratively manage 11-12 Kubernetes resources per tenant (MongoDB StatefulSet, Service, Secret, Nightscout Deployment, Service, Kafka Topic, Connector, PVCs, PDBs, Migration Jobs, VolumeSnapshots). The tipping point came when Gen 3b added a second watch (pods + ConfigMaps), revealing the need for expressing large sets of desired resources declaratively rather than imperatively.
+
+**Options Considered:**
+
+**Option A: Monolithic Composite**
+- Single Metacontroller composite
+- ConfigMap as parent resource
+- Children: All 11-12 resources managed together
+- All configuration (including credentials) in ConfigMap
+- Single webhook endpoint
+
+**Option B: Two-Composite Architecture (CHOSEN)**
+- Two separate Metacontroller composites
+- Storage composite: Secret → MongoDB StatefulSet + Service + Migration Jobs
+- Compute composite: ConfigMap → Nightscout Deployment + Service + CDC resources
+- Credentials isolated in Secret
+- Separate webhook endpoints
+
+**Decision:** Two-Composite Architecture (Option B)
+
+**Rationale:**
+
+1. **Credential Isolation**: MongoDB credentials must be stored in Secrets, not ConfigMaps
+   - Environs API (administration interface) operates on ConfigMaps
+   - API should not have access to database credentials (least privilege principle)
+   - Secrets provide proper RBAC and audit capabilities
+
+2. **Separation of Concerns**:
+   - Storage concerns (database lifecycle, credentials, migration) distinct from compute concerns (application deployment, scaling)
+   - Storage changes (shared → dedicated migration) shouldn't affect compute
+   - Compute changes (image updates, scaling) shouldn't risk database
+
+3. **Independent Lifecycles**:
+   - Storage can be migrated (shared → dedicated) without redeploying Nightscout
+   - Nightscout can be updated without touching database
+   - Clear ownership: DBA concerns vs DevOps concerns
+
+4. **Blast Radius Protection**:
+   - Related resources pattern prevents accidental deletion cascades
+   - Deleting ConfigMap doesn't delete MongoDB (related, not owned)
+   - Deleting Secret doesn't delete PVC (created by StatefulSet volumeClaimTemplates)
+   - Can recreate controllers without data loss
+
+**Trade-offs:**
+
+✅ **Gained:**
+- Security: Credentials isolated from application config
+- Reliability: Blast radius protection, independent lifecycles
+- Flexibility: Can migrate storage without affecting compute
+- Clarity: Clear ownership of storage vs compute concerns
+
+❌ **Lost:**
+- Simplicity: Two controllers instead of one
+- Complexity: Need to discover storage via labels/related resources
+- Coordination: Compute must wait for storage readiness
+
+**Impact:** The security and reliability benefits outweigh the added complexity. The two-composite pattern is now the canonical Gen 4 implementation.
+
+**Archived Alternative:** The monolithic composite implementation is preserved in `archive/monolithic-composite/` with full documentation of why it wasn't shipped.
+
+---
+
+### Decision 2: Annotation-Driven Migration vs ConfigMap Field
+
+**Context:**
+Supporting migration from shared MongoDB (1300 existing sites) to dedicated MongoDB (per-tenant StatefulSets) required a way to trigger migration Jobs. The question was where to express migration intent and who should handle it.
+
+**Options Considered:**
+
+**Option A: ConfigMap Field (Compute-Layer Migration)**
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: demo
+data:
+  MIGRATION_ENABLED: "true"
+  MIGRATION_SOURCE_URI: "mongodb://..."
+```
+- Migration controlled by compute composite
+- Migration state in ConfigMap
+- Compute composite renders migration Job
+
+**Option B: Secret Annotations (Storage-Layer Migration) (CHOSEN)**
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: storage-demo
+  annotations:
+    ns.mdn.io/migration-needed: "true"
+    ns.mdn.io/migration-source-uri: "mongodb://..."
+```
+- Migration controlled by storage composite
+- Migration state in Secret
+- Storage composite renders migration Job
+
+**Decision:** Secret Annotations (Storage-Layer Migration) - Option B
+
+**Rationale:**
+
+1. **Migration is a Storage Concern**:
+   - Migration copies data between MongoDB instances
+   - It's a database lifecycle event, not an application deployment event
+   - Storage composite already owns MongoDB StatefulSet creation
+   - Natural fit: storage creation → data migration → storage ready
+
+2. **Credential Handling**:
+   - Migration requires source credentials (shared MongoDB connection string)
+   - Credentials belong in Secrets, not ConfigMaps
+   - Storage composite already has Secret access
+   - Compute composite should never see credentials
+
+3. **Lifecycle Independence**:
+   - Migration completes before compute starts
+   - Compute sees "storage ready" regardless of migration history
+   - Compute doesn't need to know if storage was migrated
+   - Clean separation of responsibilities
+
+4. **Declarative Pattern**:
+   - Annotations are Kubernetes-native way to express intent
+   - Storage controller checks annotations and renders migration Job conditionally
+   - Idempotent: `migration-complete` annotation prevents re-runs
+   - Status tracking: Migration state reflected in Secret status
+
+**Trade-offs:**
+
+✅ **Gained:**
+- Correct concern placement (storage lifecycle)
+- Credential security (stays in Secret layer)
+- Clean compute interface (unaware of migration)
+- Declarative behavior (annotation-driven)
+
+❌ **Lost:**
+- Compute visibility into migration state (intentional)
+- Single place to see all tenant config (split Secret/ConfigMap)
+
+**Impact:** Migration is exclusively handled by storage composite. Compute composite has zero migration logic.
+
+---
+
+### Decision 3: Related Resources vs Ownership for Blast Radius Protection
+
+**Context:**
+When designing resource relationships in Gen 4, we needed to decide whether child resources should be owned (deleted with parent) or related (discovered, protected from deletion).
+
+**Options Considered:**
+
+**Option A: Full Ownership**
+- Storage composite owns: StatefulSet, Service, PVC
+- Compute composite owns: Deployment, Service, PDB
+- Deleting parent deletes all children
+- Standard Kubernetes garbage collection
+
+**Option B: Related Resources Pattern (CHOSEN)**
+- Storage composite owns: StatefulSet, Service
+- Storage composite related: PVC (created by StatefulSet, not directly owned)
+- Compute composite owns: Deployment, Service, PDB
+- Compute composite related: Secret, StatefulSet (blast radius protection)
+- Deleting parent doesn't delete related resources
+
+**Decision:** Related Resources Pattern (Option B)
+
+**Rationale:**
+
+1. **PVC Protection**:
+   - PVCs contain user data (MongoDB database)
+   - Must survive Secret deletion (accidental or intentional)
+   - StatefulSet volumeClaimTemplates create PVCs (StatefulSet owns them)
+   - Storage composite uses related resources to discover PVCs without owning them
+   - Result: Recreating Secret → StatefulSet → mounts existing PVC → data intact
+
+2. **Blast Radius Reduction**:
+   - Deleting compute ConfigMap shouldn't delete database
+   - Compute composite discovers storage via related Secret (not owned)
+   - Compute composite discovers StatefulSet via related resources (blast radius protection)
+   - Result: ConfigMap deletion doesn't cascade to storage layer
+
+3. **Recovery Scenarios**:
+   - Accidentally deleted Secret? Recreate it, StatefulSet comes back, mounts existing PVC
+   - Accidentally deleted ConfigMap? Recreate it, Nightscout redeploys, database untouched
+   - Debugging: Can delete controllers without losing data
+
+4. **Kubernetes-Native Pattern**:
+   - Related resources via `relatedResourceRules` in Metacontroller
+   - Discovered via label selectors
+   - Read-only relationship (no ownership)
+   - Standard pattern for cross-resource dependencies
+
+**Trade-offs:**
+
+✅ **Gained:**
+- Data safety: PVCs survive controller deletion
+- Recovery: Can recreate controllers without data loss
+- Debugging: Can experiment without risking production data
+- Blast radius: Failures don't cascade
+
+❌ **Lost:**
+- Automatic cleanup: Must manually delete PVCs if needed
+- Complexity: Need to handle orphaned resources
+- Discovery: Must use labels to find related resources
+
+**Impact:** Related resources pattern is fundamental to Gen 4 safety. PVCs, storage Secrets, and StatefulSets are protected from accidental deletion cascades.
+
+---
+
+### Decision 4: Secret vs ConfigMap for Storage Configuration
+
+**Context:**
+Gen 3b stored all tenant configuration (including MongoDB credentials) in ConfigMaps. Gen 4 needed to decide whether to continue this pattern or separate credentials.
+
+**Options Considered:**
+
+**Option A: ConfigMap for Everything (Gen 3b pattern)**
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: demo
+data:
+  TENANT_ID: demo
+  MONGO_USER: nsuser
+  MONGO_PASSWORD: secret123  # ← Credentials in ConfigMap
+  MONGO_DATABASE: nightscout
+```
+
+**Option B: Secret for Credentials, ConfigMap for Config (CHOSEN)**
+```yaml
+# Storage credentials
+apiVersion: v1
+kind: Secret
+metadata:
+  name: storage-demo
+  labels:
+    storage.nightscout.org/account: demo
+stringData:
+  username: nsuser
+  password: secret123  # ← Credentials in Secret
+  database: nightscout
+---
+# Application config
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: demo
+  labels:
+    storage.nightscout.org/account: demo  # ← Links to storage
+data:
+  TENANT_ID: demo
+  # No credentials - references Secret
+```
+
+**Decision:** Secret for Credentials (Option B)
+
+**Rationale:**
+
+1. **Security Best Practice**:
+   - Kubernetes Secrets designed for sensitive data
+   - RBAC: Can grant ConfigMap read without Secret read
+   - Audit: Secret access logged separately
+   - Encryption: Secrets can be encrypted at rest
+
+2. **API Surface Area**:
+   - Environs API (administration interface) operates on ConfigMaps
+   - API should NOT see database credentials
+   - Least privilege: API needs config access, not credential access
+   - Attack surface: Compromised API can't steal credentials
+
+3. **Operational Clarity**:
+   - Clear distinction: ConfigMap = application config, Secret = credentials
+   - DBA operations on Secrets (credential rotation)
+   - DevOps operations on ConfigMaps (scaling, features)
+   - Audit trail: Who accessed credentials vs who changed config
+
+4. **Migration Path**:
+   - Existing 1300 sites have ConfigMaps (Gen 3b)
+   - Migration utility extracts credentials → creates Secrets
+   - ConfigMaps remain for application config
+   - Gradual migration: One tenant at a time
+
+**Trade-offs:**
+
+✅ **Gained:**
+- Security: Credentials properly protected
+- RBAC: Fine-grained access control
+- Audit: Credential access tracked
+- Compliance: Meets security requirements
+
+❌ **Lost:**
+- Simplicity: Two resources instead of one
+- Discovery: Must link ConfigMap to Secret via labels
+- Migration: Requires extracting credentials from existing ConfigMaps
+
+**Impact:** Credential isolation is non-negotiable for production security. The Secret/ConfigMap split is fundamental to Gen 4 architecture.
+
+---
+
+### Decision 5: Storage-Type Annotation to Control StatefulSet Creation
+
+**Context:**
+Migrating 1300 existing sites from shared MongoDB to Gen 4 required supporting both shared and dedicated storage models. Creating 1300 unwanted StatefulSets on day one would be catastrophic.
+
+**Options Considered:**
+
+**Option A: Always Create StatefulSet**
+- Every Secret → StatefulSet created
+- No shared storage support
+- Must migrate all 1300 sites before deploying Gen 4
+
+**Option B: Annotation-Driven StatefulSet Creation (CHOSEN)**
+```yaml
+# Shared storage (no StatefulSet)
+annotations:
+  ns.mdn.io/storage-type: shared
+
+# Dedicated storage (StatefulSet created)
+annotations:
+  ns.mdn.io/storage-type: dedicated
+```
+
+**Decision:** Annotation-Driven StatefulSet Creation (Option B)
+
+**Rationale:**
+
+1. **Prevents Mass StatefulSet Creation**:
+   - Storage controller checks `storage-type` annotation
+   - `shared`: No StatefulSet, marks storage as ready immediately
+   - `dedicated`: Creates StatefulSet + Service
+   - Result: 1300 shared-storage Secrets don't create StatefulSets
+
+2. **Gradual Migration Path**:
+   - Day 1: All 1300 sites use shared storage (Gen 4 compatible)
+   - Over time: Change annotation to `dedicated`, triggers StatefulSet creation
+   - Over time: Add migration annotations, triggers data copy
+   - Over time: All sites on dedicated storage
+   - Tenant-by-tenant migration, zero-downtime
+
+3. **Resource Efficiency**:
+   - Shared MongoDB serves multiple tenants efficiently
+   - Only create dedicated resources when explicitly needed
+   - Cost optimization: Shared storage cheaper than 1300 StatefulSets
+
+4. **Declarative Behavior**:
+   - Annotation drives webhook behavior
+   - Change annotation → controller adapts
+   - Idempotent: Same annotation always produces same result
+   - Kubernetes-native: Annotations are standard pattern
+
+**Trade-offs:**
+
+✅ **Gained:**
+- Safe Gen 4 deployment (no mass StatefulSet creation)
+- Gradual migration (one tenant at a time)
+- Cost efficiency (shared storage option)
+- Flexibility (can mix shared/dedicated)
+
+❌ **Lost:**
+- Complexity: Controller must handle two storage types
+- Documentation: Must explain annotation meaning
+- Testing: Must test both code paths
+
+**Impact:** The annotation-driven pattern enables safe Gen 4 deployment with 1300 existing tenants. Critical for production rollout.
+
+---
+
+## Future Architectural Decisions
+
+The following topics warrant deeper architectural exploration and decision documentation in future iterations. This section serves as a placeholder for decisions not yet fully explored:
+
+### CDC Strategy & Event Sourcing
+- **Question**: Should CDC (Change Data Capture) be opt-in per tenant or platform-wide?
+- **Considerations**: Kafka topic management, connector lifecycle, storage costs
+- **Status**: Currently implemented as opt-in via `CDC_ENABLED` ConfigMap field
+- **Future Work**: Document trade-offs, evaluate event sourcing patterns
+
+### Backup & Disaster Recovery
+- **Question**: Should backups be policy-driven (decorator) or tenant-requested?
+- **Considerations**: VolumeSnapshot automation, retention policies, recovery SLAs
+- **Status**: Decorator pattern implemented for PVC backup policy
+- **Future Work**: Document backup strategies, evaluate retention policies
+
+### Multi-Region & Geographic Distribution
+- **Question**: How should tenants be distributed across regions?
+- **Considerations**: Data sovereignty, latency, disaster recovery, cost
+- **Status**: Not implemented (single-region deployment)
+- **Future Work**: Evaluate federation patterns, cross-region replication
+
+### Resource Quotas & Multi-Tenancy Isolation
+- **Question**: How to enforce resource quotas per tenant tier?
+- **Considerations**: ResourceQuota, LimitRange, NetworkPolicy, PodSecurityPolicy
+- **Status**: Partially implemented (tier-based sizing via ConfigMap)
+- **Future Work**: Document isolation strategies, evaluate security boundaries
+
+### Monitoring & Observability
+- **Question**: Should metrics be collected per tenant or aggregated?
+- **Considerations**: Prometheus scraping, log aggregation, alerting
+- **Status**: Not implemented (relies on platform monitoring)
+- **Future Work**: Document observability patterns, evaluate tenant metrics
+
+### GitOps & Configuration Drift
+- **Question**: How to detect and remediate configuration drift?
+- **Considerations**: ArgoCD integration, drift detection, automated reconciliation
+- **Status**: Not implemented (manual ConfigMap/Secret management)
+- **Future Work**: Evaluate GitOps patterns, document drift handling
+
+---
+
 ## Related Documentation
 
 - [OpenAPI Gen 1 - multienv](openapi-gen1-multienv.yaml)
