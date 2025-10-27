@@ -42,6 +42,7 @@ COMMANDS:
 
   Consul Integration:
     check-srv <tenant>                  Check Consul SRV records
+    wait-for-srv <tenant> <count> [max_retries]  Wait for SRV record count (default 30 retries)
     
   Migration Helpers:
     is-migrated <tenant>                Check if tenant has dedicated MongoDB
@@ -73,6 +74,9 @@ EXAMPLES:
   $0 cycle-storage demo          # Recreate MongoDB resources
   $0 cycle-compute demo          # Recreate Nightscout resources
   $0 force-reconcile demo        # Full reconciliation (storage + compute)
+
+  # Wait for Consul registration
+  $0 wait-for-srv demo 1         # Wait for exactly 1 SRV record
 EOF
       ;;
 
@@ -191,6 +195,34 @@ EOF
       tenant=$2
       test -z "$tenant" && (echo "Error: Missing tenant name" && exit 1)
       dig +short "$tenant.backends.service.consul" SRV | sort | uniq
+      ;;
+
+    wait-for-srv)
+      tenant=$2
+      expected_count=$3
+      max_retries=${4:-30}
+      test -z "$tenant" || test -z "$expected_count" && (echo "Error: Missing arguments" && exit 1)
+      
+      retries=0
+      echo "Waiting for SRV records to update for $tenant (expecting $expected_count)..."
+      
+      while true; do
+        srv_count=$(dig +short "$tenant.backends.service.consul" SRV | wc -l)
+        
+        if [ "$srv_count" -eq "$expected_count" ]; then
+          echo "✓ SRV records updated for $tenant (count: $expected_count)"
+          exit 0
+        else
+          echo "Current SRV count: $srv_count (waiting for $expected_count)..."
+          sleep 2
+          retries=$((retries + 1))
+          
+          if [ "$retries" -ge "$max_retries" ]; then
+            echo "✗ Timed out waiting for SRV record update (after ${max_retries} attempts)"
+            exit 1
+          fi
+        fi
+      done
       ;;
 
     # Migration helpers

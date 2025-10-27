@@ -203,7 +203,18 @@ EOF
         if $0 validate-migration "$tenant" > /dev/null 2>&1; then
           echo ""
           $0 validate-migration "$tenant"
-          exit 0
+          
+          # Step 4: Wait for Consul registration (critical validation)
+          echo ""
+          echo "Waiting for Consul registration..."
+          if "$SCRIPT_DIR/tenant-operations.sh" wait-for-srv "$tenant" 1 30 > /dev/null 2>&1; then
+            echo "✓ Consul registration confirmed for $tenant"
+            exit 0
+          else
+            echo "⚠ Migration complete but Consul registration failed for $tenant"
+            echo "Check pod status: kubectl get pods -n $NAMESPACE -l tenant=$tenant"
+            exit 1
+          fi
         fi
         sleep 10
         elapsed=$((elapsed + 10))
@@ -243,6 +254,8 @@ EOF
           $0 rollback-tenant "$tenant"
         fi
         
+        # Brief cooldown between tenants (avoid overwhelming system)
+        sleep 2
         echo ""
       done < "$file"
       
@@ -250,6 +263,13 @@ EOF
       echo "Total: $total"
       echo "Success: $success"
       echo "Failed: $failed"
+      
+      # Extra sleep after batch to allow system to stabilize
+      if [ $success -gt 0 ]; then
+        echo ""
+        echo "Batch complete. Allowing system to stabilize (30s)..."
+        sleep 30
+      fi
       
       test $failed -eq 0 && exit 0 || exit 1
       ;;
