@@ -1,0 +1,71 @@
+# Compute Composite Example
+# Creates Nightscout Deployment + Service
+#
+# This ConfigMap is the parent resource for the compute composite controller.
+# The controller will:
+#   1. Discover storage Secret via storage.nightscout.org/account label
+#   2. Discover MongoDB StatefulSet via related resources
+#   3. Create Nightscout Deployment + Service
+#
+# NOTE: No MongoDB credentials in this ConfigMap - they're in the Secret!
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: demo-tenant
+  namespace: hosted-tenants
+  labels:
+    # Required: Triggers compute composite controller
+    ns.mdn.io/composite: compute
+    # Links to storage Secret (controller discovers Secret with this label)
+    storage.nightscout.org/account: demo-account
+    # Optional: Application tier
+    ns.mdn.io/tier: basic
+  annotations:
+    ns.mdn.io/created-at: "2025-01-15T00:00:00Z"
+data:
+  # Nightscout application configuration
+  API_SECRET: "changeme"
+  DISPLAY_UNITS: "mg/dl"
+  ENABLE_BRIDGE: "true"
+  ENABLE_CAREPORTAL: "true"
+  TIME_FORMAT: "12"
+  
+  # Feature flags
+  CDC_ENABLED: "false"
+  MIGRATION_ENABLED: "false"
+  
+  # Resource configuration
+  NS_IMAGE: "nightscout/cgm-remote-monitor:latest"
+  NS_REPLICAS: "1"
+  NS_CPU_REQUEST: "100m"
+  NS_CPU_LIMIT: "500m"
+  NS_MEM_REQUEST: "256Mi"
+  NS_MEM_LIMIT: "512Mi"
+
+---
+# Mixed Environment Example - Gen 3b (deployment-controller)
+# For comparison: Same tenant using Gen 3b deployment-controller
+# Notice: MongoDB credentials ARE in ConfigMap (less secure)
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: old-gen3b-tenant
+  namespace: hosted-tenants
+  labels:
+    # Gen 3b label - triggers deployment-controller (not compute composite)
+    ns.mdn.io/controller: deployment
+    managed: multienv
+    app: tenant
+  annotations:
+    ns.mdn.io/created-at: "2025-01-14T00:00:00Z"
+data:
+  # Same app config as above
+  API_SECRET: "changeme"
+  DISPLAY_UNITS: "mg/dl"
+  
+  # MongoDB credentials EXPOSED in ConfigMap (Gen 3b pattern)
+  MONGO_CONNECTION: "mongodb://shared-mongodb:27017/nightscout"
+  MONGO_USER: "shared-user"
+  MONGO_PASSWORD: "shared-password"  # ← Visible to environs API!

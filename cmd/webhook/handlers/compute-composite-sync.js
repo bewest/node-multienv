@@ -1,0 +1,312 @@
+/**
+ * Compute Composite Controller
+ * 
+ * Manages Nightscout Deployment + Service from ConfigMap parent
+ * 
+ * Parent: ConfigMap (labeled ns.mdn.io/composite=compute)
+ * Children:
+ *   - Nightscout Deployment
+ *   - Nightscout Service
+ *   - PodDisruptionBudget (optional)
+ * Related (not owned):
+ *   - Storage Secret (discovered via storage.nightscout.org/account label)
+ *   - MongoDB StatefulSet (learned from Secret, provides blast radius protection)
+ */
+
+const { renderNightscout, renderKafkaTopics, renderKafkaConnector, renderMigrationJob } = require('./resources');
+
+async function computeCompositeSync(req, res) {
+  const { parent, children, related } = req.body;
+  
+  const tenantId = parent.metadata.name;
+  const storageAccountLabel = parent.metadata.labels?.['storage.nightscout.org/account'];
+  
+  console.log('Compute composite sync for tenant:', tenantId, 'storage account:', storageAccountLabel);
+  
+  try {
+    const response = {
+      status: {},
+      children: [],
+      relatedResourceRules: [
+        {
+          // Discover storage Secret (provides MongoDB credentials)
+          apiVersion: 'v1',
+          resource: 'secrets',
+          labelSelector: {
+            matchLabels: {
+              'storage.nightscout.org/account': storageAccountLabel,
+              'ns.mdn.io/composite': 'storage'
+            }
+          }
+        },
+        {
+          // Discover MongoDB StatefulSet (blast radius protection)
+          apiVersion: 'apps/v1',
+          resource: 'statefulsets',
+          labelSelector: {
+            matchLabels: {
+              'storage.nightscout.org/account': storageAccountLabel,
+              'app.kubernetes.io/name': 'mongodb'
+            }
+          }
+        }
+      ]
+    };
+
+    // Find storage Secret from related resources
+    const storageSecret = findStorageSecret(related, storageAccountLabel);
+    
+    if (!storageSecret) {
+      console.warn(`Storage Secret not found for account: ${storageAccountLabel}`);
+      response.status = {
+        observedGeneration: parent.metadata?.generation,
+        conditions: [{
+          type: 'Ready',
+          status: 'False',
+          reason: 'StorageSecretNotFound',
+          message: `Storage Secret with label storage.nightscout.org/account=${storageAccountLabel} not found`,
+          lastTransitionTime: new Date().toISOString()
+        }]
+      };
+      res.json(response);
+      return;
+    }
+
+    // Check MongoDB readiness from related StatefulSet
+    const mongoReadiness = checkMongoReadinessFromRelated(related, storageAccountLabel);
+    
+    // Enhance parent with storage information
+    const enrichedParent = enrichWithStorageInfo(parent, storageSecret, storageAccountLabel);
+    
+    // Render Nightscout resources
+    response.children.push(...renderNightscout(enrichedParent));
+
+    // Optional: CDC resources if enabled
+    const cdcEnabled = parent.data?.CDC_ENABLED === 'true';
+    if (cdcEnabled && mongoReadiness.ready) {
+      response.children.push(...renderKafkaTopics(enrichedParent));
+      response.children.push(renderKafkaConnector(enrichedParent));
+    }
+
+    // Optional: Migration job if enabled
+    const migrationEnabled = parent.data?.MIGRATION_ENABLED === 'true';
+    const migrationState = checkMigrationState(children);
+    const migrationCompleteMarker = parent.metadata?.annotations?.['ns.mdn.io/migration-complete'];
+    
+    if (migrationEnabled && mongoReadiness.ready && migrationState.phase !== 'Complete' && !migrationCompleteMarker) {
+      console.log(`Rendering migration job for tenant ${tenantId}`);
+      response.children.push(renderMigrationJob(enrichedParent));
+    }
+
+    // Build status
+    response.status = buildStatus(parent, {
+      mongoReadiness,
+      migrationState,
+      migrationEnabled,
+      cdcEnabled,
+      storageAccount: storageAccountLabel,
+      children
+    });
+
+    res.json(response);
+  } catch (error) {
+    console.error('Error in compute composite sync:', error);
+    res.status(500).json({ error: error.message });
+  }
+}
+
+/**
+ * Find storage Secret from related resources
+ */
+function findStorageSecret(related, storageAccountLabel) {
+  if (!related || !related['Secret.v1']) {
+    return null;
+  }
+  
+  const secrets = related['Secret.v1'];
+  for (const [name, secret] of Object.entries(secrets)) {
+    const accountLabel = secret.metadata?.labels?.['storage.nightscout.org/account'];
+    const compositeLabel = secret.metadata?.labels?.['ns.mdn.io/composite'];
+    
+    if (accountLabel === storageAccountLabel && compositeLabel === 'storage') {
+      console.log(`Found storage Secret: ${name} for account: ${storageAccountLabel}`);
+      return secret;
+    }
+  }
+  
+  return null;
+}
+
+/**
+ * Check MongoDB readiness from related StatefulSet
+ */
+function checkMongoReadinessFromRelated(related, storageAccountLabel) {
+  if (!related || !related['StatefulSet.apps/v1']) {
+    return {
+      ready: false,
+      condition: {
+        type: 'MongoDBReady',
+        status: 'False',
+        reason: 'StatefulSetNotFound',
+        message: 'MongoDB StatefulSet not found in related resources',
+        lastTransitionTime: new Date().toISOString()
+      }
+    };
+  }
+  
+  const statefulSets = related['StatefulSet.apps/v1'];
+  for (const [name, sts] of Object.entries(statefulSets)) {
+    const accountLabel = sts.metadata?.labels?.['storage.nightscout.org/account'];
+    
+    if (accountLabel === storageAccountLabel) {
+      const replicas = sts.spec?.replicas || 0;
+      const readyReplicas = sts.status?.readyReplicas || 0;
+      const ready = readyReplicas >= 1;
+      
+      console.log(`Found MongoDB StatefulSet ${name} for storage account ${storageAccountLabel}: ${readyReplicas}/${replicas} ready`);
+      
+      return {
+        ready,
+        condition: {
+          type: 'MongoDBReady',
+          status: ready ? 'True' : 'False',
+          reason: ready ? 'StatefulSetReady' : 'WaitingForPods',
+          message: ready 
+            ? `MongoDB StatefulSet is ready (${readyReplicas}/${replicas} replicas)`
+            : `Waiting for MongoDB pods (${readyReplicas}/${replicas} replicas ready)`,
+          lastTransitionTime: new Date().toISOString()
+        }
+      };
+    }
+  }
+  
+  return {
+    ready: false,
+    condition: {
+      type: 'MongoDBReady',
+      status: 'False',
+      reason: 'StatefulSetNotFound',
+      message: `MongoDB StatefulSet for storage account ${storageAccountLabel} not found`,
+      lastTransitionTime: new Date().toISOString()
+    }
+  };
+}
+
+/**
+ * Enrich parent ConfigMap with storage information
+ */
+function enrichWithStorageInfo(parent, storageSecret, storageAccountLabel) {
+  // Decode Secret data
+  const secretData = {};
+  if (storageSecret.data) {
+    Object.keys(storageSecret.data).forEach(key => {
+      secretData[key] = Buffer.from(storageSecret.data[key], 'base64').toString('utf-8');
+    });
+  }
+  
+  // Check if using shared MongoDB (no dedicated StatefulSet)
+  const storageType = storageSecret.metadata?.annotations?.['ns.mdn.io/storage-type'] || 'dedicated';
+  const mongoHost = storageType === 'shared' 
+    ? secretData.mongoHost || 'shared-mongodb'
+    : `${storageAccountLabel}-mongodb`;
+  
+  return {
+    ...parent,
+    data: {
+      ...parent.data,
+      TENANT_ID: parent.metadata.name,
+      // Storage connection info (credentials come from Secret reference)
+      MONGO_HOST: mongoHost,
+      STORAGE_ACCOUNT: storageAccountLabel,
+      STORAGE_SECRET: storageSecret.metadata.name,
+      STORAGE_TYPE: storageType
+    }
+  };
+}
+
+/**
+ * Check migration job state
+ */
+function checkMigrationState(children) {
+  const jobs = children['Job.batch/v1'] || {};
+  
+  for (const [name, job] of Object.entries(jobs)) {
+    if (name.endsWith('-migration')) {
+      const conditions = job.status?.conditions || [];
+      const succeeded = job.status?.succeeded || 0;
+      const active = job.status?.active || 0;
+      
+      const completeCondition = conditions.find(c => c.type === 'Complete' && c.status === 'True');
+      const failedCondition = conditions.find(c => c.type === 'Failed' && c.status === 'True');
+      
+      if (completeCondition || succeeded > 0) {
+        return { phase: 'Complete' };
+      } else if (failedCondition) {
+        return { phase: 'Failed' };
+      } else if (active > 0) {
+        return { phase: 'Running' };
+      } else {
+        return { phase: 'Pending' };
+      }
+    }
+  }
+  
+  return { phase: 'NotStarted' };
+}
+
+/**
+ * Build Kubernetes-idiomatic status
+ */
+function buildStatus(parent, state) {
+  const { mongoReadiness, migrationState, migrationEnabled, cdcEnabled, storageAccount } = state;
+  
+  const conditions = [];
+  
+  // MongoDB readiness (from related resources)
+  conditions.push(mongoReadiness.condition);
+  
+  // Migration condition if enabled
+  if (migrationEnabled && migrationState.phase !== 'NotStarted') {
+    const migrationComplete = migrationState.phase === 'Complete';
+    conditions.push({
+      type: 'MigrationComplete',
+      status: migrationComplete ? 'True' : 'False',
+      reason: migrationComplete ? 'JobSucceeded' : `Job${migrationState.phase}`,
+      message: migrationComplete 
+        ? 'Database migration completed successfully'
+        : `Migration ${migrationState.phase.toLowerCase()}`,
+      lastTransitionTime: new Date().toISOString()
+    });
+  }
+  
+  // Overall Ready condition
+  const allReady = mongoReadiness.ready && 
+                   (!migrationEnabled || migrationState.phase === 'Complete' || migrationState.phase === 'NotStarted');
+  
+  conditions.push({
+    type: 'Ready',
+    status: allReady ? 'True' : 'False',
+    reason: allReady ? 'AllComponentsReady' : 'WaitingForComponents',
+    message: allReady 
+      ? 'Tenant is ready and operational'
+      : 'Waiting for storage or migration to complete',
+    lastTransitionTime: new Date().toISOString()
+  });
+  
+  return {
+    observedGeneration: parent.metadata?.generation,
+    conditions,
+    storage: {
+      account: storageAccount,
+      mongoReady: mongoReadiness.ready
+    },
+    migration: migrationEnabled ? {
+      enabled: true,
+      phase: migrationState.phase
+    } : {
+      enabled: false
+    }
+  };
+}
+
+module.exports = computeCompositeSync;

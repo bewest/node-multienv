@@ -1,0 +1,48 @@
+apiVersion: metacontroller.k8s.io/v1alpha1
+kind: CompositeController
+metadata:
+  name: storage-composite
+  annotations:
+    metacontroller.k8s.io/description: |
+      Storage Composite Controller
+      
+      Manages dedicated MongoDB StatefulSet + Service from Secret parent.
+      Every Secret labeled ns.mdn.io/composite=storage maintains a MongoDB StatefulSet.
+      
+      Parent: Secret (ns.mdn.io/composite=storage)
+      Children: StatefulSet, Service
+      Related: PersistentVolumeClaim (blast radius protection)
+      
+      Design: Separates storage credentials (Secret) from compute config (ConfigMap).
+      Enables independent storage lifecycle and upgrades (shared → dedicated MongoDB).
+spec:
+  generateSelector: true
+  
+  parentResource:
+    apiVersion: v1
+    resource: secrets
+    labelSelector:
+      matchLabels:
+        ns.mdn.io/composite: storage
+  
+  childResources:
+    - apiVersion: apps/v1
+      resource: statefulsets
+      updateStrategy:
+        method: InPlace
+    - apiVersion: v1
+      resource: services
+    - apiVersion: policy/v1
+      resource: poddisruptionbudgets
+  
+  relatedResources:
+    # PVCs are discovered (not owned) for blast radius protection
+    # If Secret deleted → StatefulSet deleted, but PVCs survive
+    - apiVersion: v1
+      resource: persistentvolumeclaims
+  
+  hooks:
+    sync:
+      webhook:
+        url: http://webhook-server:3000/composite/storage/sync
+        timeout: 30s
