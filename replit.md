@@ -123,6 +123,35 @@ Gen 4 uses a **two-composite architecture** that separates storage concerns from
 - Migration state tracked in Secret status
 - Supports shared → dedicated MongoDB migration workflow
 
+### Provisioner API Facade
+The deployment controller (`k8s-deployment-controller.js`) provides **REST API entry points** for external provisioning systems, serving as a facade over the two-composite architecture:
+
+**Account Provisioning**:
+- `POST /accounts` - Create storage account (generates Secret with `ns.mdn.io/composite: storage`)
+- `POST /accounts/:account` - Update storage account (idempotent)
+- Accepts tier and storageType in request body
+- Environment variables: `DEFAULT_STORAGE_TYPE` (shared/dedicated), `DEFAULT_TIER` (basic/premium/enterprise)
+
+**Site Provisioning**:
+- `POST /accounts/:account/sites/:name` - Create/update tenant site (generates ConfigMap with `ns.mdn.io/composite: compute`)
+- Validates `internal_name` matches URL parameter `:name`
+- Validates DNS compatibility (lowercase alphanumeric + hyphens, max 63 chars)
+- Accepts full Nightscout configuration in request body
+- Links ConfigMap to storage account via `storage.nightscout.org/account` label
+
+**Metadata Manipulation** (for Gen 3b → Gen 4 migration):
+- `POST /configmaps/:name/metadata/labels/:field` - Add composite label to existing ConfigMaps
+- `POST /secrets/:name/metadata/annotations/:field` - Add migration annotations
+- `DELETE /configmaps/:name/metadata/labels/:field` - Remove old labels
+
+**Migration Workflow**:
+1. Create storage account with migration annotations (old MongoDB URI)
+2. Label existing Gen 3b ConfigMap with Gen 4 labels (`ns.mdn.io/composite: compute`)
+3. ConfigMap names stay the same - only labels change (label cycling)
+4. Metacontroller discovers labeled resources and orchestrates migration
+
+See `docs/TWO-COMPOSITE-ARCHITECTURE.md` for complete REST API examples and migration workflows.
+
 ## Documentation
 - **[Two-Composite Architecture](docs/TWO-COMPOSITE-ARCHITECTURE.md)** - Storage/compute separation, annotation-driven behavior, migration workflow
 - **[Architecture Evolution](docs/ARCHITECTURE-EVOLUTION.md)** - Complete story of the 5 generations, facade pattern benefits, migration paths

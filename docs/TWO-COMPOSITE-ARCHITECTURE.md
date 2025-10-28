@@ -269,6 +269,340 @@ node cmd/migrate-to-two-composite.js --all
 3. Removes credentials from ConfigMap
 4. Links ConfigMap to storage account
 
+## REST API Provisioning
+
+The deployment controller (`k8s-deployment-controller.js`) provides REST APIs that serve as a **provisioner facade** over the two-composite architecture. External systems can provision tenants without understanding Kubernetes or Metacontroller.
+
+### Create Storage Account
+
+**Endpoint**: `POST /accounts` or `POST /accounts/:account`
+
+Creates a storage Secret that triggers the storage composite controller.
+
+```bash
+# Create new account with auto-generated ID
+curl -X POST http://deployment-controller:3000/accounts \
+  -H "Content-Type: application/json" \
+  -d '{
+    "tier": "basic",
+    "storageType": "shared"
+  }'
+
+# Response:
+{
+  "account": "507f1f77bcf86cd799439011",
+  "storageType": "shared",
+  "tier": "basic"
+}
+
+# Create/update specific account
+curl -X POST http://deployment-controller:3000/accounts/507f1f77bcf86cd799439011 \
+  -H "Content-Type: application/json" \
+  -d '{
+    "tier": "premium",
+    "storageType": "dedicated"
+  }'
+```
+
+**What it creates**:
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: 507f1f77bcf86cd799439011-secret
+  labels:
+    ns.mdn.io/composite: storage          # ← Triggers storage controller
+    storage.nightscout.org/account: 507f1f77bcf86cd799439011
+    app.kubernetes.io/managed-by: metacontroller
+  annotations:
+    ns.mdn.io/storage-type: shared        # ← "shared" or "dedicated"
+    ns.mdn.io/tier: basic
+stringData:
+  MONGO_INITDB_ROOT_USERNAME: user_507f1f77bcf86cd799439011
+  MONGO_INITDB_ROOT_PASSWORD: <random>
+  MONGO_INITDB_DATABASE: ns
+```
+
+### Create Tenant Site
+
+**Endpoint**: `POST /accounts/:account/sites/:name`
+
+Creates a compute ConfigMap linked to the storage account.
+
+```bash
+curl -X POST http://deployment-controller:3000/accounts/507f1f77bcf86cd799439011/sites/demo1234 \
+  -H "Content-Type: application/json" \
+  -d '{
+    "internal_name": "demo1234",
+    "API_SECRET": "my-secret-token-12345",
+    "DISPLAY_UNITS": "mg/dl",
+    "ENABLE_CAREPORTAL": "true"
+  }'
+
+# Response:
+{
+  "tenant": "demo1234",
+  "account": "507f1f77bcf86cd799439011"
+}
+```
+
+**What it creates**:
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: demo1234
+  labels:
+    ns.mdn.io/composite: compute           # ← Triggers compute controller
+    ns.mdn.io/tenant: demo1234
+    storage.nightscout.org/account: 507f1f77bcf86cd799439011  # ← Links to storage
+    app.kubernetes.io/managed-by: metacontroller
+data:
+  TENANT_ID: demo1234
+  API_SECRET: my-secret-token-12345
+  DISPLAY_UNITS: mg/dl
+  ENABLE_CAREPORTAL: "true"
+```
+
+**Validation**:
+- `internal_name` must match URL parameter `:name`
+- Tenant ID must be DNS-compatible (lowercase alphanumeric + hyphens, max 63 chars)
+- Both endpoints are **idempotent** (safe to retry)
+
+### Complete Provisioning Flow
+
+```bash
+# 1. Create storage account
+ACCOUNT=$(curl -s -X POST http://deployment-controller:3000/accounts \
+  -H "Content-Type: application/json" \
+  -d '{"tier": "basic", "storageType": "shared"}' | jq -r '.account')
+
+echo "Created account: $ACCOUNT"
+
+# 2. Create tenant site linked to account
+curl -X POST http://deployment-controller:3000/accounts/$ACCOUNT/sites/demo1234 \
+  -H "Content-Type: application/json" \
+  -d '{
+    "internal_name": "demo1234",
+    "API_SECRET": "my-secret-token-12345"
+  }'
+
+# 3. Metacontroller takes over:
+#    - Storage controller sees Secret, creates nothing (shared storage)
+#    - Compute controller sees ConfigMap, creates Deployment + Service
+#    - Tenant is live!
+```
+
+## Gen 3b → Gen 4 Migration via REST API
+
+Existing Gen 3b tenants (managed by deployment-controller) can be migrated to Gen 4 (Metacontroller) without recreation or downtime. The key is **label cycling** - adding labels to existing resources to make Metacontroller aware of them.
+
+### Migration Strategy
+
+Gen 3b ConfigMaps already exist with tenant configuration. Instead of recreating them:
+1. Create a storage Secret with migration annotations (pulls data from old MongoDB)
+2. Add Gen 4 labels to the existing ConfigMap (triggers compute controller)
+
+**ConfigMap names stay the same** - only labels change.
+
+### Step 1: Create Storage Account with Migration
+
+For each Gen 3b tenant, create a storage Secret that will migrate data from the old shared MongoDB cluster.
+
+```bash
+TENANT="demo1234"
+ACCOUNT="507f1f77bcf86cd799439011"  # Storage account ID
+OLD_MONGO_URI="mongodb://shared-user:password@shared-mongodb:27017/nightscout"
+
+# Create storage Secret
+curl -X POST http://deployment-controller:3000/accounts/$ACCOUNT \
+  -H "Content-Type: application/json" \
+  -d '{
+    "tier": "basic",
+    "storageType": "dedicated"
+  }'
+
+# Add migration annotations
+curl -X POST http://deployment-controller:3000/secrets/${ACCOUNT}-secret/metadata/annotations/ns.mdn.io%2Fmigration-needed \
+  -H "Content-Type: application/json" \
+  -d '{"ns.mdn.io/migration-needed": "true"}'
+
+curl -X POST http://deployment-controller:3000/secrets/${ACCOUNT}-secret/metadata/annotations/ns.mdn.io%2Fmigration-source-uri \
+  -H "Content-Type: application/json" \
+  -d "{\"ns.mdn.io/migration-source-uri\": \"$OLD_MONGO_URI\"}"
+```
+
+**What happens**:
+1. Storage controller sees Secret with `storage-type: dedicated`
+2. Creates new MongoDB StatefulSet for this tenant
+3. Sees `migration-needed: true` annotation
+4. Renders migration Job that copies data from `OLD_MONGO_URI` to new MongoDB
+
+### Step 2: Label Existing ConfigMap
+
+The Gen 3b ConfigMap already exists at `/configmaps/demo1234` with all the tenant configuration. Just add the Gen 4 labels:
+
+```bash
+TENANT="demo1234"
+ACCOUNT="507f1f77bcf86cd799439011"
+
+# Add composite label (triggers compute controller)
+curl -X POST http://deployment-controller:3000/configmaps/$TENANT/metadata/labels/ns.mdn.io%2Fcomposite \
+  -H "Content-Type: application/json" \
+  -d '{"ns.mdn.io/composite": "compute"}'
+
+# Add storage account link
+curl -X POST http://deployment-controller:3000/configmaps/$TENANT/metadata/labels/storage.nightscout.org%2Faccount \
+  -H "Content-Type: application/json" \
+  -d "{\"storage.nightscout.org/account\": \"$ACCOUNT\"}"
+```
+
+**What happens**:
+1. Compute controller sees ConfigMap with `ns.mdn.io/composite: compute`
+2. Discovers storage Secret via `storage.nightscout.org/account` label match
+3. Creates Deployment + Service pointing to the new dedicated MongoDB
+4. Tenant cutover complete!
+
+### Step 3: Remove Old Gen 3b Label (Optional)
+
+Gen 3b used `ns.mdn.io/controller: deployment` to route to deployment-controller. Remove it to fully migrate:
+
+```bash
+curl -X DELETE http://deployment-controller:3000/configmaps/$TENANT/metadata/labels/ns.mdn.io%2Fcontroller
+```
+
+### Complete Migration Example
+
+Here's a complete migration of tenant `demo1234` from Gen 3b shared storage to Gen 4 dedicated storage:
+
+```bash
+#!/bin/bash
+set -e
+
+TENANT="demo1234"
+ACCOUNT="507f1f77bcf86cd799439011"
+CONTROLLER="http://deployment-controller:3000"
+
+# Get old MongoDB URI from existing tenant
+OLD_MONGO_URI=$(curl -s $CONTROLLER/configmaps/$TENANT/data/MONGODB_URI)
+
+echo "=== Migrating tenant: $TENANT ==="
+echo "Old MongoDB URI: $OLD_MONGO_URI"
+echo "New storage account: $ACCOUNT"
+
+# 1. Create storage account with migration
+echo "Creating storage account..."
+curl -s -X POST $CONTROLLER/accounts/$ACCOUNT \
+  -H "Content-Type: application/json" \
+  -d '{"tier": "basic", "storageType": "dedicated"}' > /dev/null
+
+# 2. Add migration annotations
+echo "Adding migration annotations..."
+curl -s -X POST $CONTROLLER/secrets/${ACCOUNT}-secret/metadata/annotations/ns.mdn.io%2Fmigration-needed \
+  -H "Content-Type: application/json" \
+  -d '{"ns.mdn.io/migration-needed": "true"}' > /dev/null
+
+curl -s -X POST $CONTROLLER/secrets/${ACCOUNT}-secret/metadata/annotations/ns.mdn.io%2Fmigration-source-uri \
+  -H "Content-Type: application/json" \
+  -d "{\"ns.mdn.io/migration-source-uri\": \"$OLD_MONGO_URI\"}" > /dev/null
+
+# 3. Wait for MongoDB StatefulSet to be ready
+echo "Waiting for new MongoDB to be ready..."
+sleep 10  # In production, poll the Secret status
+
+# 4. Label existing ConfigMap for Gen 4
+echo "Labeling ConfigMap for Gen 4..."
+curl -s -X POST $CONTROLLER/configmaps/$TENANT/metadata/labels/ns.mdn.io%2Fcomposite \
+  -H "Content-Type: application/json" \
+  -d '{"ns.mdn.io/composite": "compute"}' > /dev/null
+
+curl -s -X POST $CONTROLLER/configmaps/$TENANT/metadata/labels/storage.nightscout.org%2Faccount \
+  -H "Content-Type: application/json" \
+  -d "{\"storage.nightscout.org/account\": \"$ACCOUNT\"}" > /dev/null
+
+# 5. Wait for migration to complete
+echo "Waiting for data migration..."
+sleep 30  # In production, poll the Secret status for migration-complete annotation
+
+# 6. Remove old Gen 3b label
+echo "Removing Gen 3b label..."
+curl -s -X DELETE $CONTROLLER/configmaps/$TENANT/metadata/labels/ns.mdn.io%2Fcontroller > /dev/null
+
+echo "=== Migration complete! ==="
+echo "Tenant $TENANT is now running on Gen 4 with dedicated MongoDB"
+```
+
+### REST API Metadata Endpoints
+
+These endpoints enable label/annotation manipulation for migration:
+
+**Add/Update Label or Annotation**:
+```bash
+POST /configmaps/:name/metadata/labels/:field
+POST /configmaps/:name/metadata/annotations/:field
+POST /secrets/:name/metadata/labels/:field
+POST /secrets/:name/metadata/annotations/:field
+
+Body: { "key": "value" }
+```
+
+**Remove Label or Annotation**:
+```bash
+DELETE /configmaps/:name/metadata/labels/:field
+DELETE /configmaps/:name/metadata/annotations/:field
+DELETE /secrets/:name/metadata/labels/:field
+DELETE /secrets/:name/metadata/annotations/:field
+```
+
+**Examples**:
+```bash
+# Add composite label to ConfigMap
+curl -X POST http://deployment-controller:3000/configmaps/demo1234/metadata/labels/ns.mdn.io%2Fcomposite \
+  -H "Content-Type: application/json" \
+  -d '{"ns.mdn.io/composite": "compute"}'
+
+# Add migration annotation to Secret
+curl -X POST http://deployment-controller:3000/secrets/account-secret/metadata/annotations/ns.mdn.io%2Fmigration-needed \
+  -H "Content-Type: application/json" \
+  -d '{"ns.mdn.io/migration-needed": "true"}'
+
+# Remove old label
+curl -X DELETE http://deployment-controller:3000/configmaps/demo1234/metadata/labels/ns.mdn.io%2Fcontroller
+```
+
+**URL Encoding**: Special characters in label/annotation keys must be URL-encoded:
+- `/` → `%2F`
+- `.` → `.` (no encoding needed)
+
+### Migration Validation
+
+After migration, verify the tenant is running on Gen 4:
+
+```bash
+TENANT="demo1234"
+CONTROLLER="http://deployment-controller:3000"
+
+# Check ConfigMap has Gen 4 labels
+curl -s $CONTROLLER/configmaps/$TENANT/metadata/labels | jq
+
+# Expected output:
+# {
+#   "ns.mdn.io/composite": "compute",
+#   "storage.nightscout.org/account": "507f1f77bcf86cd799439011"
+# }
+
+# Check Deployment exists (created by compute controller)
+kubectl get deployment $TENANT-nightscout -n hosted-tenants
+
+# Check migration completed
+curl -s $CONTROLLER/secrets/507f1f77bcf86cd799439011-secret/metadata/annotations | jq
+
+# Expected annotation:
+# {
+#   "ns.mdn.io/migration-complete": "true"
+# }
+```
+
 ## Status Reporting
 
 ### Storage Composite Status
