@@ -150,6 +150,24 @@ The deployment controller (`k8s-deployment-controller.js`) provides **REST API e
 3. ConfigMap names stay the same - only labels change (label cycling)
 4. Metacontroller discovers labeled resources and orchestrates migration
 
+### Migration Tooling
+
+The canonical operational migration tool is **`tools/gen4-migration.sh`**, which leverages the REST API and Metacontroller infrastructure:
+
+**Commands**:
+- `migrate-tenant <name>` - Complete migration workflow (create + trigger + validate)
+- `create-storage <name>` - Create storage Secret with shared MongoDB
+- `trigger-migration <name>` - Add migration annotations to trigger Job
+- `validate-migration <name>` - Check migration completion status
+- `rollback-tenant <name>` - Rollback to shared MongoDB if needed
+- `batch-migrate <file>` - Migrate multiple tenants from file
+- `list-pending` - List tenants needing migration
+- `migration-progress` - Show overall migration status
+
+**Philosophy**: Uses controller REST API endpoints rather than direct K8s API calls. Labels on Secrets trigger webhooks, annotations trigger migration Jobs.
+
+**Deprecated**: `cmd/migrate-to-two-composite.js` (archived) bypassed infrastructure and directly manipulated K8s resources. See `archive/monolithic-migration/README.md` for rationale.
+
 See `docs/TWO-COMPOSITE-ARCHITECTURE.md` for complete REST API examples and migration workflows.
 
 ## Documentation

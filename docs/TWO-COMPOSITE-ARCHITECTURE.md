@@ -247,27 +247,43 @@ labels:
 
 Both controllers run simultaneously - label determines which handles each tenant.
 
-### Migration Utility
+### Migration Tooling: gen4-migration.sh
 
+The canonical migration tool is `tools/gen4-migration.sh`, which uses the REST API and lets Metacontroller orchestrate the migration. This is **infrastructure-native** - it triggers declarative behavior rather than directly manipulating resources.
+
+**Single Tenant Migration**:
 ```bash
-# Dry run - see what would happen
-node cmd/migrate-to-two-composite.js --dry-run
+# Complete migration workflow (create + trigger + validate)
+./tools/gen4-migration.sh migrate-tenant demo1234
 
-# Migrate single tenant
-node cmd/migrate-to-two-composite.js --tenant demo
-
-# Migrate batch (10 at a time)
-node cmd/migrate-to-two-composite.js --batch 10
-
-# Migrate all (with confirmation)
-node cmd/migrate-to-two-composite.js --all
+# Or step-by-step:
+./tools/gen4-migration.sh create-storage demo1234      # Create Secret with shared MongoDB
+./tools/gen4-migration.sh trigger-migration demo1234   # Add migration annotations
+./tools/gen4-migration.sh validate-migration demo1234  # Check completion
 ```
 
-**What it does**:
-1. Creates storage Secret from ConfigMap (extracts credentials)
-2. Updates ConfigMap labels (`controller` → `composite`)
-3. Removes credentials from ConfigMap
-4. Links ConfigMap to storage account
+**Batch Migration**:
+```bash
+# List tenants needing migration
+./tools/gen4-migration.sh list-pending > tenants.txt
+
+# Migrate batch from file
+./tools/gen4-migration.sh batch-migrate tenants.txt
+
+# Check overall progress
+./tools/gen4-migration.sh migration-progress
+```
+
+**How it works**:
+1. POSTs Secret directly (`POST /secrets/storage-<tenant>`) with labels/annotations
+2. Adds migration annotations via metadata patching API
+3. Storage webhook sees Secret with `ns.mdn.io/composite: storage` label
+4. Webhook creates migration Job when annotations present
+5. Validates completion by checking `migration-complete` annotation
+
+**Note**: ConfigMap label updates (Gen 3b → Gen 4) are currently a manual step not handled by this script
+
+**Philosophy**: Uses REST API endpoints rather than direct kubectl/K8s API calls
 
 ## REST API Provisioning
 
@@ -657,7 +673,8 @@ status:
 | Compute Webhook | `cmd/webhook/handlers/compute-composite-sync.js` |
 | Storage Controller | `metacontroller/controllers/storage-composite.yaml` |
 | Compute Controller | `metacontroller/controllers/compute-composite.yaml` |
-| Migration Utility | `cmd/migrate-to-two-composite.js` |
+| Migration Tool | `tools/gen4-migration.sh` |
+| Provisioner API | `k8s-deployment-controller.js` (account/site endpoints) |
 | Examples | `metacontroller/examples/storage-*.yaml` |
 
 ## Benefits
