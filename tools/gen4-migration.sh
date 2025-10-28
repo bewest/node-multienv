@@ -27,15 +27,16 @@ USAGE:
 
 COMMANDS:
   Single Tenant Migration:
-    create-storage <tenant>             Create storage Secret via provisioner API
-    trigger-migration <tenant>          Add migration annotations to Secret
-    validate-migration <tenant>         Check migration Job completion
-    label-configmap <tenant>            Add Gen 4 labels to ConfigMap
-    rollback-tenant <tenant>            Rollback tenant to shared MongoDB
-    migrate-tenant <tenant>             Complete migration workflow (all steps)
+    create-storage <account_id>                        Create storage Secret via provisioner API
+    trigger-migration <account_id> <mongo_uri>         Add migration annotations to Secret
+    validate-migration <account_id>                    Check migration Job completion
+    label-configmap <tenant_id> <account_id>           Add Gen 4 labels to ConfigMap
+    rollback-tenant <account_id>                       Rollback to shared MongoDB
+    migrate-tenant <tenant_id> <account_id> <mongo_uri>  Complete migration workflow (all steps)
 
   Batch Migration:
-    batch-migrate <file>                Migrate tenants from line-delimited file
+    batch-migrate <file>                Migrate tenants from space-delimited file
+                                        Format: tenant_id account_id mongo_uri
     batch-validate <file>               Validate migration for all tenants in file
     batch-rollback <file>               Rollback all tenants in file
 
@@ -46,8 +47,9 @@ COMMANDS:
 
 ARCHITECTURE:
   - Storage Account (Secret): Owns MongoDB resources, identified by account ID
-  - Tenant (ConfigMap): Owns Nightscout compute, linked to storage via label
-  - For Gen 3b migration: account ID = tenant name (1:1 mapping)
+  - Tenant (ConfigMap): Owns Nightscout compute, identified by tenant ID
+  - ConfigMap links to storage via storage.nightscout.org/account label
+  - Account ID ≠ Tenant ID (separate identifiers from legacy system)
 
 WORKFLOW:
   1. Create storage account via provisioner API (POST /accounts/:accountId)
@@ -65,11 +67,14 @@ WORKFLOW:
   7. Resolver routes traffic via Consul to new Deployment
 
 EXAMPLES:
-  # Migrate single tenant
-  $0 migrate-tenant demo
+  # Migrate single tenant with separate tenant ID and storage account ID
+  $0 migrate-tenant demo1234 507f1f77bcf86cd799439011 "mongodb://user:pass@shared:27017/ns"
 
-  # Batch migrate from file
-  $0 list-pending > tenants.txt
+  # Batch migrate from file (space-delimited: tenant_id account_id mongo_uri)
+  cat > tenants.txt <<EOF
+demo1234 507f1f77bcf86cd799439011 mongodb://user:pass@shared:27017/ns_demo
+demo5678 507f1f77bcf86cd799439022 mongodb://user:pass@shared:27017/ns_other
+EOF
   $0 batch-migrate tenants.txt
 
   # Check progress
@@ -79,54 +84,46 @@ EOF
 
     # Single tenant operations
     create-storage)
-      tenant=$2
-      test -z "$tenant" && (echo "Error: Missing tenant name" && exit 1)
+      account_id=$2
+      test -z "$account_id" && (echo "Error: Missing account ID" && exit 1)
       
-      echo "Creating storage account for $tenant..."
+      echo "Creating storage account: $account_id..."
       
-      # Use provisioner API to create storage account
-      # For Gen 3b migration: use tenant name as account ID (1:1 mapping)
+      # Use provisioner API to create storage account with existing account ID
+      # POST /accounts/:account - records existing storage account ID (preserves external mapping)
       # API creates Secret named "{accountId}-secret" with storageType: shared (no migration yet)
       response=$(curl -s -X POST -H "Content-Type: application/json" \
         -d '{"storageType": "shared", "tier": "basic"}' \
-        "$CONTROLLER/accounts/$tenant")
+        "$CONTROLLER/accounts/$account_id")
       
-      account_id=$(echo "$response" | json account)
+      returned_account_id=$(echo "$response" | json account)
       secret_name=$(echo "$response" | json resource.metadata.name)
       
-      if [ -z "$account_id" ] || [ -z "$secret_name" ]; then
+      if [ -z "$returned_account_id" ] || [ -z "$secret_name" ]; then
         echo "✗ Failed to create storage account"
         echo "$response" | json
         exit 1
       fi
       
       echo "✓ Storage account created:"
-      echo "  - Account ID: $account_id"
+      echo "  - Account ID: $returned_account_id"
       echo "  - Secret name: $secret_name"
       echo "  - Storage type: shared (do nothing, ready for migration)"
       echo "  - Tier: basic"
       ;;
 
     trigger-migration)
-      tenant=$2
-      test -z "$tenant" && (echo "Error: Missing tenant name" && exit 1)
+      account_id=$2
+      mongo_uri=$3
+      test -z "$account_id" && (echo "Error: Missing account ID" && exit 1)
+      test -z "$mongo_uri" && (echo "Error: Missing MongoDB URI" && exit 1)
       
-      # For Gen 3b migration: account ID = tenant name (1:1)
-      account_id=$tenant
       secret_name="$account_id-secret"
       
-      echo "Triggering migration for tenant $tenant (account: $account_id)..."
+      echo "Triggering migration for storage account: $account_id..."
+      echo "  - Source MongoDB: $mongo_uri"
       
-      # Get current MongoDB URI from ConfigMap (shared MongoDB connection string)
-      mongo_uri=$(curl -s "$CONTROLLER/configmaps/$tenant/env/MONGODB_URI" 2>/dev/null | json)
-      
-      if [ -z "$mongo_uri" ]; then
-        echo "✗ Could not retrieve MONGODB_URI from ConfigMap $tenant"
-        exit 1
-      fi
-      
-      # Add migration annotations to storage Secret
-      # This primes the Secret to trigger migration Job when switched to dedicated
+      # Add migration annotations to storage Secret (primes for migration)
       curl -s -X POST -H "Content-Type: application/json" \
         -d '{"ns.mdn.io/migration-needed":"true"}' \
         "$CONTROLLER/secrets/$secret_name/metadata/annotations/ns.mdn.io%2Fmigration-needed" > /dev/null
@@ -141,27 +138,28 @@ EOF
         "$CONTROLLER/secrets/$secret_name/metadata/annotations/ns.mdn.io%2Fstorage-type" > /dev/null
       
       echo "✓ Migration triggered:"
-      echo "  - Source: $mongo_uri"
+      echo "  - Account ID: $account_id"
+      echo "  - Secret: $secret_name"
       echo "  - Target: Dedicated MongoDB StatefulSet"
-      echo "  - Storage webhook will create migration Job"
-      echo "  - Check status: $0 validate-migration $tenant"
+      echo "  - Storage webhook will create migration Job: $account_id-migration"
+      echo "  - Check status: $0 validate-migration $account_id"
       ;;
 
     validate-migration)
-      tenant=$2
-      test -z "$tenant" && (echo "Error: Missing tenant name" && exit 1)
+      account_id=$2
+      test -z "$account_id" && (echo "Error: Missing account ID" && exit 1)
       
-      # For Gen 3b migration: account ID = tenant name (1:1)
-      account_id=$tenant
       secret_name="$account_id-secret"
       
-      echo "Validating migration for tenant $tenant (account: $account_id)..."
+      echo "Validating migration for storage account: $account_id..."
       
       # Check migration complete annotation on storage Secret
       migration_complete=$(curl -s "$CONTROLLER/secrets/$secret_name/metadata/annotations/ns.mdn.io%2Fmigration-complete" 2>/dev/null | json)
       
       if [ "$migration_complete" = "true" ]; then
         echo "✓ Migration COMPLETE"
+        echo "  - Account ID: $account_id"
+        echo "  - Secret: $secret_name"
         
         # Check Secret status
         ready_condition=$(curl -s "$CONTROLLER/secrets/$secret_name" | json status.conditions | json -c 'this.type=="Ready" && this.status=="True"')
@@ -175,6 +173,7 @@ EOF
         exit 0
       else
         echo "⏳ Migration IN PROGRESS or FAILED"
+        echo "  - Account ID: $account_id"
         
         # Check for migration Job status
         echo ""
@@ -186,14 +185,12 @@ EOF
       ;;
 
     rollback-tenant)
-      tenant=$2
-      test -z "$tenant" && (echo "Error: Missing tenant name" && exit 1)
+      account_id=$2
+      test -z "$account_id" && (echo "Error: Missing account ID" && exit 1)
       
-      # For Gen 3b migration: account ID = tenant name (1:1)
-      account_id=$tenant
       secret_name="$account_id-secret"
       
-      echo "Rolling back tenant $tenant (account: $account_id) to shared MongoDB..."
+      echo "Rolling back storage account $account_id to shared MongoDB..."
       
       # Remove migration annotations from storage Secret
       curl -s -X DELETE "$CONTROLLER/secrets/$secret_name/metadata/annotations/ns.mdn.io%2Fmigration-needed" > /dev/null
@@ -206,65 +203,67 @@ EOF
         "$CONTROLLER/secrets/$secret_name/metadata/annotations/ns.mdn.io%2Fstorage-type" > /dev/null
       
       echo "✓ Rollback complete:"
+      echo "  - Account ID: $account_id"
       echo "  - Storage type: dedicated → shared"
       echo "  - Migration annotations removed"
       echo "  - Storage webhook will delete dedicated MongoDB StatefulSet"
-      echo "  - Tenant will use shared MongoDB again"
       ;;
 
     label-configmap)
-      tenant=$2
-      test -z "$tenant" && (echo "Error: Missing tenant name" && exit 1)
+      tenant_id=$2
+      account_id=$3
+      test -z "$tenant_id" && (echo "Error: Missing tenant ID" && exit 1)
+      test -z "$account_id" && (echo "Error: Missing account ID" && exit 1)
       
-      # For Gen 3b migration: account ID = tenant name (1:1)
-      account_id=$tenant
-      
-      echo "Labeling tenant ConfigMap $tenant for Gen 4 (storage account: $account_id)..."
+      echo "Labeling tenant ConfigMap $tenant_id for Gen 4..."
+      echo "  - Tenant ID: $tenant_id (compute)"
+      echo "  - Storage account: $account_id"
       
       # Add composite label (triggers compute controller)
       curl -s -X POST -H "Content-Type: application/json" \
         -d '{"ns.mdn.io/composite":"compute"}' \
-        "$CONTROLLER/configmaps/$tenant/metadata/labels/ns.mdn.io%2Fcomposite" > /dev/null
+        "$CONTROLLER/configmaps/$tenant_id/metadata/labels/ns.mdn.io%2Fcomposite" > /dev/null
       
       # Add storage account link - links compute (ConfigMap) to storage (Secret)
       curl -s -X POST -H "Content-Type: application/json" \
         -d "{\"storage.nightscout.org/account\":\"$account_id\"}" \
-        "$CONTROLLER/configmaps/$tenant/metadata/labels/storage.nightscout.org%2Faccount" > /dev/null
+        "$CONTROLLER/configmaps/$tenant_id/metadata/labels/storage.nightscout.org%2Faccount" > /dev/null
       
-      # Remove old Gen 3b label (optional cleanup)
-      curl -s -X DELETE "$CONTROLLER/configmaps/$tenant/metadata/labels/ns.mdn.io%2Fcontroller" > /dev/null 2>&1
+      # Remove old Gen 3b label (cleanup, triggers old deployment deletion)
+      curl -s -X DELETE "$CONTROLLER/configmaps/$tenant_id/metadata/labels/ns.mdn.io%2Fcontroller" > /dev/null 2>&1
       
-      echo "✓ ConfigMap labeled for Gen 4:"
-      echo "  - Tenant: $tenant (compute)"
-      echo "  - Storage account: $account_id"
+      echo "✓ ConfigMap labeled:"
       echo "  - Added: ns.mdn.io/composite=compute (triggers compute controller)"
-      echo "  - Added: storage.nightscout.org/account=$account_id (links to storage Secret)"
-      echo "  - Removed: ns.mdn.io/controller (old Gen 3b label)"
+      echo "  - Added: storage.nightscout.org/account=$account_id (links to storage)"
+      echo "  - Removed: ns.mdn.io/controller (old Gen 3b deployment deleted)"
+      echo "  - Gen 4 webhooks now render Deployment + Service"
       ;;
 
     migrate-tenant)
-      tenant=$2
-      test -z "$tenant" && (echo "Error: Missing tenant name" && exit 1)
+      tenant_id=$2
+      account_id=$3
+      mongo_uri=$4
+      test -z "$tenant_id" && (echo "Error: Missing tenant ID" && exit 1)
+      test -z "$account_id" && (echo "Error: Missing account ID" && exit 1)
+      test -z "$mongo_uri" && (echo "Error: Missing MongoDB URI" && exit 1)
       
-      # For Gen 3b migration: account ID = tenant name (1:1)
-      account_id=$tenant
-      
-      echo "=== Migrating tenant $tenant to Gen 4 ==="
-      echo "  - Tenant: $tenant (compute ConfigMap)"
+      echo "=== Migrating tenant to Gen 4 ==="
+      echo "  - Tenant ID: $tenant_id (compute ConfigMap)"
       echo "  - Storage account: $account_id (storage Secret)"
+      echo "  - Source MongoDB: $mongo_uri"
       echo ""
       
       # Step 1: Create storage account via provisioner API
-      # Creates Secret "{account_id}-secret" with storageType: shared (no migration yet)
-      $0 create-storage "$tenant" || exit 1
+      # Creates Secret "{account_id}-secret" with storageType: shared (do nothing, ready for migration)
+      $0 create-storage "$account_id" || exit 1
       echo ""
       
       # Wait for Secret to be created
       sleep 2
       
       # Step 2: Trigger migration to dedicated MongoDB
-      # Adds migration annotations and switches storageType: shared → dedicated
-      $0 trigger-migration "$tenant" || exit 1
+      # Primes Secret with annotations, then switches storageType: shared → dedicated
+      $0 trigger-migration "$account_id" "$mongo_uri" || exit 1
       echo ""
       
       # Step 3: Wait and validate migration (with timeout)
@@ -272,29 +271,31 @@ EOF
       timeout=300
       elapsed=0
       while [ $elapsed -lt $timeout ]; do
-        if $0 validate-migration "$tenant" > /dev/null 2>&1; then
+        if $0 validate-migration "$account_id" > /dev/null 2>&1; then
           echo ""
-          $0 validate-migration "$tenant"
+          $0 validate-migration "$account_id"
           echo ""
           
-          # Step 4: Label ConfigMap for Gen 4 (triggers compute controller)
+          # Step 4: Label ConfigMap for Gen 4 (triggers compute controller, deletes old deployment)
           # Links ConfigMap (compute) to Secret (storage) via storage.nightscout.org/account label
-          $0 label-configmap "$tenant" || exit 1
+          $0 label-configmap "$tenant_id" "$account_id" || exit 1
           echo ""
           
           # Step 5: Wait for Consul registration (critical validation)
           echo "Waiting for Consul registration..."
-          if "$SCRIPT_DIR/tenant-operations.sh" wait-for-srv "$tenant" 1 30 > /dev/null 2>&1; then
-            echo "✓ Consul registration confirmed for $tenant"
+          if "$SCRIPT_DIR/tenant-operations.sh" wait-for-srv "$tenant_id" 1 30 > /dev/null 2>&1; then
+            echo "✓ Consul registration confirmed for $tenant_id"
             echo ""
-            echo "=== Migration Complete for $tenant ==="
-            echo "  - Storage: Dedicated MongoDB StatefulSet ($account_id)"
-            echo "  - Compute: Nightscout Deployment ($tenant)"
+            echo "=== Migration Complete ==="
+            echo "  - Tenant ID: $tenant_id"
+            echo "  - Storage account: $account_id"
+            echo "  - Storage: Dedicated MongoDB StatefulSet"
+            echo "  - Compute: Nightscout Deployment (Gen 4)"
             echo "  - Traffic: Resolver → Consul → Pod"
             exit 0
           else
-            echo "⚠ Migration complete but Consul registration failed for $tenant"
-            echo "Check pod status: kubectl get pods -n $NAMESPACE -l tenant=$tenant"
+            echo "⚠ Migration complete but Consul registration failed for $tenant_id"
+            echo "Check pod status: kubectl get pods -n $NAMESPACE -l tenant=$tenant_id"
             exit 1
           fi
         fi
@@ -304,7 +305,9 @@ EOF
       done
       
       echo ""
-      echo "✗ Migration timed out for $tenant"
+      echo "✗ Migration timed out"
+      echo "  - Tenant ID: $tenant_id"
+      echo "  - Account ID: $account_id"
       echo "Check Job logs: kubectl logs -n $NAMESPACE job/$account_id-migration"
       exit 1
       ;;
@@ -312,7 +315,7 @@ EOF
     # Batch operations
     batch-migrate)
       file=$2
-      test -z "$file" && (echo "Error: Missing tenant list file" && exit 1)
+      test -z "$file" && (echo "Error: Missing migration file" && exit 1)
       test ! -f "$file" && (echo "Error: File not found: $file" && exit 1)
       
       total=$(wc -l < "$file")
@@ -321,19 +324,25 @@ EOF
       failed=0
       
       echo "=== Batch Migration: $total tenants ==="
+      echo "File format: tenant_id account_id mongo_uri (space-delimited)"
       echo ""
       
-      while IFS= read -r tenant; do
-        current=$((current + 1))
-        echo "[$current/$total] Migrating $tenant..."
+      while read -r tenant_id account_id mongo_uri; do
+        # Skip empty lines and comments
+        [[ -z "$tenant_id" || "$tenant_id" =~ ^# ]] && continue
         
-        if $0 migrate-tenant "$tenant"; then
+        current=$((current + 1))
+        echo "[$current/$total] Migrating..."
+        echo "  - Tenant: $tenant_id"
+        echo "  - Account: $account_id"
+        
+        if $0 migrate-tenant "$tenant_id" "$account_id" "$mongo_uri"; then
           success=$((success + 1))
-          echo "✓ Success: $tenant"
+          echo "✓ Success: $tenant_id"
         else
           failed=$((failed + 1))
-          echo "✗ Failed: $tenant (rolling back...)"
-          $0 rollback-tenant "$tenant"
+          echo "✗ Failed: $tenant_id (rolling back...)"
+          $0 rollback-tenant "$account_id"
         fi
         
         # Brief cooldown between tenants (avoid overwhelming system)
@@ -358,20 +367,29 @@ EOF
 
     batch-validate)
       file=$2
-      test -z "$file" && (echo "Error: Missing tenant list file" && exit 1)
+      test -z "$file" && (echo "Error: Missing migration file" && exit 1)
       
-      while IFS= read -r tenant; do
-        $0 validate-migration "$tenant"
+      echo "Validating migrations from file..."
+      while read -r tenant_id account_id mongo_uri; do
+        # Skip empty lines and comments
+        [[ -z "$tenant_id" || "$tenant_id" =~ ^# ]] && continue
+        
+        echo "Validating $tenant_id (account: $account_id)..."
+        $0 validate-migration "$account_id"
       done < "$file"
       ;;
 
     batch-rollback)
       file=$2
-      test -z "$file" && (echo "Error: Missing tenant list file" && exit 1)
+      test -z "$file" && (echo "Error: Missing migration file" && exit 1)
       
-      while IFS= read -r tenant; do
-        echo "Rolling back $tenant..."
-        $0 rollback-tenant "$tenant"
+      echo "Rolling back tenants from file..."
+      while read -r tenant_id account_id mongo_uri; do
+        # Skip empty lines and comments
+        [[ -z "$tenant_id" || "$tenant_id" =~ ^# ]] && continue
+        
+        echo "Rolling back $tenant_id (account: $account_id)..."
+        $0 rollback-tenant "$account_id"
       done < "$file"
       ;;
 

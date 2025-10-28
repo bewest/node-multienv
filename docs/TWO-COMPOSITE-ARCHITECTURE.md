@@ -418,12 +418,16 @@ Gen 4 separates concerns:
 - **Storage Account** (Secret): Owns MongoDB resources, identified by account ID
   - Created via `POST /accounts/:accountId`
   - Secret name: `{accountId}-secret`
+  - Account ID is typically an ObjectID (e.g., `507f1f77bcf86cd799439011`)
 - **Tenant** (ConfigMap): Owns Nightscout compute, identified by tenant ID
   - Created via `POST /accounts/:accountId/sites/:tenantId`
   - ConfigMap name: `{tenantId}`
+  - Tenant ID is DNS-compatible (e.g., `demo1234`)
   - Linked to storage via `storage.nightscout.org/account` label
 
-**For Gen 3b migration**: Use 1:1 mapping where `accountId = tenantId`
+**Important**: Account ID ≠ Tenant ID. These are separate identifiers from the legacy system.
+
+**For Gen 3b migration**: Existing tenants have both tenant IDs and storage account IDs from the legacy system. Both must be preserved to maintain external mapping consistency.
 
 ### Migration Strategy
 
@@ -436,23 +440,23 @@ Gen 3b ConfigMaps already exist with tenant configuration. Instead of recreating
 
 ### Step 1: Create Storage Account (Primed for Migration)
 
-For each Gen 3b tenant, create a storage Secret in "do nothing" state, ready to be migrated.
+For each Gen 3b tenant, create a storage Secret using the existing storage account ID from the legacy system.
 
 ```bash
-TENANT="demo1234"
-# For Gen 3b migration: use tenant name as account ID (1:1 mapping)
-ACCOUNT="$TENANT"  # Account ID = tenant name
+TENANT_ID="demo1234"  # Tenant ID (compute, DNS-compatible)
+ACCOUNT_ID="507f1f77bcf86cd799439011"  # Storage account ID from legacy system (ObjectID)
 OLD_MONGO_URI="mongodb://shared-user:password@shared-mongodb:27017/nightscout"
 
-# Create storage account with storageType: shared (do nothing, ready for migration)
-curl -X POST http://deployment-controller:3000/accounts/$ACCOUNT \
+# Create storage account with existing account ID (preserves external mapping)
+# Use POST /accounts/:account to record existing storage account ID
+curl -X POST http://deployment-controller:3000/accounts/$ACCOUNT_ID \
   -H "Content-Type: application/json" \
   -d '{
     "tier": "basic",
     "storageType": "shared"
   }'
 
-# This creates Secret "${ACCOUNT}-secret" (e.g., "demo1234-secret")
+# This creates Secret "507f1f77bcf86cd799439011-secret"
 # with storageType: shared, which means "do nothing" - no MongoDB StatefulSet yet
 ```
 
@@ -461,89 +465,87 @@ curl -X POST http://deployment-controller:3000/accounts/$ACCOUNT \
 Add migration annotations and switch storage type to trigger the migration.
 
 ```bash
-# Get current MongoDB URI from existing Gen 3b ConfigMap
-OLD_MONGO_URI=$(curl -s http://deployment-controller:3000/configmaps/$TENANT/data/MONGODB_URI)
+# OLD_MONGO_URI provided in migration file (from legacy system)
+# or retrieved from existing Gen 3b ConfigMap if needed
 
 # Add migration annotations (primes the Secret)
-curl -X POST http://deployment-controller:3000/secrets/${ACCOUNT}-secret/metadata/annotations/ns.mdn.io%2Fmigration-needed \
+curl -X POST http://deployment-controller:3000/secrets/${ACCOUNT_ID}-secret/metadata/annotations/ns.mdn.io%2Fmigration-needed \
   -H "Content-Type: application/json" \
   -d '{"ns.mdn.io/migration-needed": "true"}'
 
-curl -X POST http://deployment-controller:3000/secrets/${ACCOUNT}-secret/metadata/annotations/ns.mdn.io%2Fmigration-source-uri \
+curl -X POST http://deployment-controller:3000/secrets/${ACCOUNT_ID}-secret/metadata/annotations/ns.mdn.io%2Fmigration-source-uri \
   -H "Content-Type: application/json" \
   -d "{\"ns.mdn.io/migration-source-uri\": \"$OLD_MONGO_URI\"}"
 
-# Switch storage type: shared → dedicated (triggers migration)
-curl -X POST http://deployment-controller:3000/secrets/${ACCOUNT}-secret/metadata/annotations/ns.mdn.io%2Fstorage-type \
+# Switch storage type: shared → dedicated (triggers migration Job)
+curl -X POST http://deployment-controller:3000/secrets/${ACCOUNT_ID}-secret/metadata/annotations/ns.mdn.io%2Fstorage-type \
   -H "Content-Type: application/json" \
   -d '{"ns.mdn.io/storage-type": "dedicated"}'
 ```
 
 **What happens**:
 1. Storage controller sees Secret with `storage-type: dedicated` and `migration-needed: true`
-2. Creates new MongoDB StatefulSet for this account
+2. Creates new MongoDB StatefulSet for storage account `$ACCOUNT_ID`
 3. Renders migration Job that copies data from `OLD_MONGO_URI` to new MongoDB
 4. Sets `migration-complete: true` when Job succeeds
 
 ### Step 3: Label Existing ConfigMap
 
-The Gen 3b ConfigMap already exists at `/configmaps/demo1234` with all the tenant configuration. Just add the Gen 4 labels to link it to the storage account:
+The Gen 3b ConfigMap already exists at `/configmaps/demo1234` with all the tenant configuration. Add Gen 4 labels to link it to the storage account and trigger compute controller.
 
 ```bash
-TENANT="demo1234"
-# For Gen 3b migration: account ID = tenant name (1:1 mapping)
-ACCOUNT="$TENANT"
-
 # Add composite label (triggers compute controller)
-curl -X POST http://deployment-controller:3000/configmaps/$TENANT/metadata/labels/ns.mdn.io%2Fcomposite \
+curl -X POST http://deployment-controller:3000/configmaps/$TENANT_ID/metadata/labels/ns.mdn.io%2Fcomposite \
   -H "Content-Type: application/json" \
   -d '{"ns.mdn.io/composite": "compute"}'
 
-# Add storage account link (links ConfigMap to Secret)
-curl -X POST http://deployment-controller:3000/configmaps/$TENANT/metadata/labels/storage.nightscout.org%2Faccount \
+# Add storage account link (links ConfigMap to Secret via account ID)
+curl -X POST http://deployment-controller:3000/configmaps/$TENANT_ID/metadata/labels/storage.nightscout.org%2Faccount \
   -H "Content-Type: application/json" \
-  -d "{\"storage.nightscout.org/account\": \"$ACCOUNT\"}"
+  -d "{\"storage.nightscout.org/account\": \"$ACCOUNT_ID\"}"
+
+# Remove old Gen 3b label (triggers deletion of old deployment)
+curl -X DELETE http://deployment-controller:3000/configmaps/$TENANT_ID/metadata/labels/ns.mdn.io%2Fcontroller
 ```
 
 **What happens**:
-1. Compute controller sees ConfigMap with `ns.mdn.io/composite: compute`
-2. Discovers storage Secret via `storage.nightscout.org/account` label match
-3. Waits for migration to complete (checks Secret status)
-4. Creates Deployment + Service pointing to the new dedicated MongoDB
-5. Tenant cutover complete!
+1. Removing `ns.mdn.io/controller` label causes Gen 3b deployment-controller to delete old Deployment
+2. Compute controller sees ConfigMap with `ns.mdn.io/composite: compute`
+3. Discovers storage Secret via `storage.nightscout.org/account` label match (`$ACCOUNT_ID`)
+4. Waits for migration to complete (checks Secret status)
+5. Creates new Gen 4 Deployment + Service pointing to dedicated MongoDB
+6. Tenant cutover complete!
 
-### Step 4: Remove Old Gen 3b Label (Optional)
-
-Gen 3b used `ns.mdn.io/controller: deployment` to route to deployment-controller. Remove it to fully migrate:
-
-```bash
-curl -X DELETE http://deployment-controller:3000/configmaps/$TENANT/metadata/labels/ns.mdn.io%2Fcontroller
-```
 
 ### Complete Migration Example
 
-Here's a complete migration of tenant `demo1234` from Gen 3b shared storage to Gen 4 dedicated storage:
+Migration file format: space-delimited with `tenant_id`, `account_id`, and `mongo_uri` from legacy system:
+
+```
+# tenants.txt - space-delimited migration file
+demo1234 507f1f77bcf86cd799439011 mongodb://user:pass@shared:27017/ns_demo1234
+demo5678 507f1f77bcf86cd799439022 mongodb://user:pass@shared:27017/ns_demo5678
+```
+
+Single tenant migration example:
 
 ```bash
 #!/bin/bash
 set -e
 
-TENANT="demo1234"
-# For Gen 3b migration: account ID = tenant name (1:1 mapping)
-ACCOUNT="$TENANT"
+TENANT_ID="demo1234"  # Tenant ID from legacy system
+ACCOUNT_ID="507f1f77bcf86cd799439011"  # Storage account ID from legacy system
+OLD_MONGO_URI="mongodb://user:pass@shared:27017/ns_demo1234"  # From legacy system
 CONTROLLER="http://deployment-controller:3000"
 
-echo "=== Migrating tenant $TENANT to Gen 4 ==="
-echo "  - Tenant: $TENANT (compute ConfigMap)"
-echo "  - Storage account: $ACCOUNT (storage Secret)"
-
-# Get old MongoDB URI from existing Gen 3b ConfigMap
-OLD_MONGO_URI=$(curl -s $CONTROLLER/configmaps/$TENANT/data/MONGODB_URI)
+echo "=== Migrating tenant to Gen 4 ==="
+echo "  - Tenant ID: $TENANT_ID (compute ConfigMap)"
+echo "  - Storage account: $ACCOUNT_ID (storage Secret)"
 echo "  - Source MongoDB: $OLD_MONGO_URI"
 
-# 1. Create storage account (primed with shared storage)
+# 1. Create storage account with existing account ID (preserves external mapping)
 echo "Creating storage account..."
-curl -s -X POST $CONTROLLER/accounts/$ACCOUNT \
+curl -s -X POST $CONTROLLER/accounts/$ACCOUNT_ID \
   -H "Content-Type: application/json" \
   -d '{"tier": "basic", "storageType": "shared"}' > /dev/null
 
@@ -554,42 +556,52 @@ sleep 2
 echo "Triggering migration to dedicated MongoDB..."
 
 # Add migration annotations (prime)
-curl -s -X POST $CONTROLLER/secrets/${ACCOUNT}-secret/metadata/annotations/ns.mdn.io%2Fmigration-needed \
+curl -s -X POST $CONTROLLER/secrets/${ACCOUNT_ID}-secret/metadata/annotations/ns.mdn.io%2Fmigration-needed \
   -H "Content-Type: application/json" \
   -d '{"ns.mdn.io/migration-needed": "true"}' > /dev/null
 
-curl -s -X POST $CONTROLLER/secrets/${ACCOUNT}-secret/metadata/annotations/ns.mdn.io%2Fmigration-source-uri \
+curl -s -X POST $CONTROLLER/secrets/${ACCOUNT_ID}-secret/metadata/annotations/ns.mdn.io%2Fmigration-source-uri \
   -H "Content-Type: application/json" \
   -d "{\"ns.mdn.io/migration-source-uri\": \"$OLD_MONGO_URI\"}" > /dev/null
 
 # Switch storage type: shared → dedicated (triggers migration Job)
-curl -s -X POST $CONTROLLER/secrets/${ACCOUNT}-secret/metadata/annotations/ns.mdn.io%2Fstorage-type \
+curl -s -X POST $CONTROLLER/secrets/${ACCOUNT_ID}-secret/metadata/annotations/ns.mdn.io%2Fstorage-type \
   -H "Content-Type: application/json" \
   -d '{"ns.mdn.io/storage-type": "dedicated"}' > /dev/null
 
 # 3. Wait for migration to complete
 echo "Waiting for migration Job to complete..."
-# In production, poll: curl -s $CONTROLLER/secrets/${ACCOUNT}-secret | jq -r '.metadata.annotations["ns.mdn.io/migration-complete"]'
+# In production, poll: curl -s $CONTROLLER/secrets/${ACCOUNT_ID}-secret | jq -r '.metadata.annotations["ns.mdn.io/migration-complete"]'
 sleep 60
 
-# 4. Label existing ConfigMap for Gen 4
+# 4. Label existing ConfigMap for Gen 4 (deletes old deployment, creates new one)
 echo "Labeling ConfigMap for Gen 4..."
-curl -s -X POST $CONTROLLER/configmaps/$TENANT/metadata/labels/ns.mdn.io%2Fcomposite \
+curl -s -X POST $CONTROLLER/configmaps/$TENANT_ID/metadata/labels/ns.mdn.io%2Fcomposite \
   -H "Content-Type: application/json" \
   -d '{"ns.mdn.io/composite": "compute"}' > /dev/null
 
-curl -s -X POST $CONTROLLER/configmaps/$TENANT/metadata/labels/storage.nightscout.org%2Faccount \
+curl -s -X POST $CONTROLLER/configmaps/$TENANT_ID/metadata/labels/storage.nightscout.org%2Faccount \
   -H "Content-Type: application/json" \
-  -d "{\"storage.nightscout.org/account\": \"$ACCOUNT\"}" > /dev/null
+  -d "{\"storage.nightscout.org/account\": \"$ACCOUNT_ID\"}" > /dev/null
 
-# 5. Remove old Gen 3b label (optional)
-echo "Removing Gen 3b label..."
-curl -s -X DELETE $CONTROLLER/configmaps/$TENANT/metadata/labels/ns.mdn.io%2Fcontroller > /dev/null 2>&1
+curl -s -X DELETE $CONTROLLER/configmaps/$TENANT_ID/metadata/labels/ns.mdn.io%2Fcontroller > /dev/null 2>&1
 
 echo "=== Migration complete! ==="
-echo "  - Storage: Dedicated MongoDB StatefulSet ($ACCOUNT)"
-echo "  - Compute: Nightscout Deployment ($TENANT)"
+echo "  - Tenant ID: $TENANT_ID"
+echo "  - Storage account: $ACCOUNT_ID"
+echo "  - Storage: Dedicated MongoDB StatefulSet"
+echo "  - Compute: Nightscout Deployment (Gen 4)"
 echo "  - Traffic: Resolver → Consul → Pod"
+```
+
+**Or use the gen4-migration.sh script**:
+
+```bash
+# Single tenant migration
+tools/gen4-migration.sh migrate-tenant demo1234 507f1f77bcf86cd799439011 "mongodb://user:pass@shared:27017/ns_demo1234"
+
+# Batch migration from file
+tools/gen4-migration.sh batch-migrate tenants.txt
 ```
 
 ### REST API Metadata Endpoints
