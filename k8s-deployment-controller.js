@@ -27,91 +27,11 @@ function configure (opts) {
 
   // 
 
-const templates = require('./lib/templates');
-
   function suggest (req, res, next) {
     var data = _.extend({ WEB_NAME: req.params.name }, req.query);
     data = _.extend(data, req.body);
     req.suggestion = data;
     next( );
-  }
-
-
-  function template_provisioner_deployment(data) {
-    return {
-      kind: "Deployment",
-      metadata: {
-        name: `${data.WEB_NAME}-provisioner`,
-        labels: {
-          app: 'tenant',
-          tenant: data.WEB_NAME,
-          component: 'provisioner'
-        }
-      },
-      spec: {
-        replicas: 1,
-        selector: {
-          matchLabels: {
-            app: `${data.WEB_NAME}-provisioner`
-          }
-        },
-        template: {
-          metadata: {
-            labels: {
-              app: `${data.WEB_NAME}-provisioner`
-            }
-          },
-          spec: {
-            containers: [{
-              name: 'provisioner',
-              image: 'nightscout/provisioner:latest',
-              env: [{
-                name: 'MONGODB_URI',
-                value: `mongodb://${data.WEB_NAME}-mongodb:27017/${data.WEB_NAME}`
-              }],
-              resources: {
-                requests: {
-                  cpu: '100m',
-                  memory: '128Mi'
-                },
-                limits: {
-                  cpu: '200m',
-                  memory: '256Mi'
-                }
-              }
-            }]
-          }
-        }
-      }
-    };
-  }
-
-
-  function create_nightscout_instance(req, res, next) {
-    // Create MongoDB resources first
-    k8s.createNamespacedPersistentVolumeClaim(
-      selected_namespace,
-      templates.template_persistent_volume_claim(req.suggestion)
-    ).then(() => {
-      return k8s.createNamespacedService(
-        selected_namespace, 
-        templates.template_mongodb_service(req.suggestion)
-      );
-    }).then(() => {
-      return appsApi.createNamespacedStatefulSet(
-        selected_namespace,
-        templates.template_mongodb_statefulset(req.suggestion)
-      );
-    }).then(() => {
-      // Create Provisioner API deployment
-      return appsApi.createNamespacedDeployment(
-        selected_namespace,
-        template_provisioner_deployment(req.suggestion)
-      );
-    }).then(() => {
-      // Create CGM Remote Monitor deployment
-      return create_deployment(req, res, next);
-    }).catch(next);
   }
 
   function template_deployment (data) {
@@ -155,68 +75,32 @@ const templates = require('./lib/templates');
         spec: {
           hostname: `${data.WEB_NAME}`,
           subdomain: "backends",
-          volumes: [
-            {
-              name: "mongodb-data",
-              persistentVolumeClaim: {
-                claimName: `${data.WEB_NAME}-mongodb-data`
-              }
-            }
-          ],
-          containers: [
-            {
-              name: 'nightscout',
-              image: 'nightscout/cgm-remote-monitor:latest',
-              envFrom: [
-                {
-                  secretRef: {
-                    name: `${data.WEB_NAME}-secrets`
-                  , optional: true
-                  },
+          containers: [ {
+            name: 'nightscout',
+            image: 'nightscout/cgm-remote-monitor:latest',
+            envFrom: [
+              {
+                secretRef: {
+                  name: `${data.WEB_NAME}-secrets`
+                , optional: true
                 },
-                {
-                  configMapRef: {
-                    name: data.WEB_NAME
-                  , optional: true
-                  }
-                }
-              ],
-              env: [
-                {
-                  name: 'MONGODB_URI',
-                  value: `mongodb://localhost:27017/${data.WEB_NAME}`
-                }
-              ],
-              resources: {
-                ...(opts.MULTIENV_TENANT_REQUESTS_ENABLE ? {
-                  requests: opts.requests
-                } : { }),
-                ...(opts.MULTIENV_TENANT_LIMITS_ENABLE ? {
-                  limits: opts.limits
-                } : { }),
-              }
-            },
-            {
-              name: 'mongodb',
-              image: 'mongo:4.4',
-              volumeMounts: [
-                {
-                  name: "mongodb-data",
-                  mountPath: "/data/db"
-                }
-              ],
-              resources: {
-                requests: {
-                  cpu: '100m',
-                  memory: '256Mi'
-                },
-                limits: {
-                  cpu: '500m',
-                  memory: '512Mi'
+              },
+              {
+                configMapRef: {
+                  name: data.WEB_NAME
+                , optional: true
                 }
               }
+            ],
+            resources: {
+              ...(opts.MULTIENV_TENANT_REQUESTS_ENABLE ? {
+                requests: opts.requests
+              } : { }),
+              ...(opts.MULTIENV_TENANT_LIMITS_ENABLE ? {
+                limits: opts.limits
+              } : { }),
             }
-          ]
+          } ]
           /*
           // Add nodeSelector to target specific node pool
           nodeSelector: {
@@ -261,15 +145,6 @@ const templates = require('./lib/templates');
   function create_deployment (req, res, next) {
     var msg = {status: 'create or update starting' };
 
-    // Create PVC first
-    k8s.createNamespacedPersistentVolumeClaim(
-      selected_namespace,
-      templates.template_persistent_volume_claim(req.suggestion)
-    ).catch(function(err) {
-      if (err.statusCode !== 409) { // Ignore if PVC already exists
-        console.log('Error creating PVC:', err);
-      }
-    });
     appsApi.readNamespacedDeployment(req.params.name, selected_namespace).then(function (result) {
       msg.status = "readNamespacedDeployment result"
       msg.result = result;
@@ -377,7 +252,7 @@ const templates = require('./lib/templates');
      var options = { headers: { "Content-Type": "application/json-patch+json" } };
      appsApi.patchNamespacedDeployment(deploymentName, selected_namespace, patch, undefined, undefined, undefined, undefined, undefined, options)
        .then((result) => {
-                                console.log(`deployment ${req.deployment.metadata.name} updated for rolling restart`);
+        console.log(`deployment ${req.deployment.metadata.name} updated for rolling restart`);
         res.result = result;
         next( );
       }).catch((err) => {
@@ -791,42 +666,41 @@ const templates = require('./lib/templates');
   }
 
   function sync_consul_update (req, res, next) {
-                const serviceData = req.body.object;
+    const serviceData = req.body.object;
     if (serviceData.status.phase != 'Running') {
       console.log("NOTHING TO DO SINCE POD IS NOT RUNNING", req.body);
       return next( );
     }
-                const tenantName = serviceData.metadata.labels.tenant;
-                const serviceID = `${tenantName}-${serviceData.metadata.namespace}`;
+    const tenantName = serviceData.metadata.labels.tenant;
+    const serviceID = `${tenantName}-${serviceData.metadata.namespace}`;
     var id = serviceData.metadata.uid;
     var host = serviceData.status.podIP;
     var healthCheckService = url.parse(opts.MULTIENV_HEALTH_CHECK_SERVICE);
     var validPodCheckUrl = url.format({ protocol: healthCheckService.protocol, hostname: healthCheckService.hostname, port: healthCheckService.port,  pathname: ('/healthchecks/pod/' + tenantName + '/assigned/podIP/' + host)});
     var port = 1337;
-                var insert = {
-                        name: 'backends',
-                        address: host,
-                        port: port,
-                        id: id,
-                        tags: [ tenantName, serviceID, 'tenant', 'backend' ],
-                        checks: [
-        {
-                                name: "EndpointAvailable",
-                                ttl: '30s',
-                                interval: '10s',
-                                http: url.format({protocol: 'http', hostname: host, port: port,  pathname: '/api/v1/status.txt'}),
-                                deregister_critical_service_after: '20s'
-                        },
-                        {
-                                name: "ValidPodName",
-                                ttl: '10s',
-                                interval: '5s',
-                                http: validPodCheckUrl,
-                                failures_before_critical: 1,
-                                deregister_critical_service_after: '5s'
-                        },
-                        ]
-                };
+    var insert = {
+      name: 'backends',
+      address: host,
+      port: port,
+      id: id,
+      tags: [ tenantName, serviceID, 'tenant', 'backend' ],
+      checks: [ {
+        name: "EndpointAvailable",
+        ttl: '30s',
+        interval: '10s',
+        http: url.format({protocol: 'http', hostname: host, port: port,  pathname: '/api/v1/status.txt'}),
+        deregister_critical_service_after: '20s'
+      },
+      {
+        name: "ValidPodName",
+        ttl: '10s',
+        interval: '5s',
+        http: validPodCheckUrl,
+        failures_before_critical: 1,
+        deregister_critical_service_after: '5s'
+      },
+      ]
+    };
     consul.agent.service.register(insert, function (err, body, resp) {
       console.log("CREATED BACKEND SITE IN CONSUL", err, insert);
       if (err) {
@@ -914,12 +788,6 @@ const templates = require('./lib/templates');
     return secret;
   }
 
-  function validateDNSName(name) {
-    // DNS-1123 subdomain: lowercase alphanumeric + hyphens, max 63 chars
-    const dnsRegex = /^[a-z0-9]([-a-z0-9]*[a-z0-9])?$/;
-    return name && name.length <= 63 && dnsRegex.test(name);
-  }
-
   function template_compute_configmap(tenantId, accountId, configData) {
     // Create K8s ConfigMap for compute resources
     // This ConfigMap triggers the compute composite controller via ns.mdn.io/composite label
@@ -1002,13 +870,6 @@ const templates = require('./lib/templates');
       ));
     }
     
-    // Validate DNS compatibility
-    if (!validateDNSName(tenantId)) {
-      return next(new restify.errors.BadRequestError(
-        `Tenant name '${tenantId}' is not DNS-compatible. Use lowercase alphanumeric characters and hyphens only, max 63 chars.`
-      ));
-    }
-    
     // Extract config data from request body
     const configData = { ...req.body };
     delete configData.internal_name; // Remove metadata field
@@ -1067,7 +928,7 @@ const templates = require('./lib/templates');
   return server;
 }
 
-if(!module.parent) {
+if (!module.parent) {
   var port = parseInt(process.env.PORT || '2828')
   var k8s_local = process.env.MULTIENV_K8S_AUTH == 'local';
   var MULTIENV_MANAGED_BY = process.env.MULTIENV_MANAGED_BY || 'multienv/k8s-deployment-controller';
@@ -1110,7 +971,7 @@ if(!module.parent) {
         'managed-by': MULTIENV_MANAGED_BY,
       },
       labels: {
-        managed: 'multienv', app: MULTIENV_DEFAULT_APP_LABEL, 
+        managed: 'multienv', app: MULTIENV_DEFAULT_APP_LABEL, // 'tenant',
         role: MULTIENV_DEFAULT_CONFIG_ROLE
       }
     }
@@ -1119,7 +980,7 @@ if(!module.parent) {
         'managed-by': MULTIENV_MANAGED_BY,
       },
       labels: {
-        managed: 'multienv', app: MULTIENV_DEFAULT_APP_LABEL, 
+        managed: 'multienv', app: MULTIENV_DEFAULT_APP_LABEL, // 'tenant',
         component: MULTIENV_DEFAULT_COMPONENT_LABEL,
         role: MULTIENV_DEFAULT_CONFIG_ROLE
       }
