@@ -884,50 +884,158 @@ const templates = require('./lib/templates');
   server.post('/environs/:name/env/:field', suggest, suggest_config_map, create_or_update_configmap, select_data_field, format_result );
   server.del('/environs/:name', delete_configmap);
 
-  function template_initial_storage_secret (accountId) {
+  function template_initial_storage_secret (accountId, storageType, tier) {
     const secretName = `${accountId}-secret`;
     
-    // TODO: we need to apply labels below that can be passed through from
-    // environment variable. Some of the labels should help assist the
-    // customize webhook to match this secret.  The webhook will need to
-    // include this secret using the labels in order to correctly perform the
-    // initializing, provisioning, and other phases.
-    // TODO: should include a new DB_NAME as well.
-    // todo role: MULTIENV_DEFAULT_SECRET_ROLE (mongodb)
-    // 
     // Create K8s secret with provisioning root MongoDB credentials
+    // This Secret triggers the storage composite controller via ns.mdn.io/composite label
     const secret = {
       apiVersion: 'v1',
       kind: 'Secret',
       metadata: {
         name: secretName,
         labels: {
-          'app.kubernetes.io/managed-by': 'tenant-controller',
-          'storage.nightscout.org/account': accountId
-          // TODO: also use tenant/WEB_NAME
-          // TODO: use a label passed from environment to allow runtime
-          // environment to tailor things.  include role and component labels
+          'app.kubernetes.io/managed-by': 'metacontroller',
+          'storage.nightscout.org/account': accountId,
+          'ns.mdn.io/composite': 'storage'
+        },
+        annotations: {
+          'ns.mdn.io/storage-type': storageType || opts.DEFAULT_STORAGE_TYPE || 'shared',
+          'ns.mdn.io/tier': tier || opts.DEFAULT_TIER || 'basic',
+          'ns.mdn.io/created-at': new Date().toISOString()
         }
       },
       stringData: {
         MONGO_INITDB_ROOT_USERNAME: `user_${accountId}`,
-        MONGO_INITDB_ROOT_PASSWORD: objectId() 
-        // TODO: MONGODB_URL: <formatted_mongo_url>
+        MONGO_INITDB_ROOT_PASSWORD: objectId(),
+        MONGO_INITDB_DATABASE: 'ns'
       }
     };
     return secret;
   }
 
+  function validateDNSName(name) {
+    // DNS-1123 subdomain: lowercase alphanumeric + hyphens, max 63 chars
+    const dnsRegex = /^[a-z0-9]([-a-z0-9]*[a-z0-9])?$/;
+    return name && name.length <= 63 && dnsRegex.test(name);
+  }
+
+  function template_compute_configmap(tenantId, accountId, configData) {
+    // Create K8s ConfigMap for compute resources
+    // This ConfigMap triggers the compute composite controller via ns.mdn.io/composite label
+    const configMap = {
+      apiVersion: 'v1',
+      kind: 'ConfigMap',
+      metadata: {
+        name: tenantId,
+        labels: {
+          'app.kubernetes.io/managed-by': 'metacontroller',
+          'ns.mdn.io/composite': 'compute',
+          'ns.mdn.io/tenant': tenantId,
+          'storage.nightscout.org/account': accountId
+        },
+        annotations: {
+          'ns.mdn.io/created-at': new Date().toISOString()
+        }
+      },
+      data: {
+        TENANT_ID: tenantId,
+        ...configData
+      }
+    };
+    return configMap;
+  }
+
   function handle_new_provisioner_account_webhook (req, res, next) {
     const accountId = req.params.account || objectId();
-    var secret = template_initial_storage_secret(accountId);
-    k8s.createNamespacedSecret(selected_namespace, secret)
+    const storageType = req.body?.storageType || req.body?.storage_type;
+    const tier = req.body?.tier;
+    
+    const secretName = `${accountId}-secret`;
+    var secret = template_initial_storage_secret(accountId, storageType, tier);
+    
+    // Idempotent: try to get existing secret first
+    k8s.readNamespacedSecret(secretName, selected_namespace)
+      .then((existing) => {
+        // Secret exists, update it
+        console.log("UPDATING EXISTING PROVISIONER ACCOUNT SECRET", secretName);
+        return k8s.replaceNamespacedSecret(secretName, selected_namespace, secret);
+      })
+      .catch((err) => {
+        // Secret doesn't exist (404), create it
+        if (err.statusCode === 404 || err.response?.statusCode === 404) {
+          console.log("CREATING NEW PROVISIONER ACCOUNT SECRET", secretName);
+          return k8s.createNamespacedSecret(selected_namespace, secret);
+        }
+        throw err;
+      })
       .then((result) => {
-        console.log("NEW PROVISIONER ACCOUNT RESULT SECRET", result);
+        console.log("PROVISIONER ACCOUNT SECRET READY", secretName);
         res.json({
           account: accountId,
+          storageType: secret.metadata.annotations['ns.mdn.io/storage-type'],
+          tier: secret.metadata.annotations['ns.mdn.io/tier'],
           resource: result.body
-          // name: req.body.name || accountId
+        });
+        next();
+      })
+      .catch(next);
+  }
+
+  function handle_new_site_webhook(req, res, next) {
+    const accountId = req.params.account;
+    const urlParamName = req.params.name;
+    const bodyInternalName = req.body?.internal_name;
+    
+    // Validate that internal_name and URL param match
+    if (urlParamName && bodyInternalName && urlParamName !== bodyInternalName) {
+      return next(new restify.errors.BadRequestError(
+        `URL parameter 'name' (${urlParamName}) must match body 'internal_name' (${bodyInternalName})`
+      ));
+    }
+    
+    const tenantId = urlParamName || bodyInternalName;
+    
+    if (!tenantId) {
+      return next(new restify.errors.BadRequestError(
+        'Tenant name required in URL parameter or body.internal_name'
+      ));
+    }
+    
+    // Validate DNS compatibility
+    if (!validateDNSName(tenantId)) {
+      return next(new restify.errors.BadRequestError(
+        `Tenant name '${tenantId}' is not DNS-compatible. Use lowercase alphanumeric characters and hyphens only, max 63 chars.`
+      ));
+    }
+    
+    // Extract config data from request body
+    const configData = { ...req.body };
+    delete configData.internal_name; // Remove metadata field
+    
+    const configMap = template_compute_configmap(tenantId, accountId, configData);
+    
+    // Idempotent: create or update ConfigMap
+    k8s.readNamespacedConfigMap(tenantId, selected_namespace)
+      .then((existing) => {
+        // ConfigMap exists, update it
+        console.log("UPDATING EXISTING SITE CONFIGMAP", tenantId);
+        return k8s.replaceNamespacedConfigMap(tenantId, selected_namespace, configMap);
+      })
+      .catch((err) => {
+        // ConfigMap doesn't exist (404), create it
+        if (err.statusCode === 404 || err.response?.statusCode === 404) {
+          console.log("CREATING NEW SITE CONFIGMAP", tenantId);
+          return k8s.createNamespacedConfigMap(selected_namespace, configMap);
+        }
+        throw err;
+      })
+      .then((result) => {
+        console.log("SITE CONFIGMAP READY", tenantId);
+        res.json({
+          tenant: tenantId,
+          account: accountId,
+          resource: result.body
         });
         next();
       })
@@ -937,9 +1045,8 @@ const templates = require('./lib/templates');
   // Account and site provisioning endpoints
   server.post('/accounts', handle_new_provisioner_account_webhook);
   server.post('/accounts/:account', handle_new_provisioner_account_webhook);
-
-
-  server.post('/accounts/:account/sites', instanceRoutes.suggest_template, instanceRoutes.create_resource);
+  server.post('/accounts/:account/sites/:name', handle_new_site_webhook);
+  server.post('/accounts/:account/sites', handle_new_site_webhook);
 
   // New instances endpoints
   server.get('/instances/:name', instanceRoutes.fetchInstance, format_result);
@@ -970,8 +1077,12 @@ if(!module.parent) {
   var MULTIENV_SELF_REGISTRATION_NAME = (process.env.MULTIENV_SELF_REGISTRATION_NAME || 'multienv-deployment-controller');
   var MULTIENV_SELF_ADDRESS = (process.env.POD_IP || process.env.HOSTNAME);
   var CONSUL = process.env.CONSUL || 'http://consul.service.consul';
+  var DEFAULT_STORAGE_TYPE = process.env.DEFAULT_STORAGE_TYPE || 'shared';
+  var DEFAULT_TIER = process.env.DEFAULT_TIER || 'basic';
   var config = {
     MULTIENV_K8S_NAMESPACE: process.env.MULTIENV_K8S_NAMESPACE || 'default',
+    DEFAULT_STORAGE_TYPE: DEFAULT_STORAGE_TYPE,
+    DEFAULT_TIER: DEFAULT_TIER,
     MULTIENV_TENANT_NODEPOOL_TARGET: process.env.MULTIENV_TENANT_NODEPOOL_TARGET || 'bigger-tenant-runners',
     MULTIENV_TENANT_REQUESTS_ENABLE: (process.env.MULTIENV_TENANT_REQUESTS_ENABLE ||'1') != 'false',
     MULTIENV_TENANT_LIMITS_ENABLE: (process.env.MULTIENV_TENANT_LIMITS_ENABLE ||'1') != 'false',
