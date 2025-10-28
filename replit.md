@@ -155,16 +155,17 @@ The deployment controller (`k8s-deployment-controller.js`) provides **REST API e
 The canonical operational migration tool is **`tools/gen4-migration.sh`**, which leverages the REST API and Metacontroller infrastructure:
 
 **Commands**:
-- `migrate-tenant <name>` - Complete migration workflow (create + trigger + validate)
-- `create-storage <name>` - Create storage Secret with shared MongoDB
+- `migrate-tenant <name>` - Complete migration workflow (all steps automated)
+- `create-storage <name>` - Create storage Secret via provisioner API
 - `trigger-migration <name>` - Add migration annotations to trigger Job
 - `validate-migration <name>` - Check migration completion status
+- `label-configmap <name>` - Add Gen 4 labels to ConfigMap
 - `rollback-tenant <name>` - Rollback to shared MongoDB if needed
 - `batch-migrate <file>` - Migrate multiple tenants from file
 - `list-pending` - List tenants needing migration
 - `migration-progress` - Show overall migration status
 
-**Philosophy**: Uses controller REST API endpoints rather than direct K8s API calls. Labels on Secrets trigger webhooks, annotations trigger migration Jobs.
+**Philosophy**: Leverages provisioner API facade (`POST /accounts`) for Secret creation. Uses declarative triggers (labels/annotations) to orchestrate resources via webhooks rather than direct manipulation.
 
 **Deprecated**: `cmd/migrate-to-two-composite.js` (archived) bypassed infrastructure and directly manipulated K8s resources. See `archive/monolithic-migration/README.md` for rationale.
 

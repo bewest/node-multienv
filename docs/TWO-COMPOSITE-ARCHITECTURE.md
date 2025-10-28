@@ -275,15 +275,14 @@ The canonical migration tool is `tools/gen4-migration.sh`, which uses the REST A
 ```
 
 **How it works**:
-1. POSTs Secret directly (`POST /secrets/storage-<tenant>`) with labels/annotations
+1. Creates storage Secret via provisioner API (`POST /accounts/:tenant`)
 2. Adds migration annotations via metadata patching API
-3. Storage webhook sees Secret with `ns.mdn.io/composite: storage` label
-4. Webhook creates migration Job when annotations present
-5. Validates completion by checking `migration-complete` annotation
+3. Storage webhook sees annotations, creates migration Job
+4. Waits for migration to complete
+5. Labels ConfigMap with `ns.mdn.io/composite: compute` (triggers compute controller)
+6. Compute controller creates Deployment + Service
 
-**Note**: ConfigMap label updates (Gen 3b → Gen 4) are currently a manual step not handled by this script
-
-**Philosophy**: Uses REST API endpoints rather than direct kubectl/K8s API calls
+**Philosophy**: Leverages provisioner API facade for Secret creation, uses declarative triggers (labels/annotations) to orchestrate resources via webhooks
 
 ## REST API Provisioning
 

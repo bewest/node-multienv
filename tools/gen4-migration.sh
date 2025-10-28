@@ -27,11 +27,12 @@ USAGE:
 
 COMMANDS:
   Single Tenant Migration:
-    create-storage <tenant>             Create storage Secret for tenant
+    create-storage <tenant>             Create storage Secret via provisioner API
     trigger-migration <tenant>          Add migration annotations to Secret
     validate-migration <tenant>         Check migration Job completion
+    label-configmap <tenant>            Add Gen 4 labels to ConfigMap
     rollback-tenant <tenant>            Rollback tenant to shared MongoDB
-    migrate-tenant <tenant>             Complete migration workflow (create+trigger+validate)
+    migrate-tenant <tenant>             Complete migration workflow (all steps)
 
   Batch Migration:
     batch-migrate <file>                Migrate tenants from line-delimited file
@@ -44,11 +45,13 @@ COMMANDS:
     migration-progress                  Show overall migration progress
 
 WORKFLOW:
-  1. Create storage Secret with shared MongoDB credentials
-  2. Trigger migration by adding annotations
+  1. Create storage Secret via provisioner API (POST /accounts/:tenant)
+  2. Trigger migration by adding annotations (storageType: shared → dedicated)
   3. Storage webhook creates migration Job
   4. Job copies data from shared → dedicated MongoDB
   5. Validate migration completed successfully
+  6. Label ConfigMap with ns.mdn.io/composite: compute (triggers compute controller)
+  7. Compute controller creates Deployment + Service pointing to dedicated MongoDB
 
 EXAMPLES:
   # Migrate single tenant
@@ -70,30 +73,17 @@ EOF
       
       echo "Creating storage Secret for $tenant..."
       
-      # Get MongoDB connection details from ConfigMap (if exists)
-      mongo_uri=$(curl -s "$CONTROLLER/configmaps/$tenant/env/MONGODB_URI" 2>/dev/null | json)
-      mongo_host="${mongo_uri#mongodb://}"
-      mongo_host="${mongo_host%%/*}"
-      
-      # Create storage Secret with shared MongoDB
+      # Use provisioner API to create storage account
+      # For Gen 3b migration, account ID = tenant ID (1:1 mapping)
+      # The API creates a Secret named "{accountId}-secret" via template_initial_storage_secret()
       curl -s -X POST -H "Content-Type: application/json" \
-        -d "{
-          \"name\": \"storage-$tenant\",
-          \"labels\": {
-            \"ns.mdn.io/composite\": \"storage\",
-            \"storage.nightscout.org/account\": \"$tenant\"
-          },
-          \"annotations\": {
-            \"ns.mdn.io/storage-type\": \"shared\"
-          },
-          \"stringData\": {
-            \"mongoHost\": \"${mongo_host:-$SHARED_MONGO_URI}\",
-            \"database\": \"nightscout\"
-          }
-        }" \
-        "$CONTROLLER/secrets/storage-$tenant" | json
+        -d '{"storageType": "shared", "tier": "basic"}' \
+        "$CONTROLLER/accounts/$tenant" | json
       
-      echo "✓ Storage Secret created for $tenant"
+      echo "✓ Storage Secret created: $tenant-secret"
+      echo "  - Account ID: $tenant"
+      echo "  - Storage type: shared"
+      echo "  - Tier: basic"
       ;;
 
     trigger-migration)
@@ -105,19 +95,19 @@ EOF
       # Get current MongoDB URI for migration source
       mongo_uri=$(curl -s "$CONTROLLER/configmaps/$tenant/env/MONGODB_URI" 2>/dev/null | json)
       
-      # Add migration annotations
+      # Add migration annotations to storage Secret
       curl -s -X POST -H "Content-Type: application/json" \
         -d '{"ns.mdn.io/migration-needed":"true"}' \
-        "$CONTROLLER/secrets/storage-$tenant/metadata/annotations/ns.mdn.io%2Fmigration-needed" > /dev/null
+        "$CONTROLLER/secrets/$tenant-secret/metadata/annotations/ns.mdn.io%2Fmigration-needed" > /dev/null
       
       curl -s -X POST -H "Content-Type: application/json" \
         -d "{\"ns.mdn.io/migration-source-uri\":\"$mongo_uri\"}" \
-        "$CONTROLLER/secrets/storage-$tenant/metadata/annotations/ns.mdn.io%2Fmigration-source-uri" > /dev/null
+        "$CONTROLLER/secrets/$tenant-secret/metadata/annotations/ns.mdn.io%2Fmigration-source-uri" > /dev/null
       
       # Change storage type to dedicated
       curl -s -X POST -H "Content-Type: application/json" \
         -d '{"ns.mdn.io/storage-type":"dedicated"}' \
-        "$CONTROLLER/secrets/storage-$tenant/metadata/annotations/ns.mdn.io%2Fstorage-type" > /dev/null
+        "$CONTROLLER/secrets/$tenant-secret/metadata/annotations/ns.mdn.io%2Fstorage-type" > /dev/null
       
       echo "✓ Migration triggered for $tenant"
       echo "  - Migration Job will be created by storage webhook"
@@ -131,13 +121,13 @@ EOF
       echo "Validating migration for $tenant..."
       
       # Check migration complete annotation
-      migration_complete=$(curl -s "$CONTROLLER/secrets/storage-$tenant/metadata/annotations/ns.mdn.io%2Fmigration-complete" 2>/dev/null | json)
+      migration_complete=$(curl -s "$CONTROLLER/secrets/$tenant-secret/metadata/annotations/ns.mdn.io%2Fmigration-complete" 2>/dev/null | json)
       
       if [ "$migration_complete" = "true" ]; then
         echo "✓ Migration COMPLETE for $tenant"
         
         # Check Secret status
-        ready_condition=$(curl -s "$CONTROLLER/secrets/storage-$tenant" | json status.conditions | json -c 'this.type=="Ready" && this.status=="True"')
+        ready_condition=$(curl -s "$CONTROLLER/secrets/$tenant-secret" | json status.conditions | json -c 'this.type=="Ready" && this.status=="True"')
         if [ -n "$ready_condition" ]; then
           echo "✓ Storage Secret is Ready"
         else
@@ -162,19 +152,44 @@ EOF
       echo "Rolling back $tenant to shared MongoDB..."
       
       # Remove migration annotations
-      curl -s -X DELETE "$CONTROLLER/secrets/storage-$tenant/metadata/annotations/ns.mdn.io%2Fmigration-needed" > /dev/null
-      curl -s -X DELETE "$CONTROLLER/secrets/storage-$tenant/metadata/annotations/ns.mdn.io%2Fmigration-source-uri" > /dev/null
-      curl -s -X DELETE "$CONTROLLER/secrets/storage-$tenant/metadata/annotations/ns.mdn.io%2Fmigration-complete" > /dev/null
+      curl -s -X DELETE "$CONTROLLER/secrets/$tenant-secret/metadata/annotations/ns.mdn.io%2Fmigration-needed" > /dev/null
+      curl -s -X DELETE "$CONTROLLER/secrets/$tenant-secret/metadata/annotations/ns.mdn.io%2Fmigration-source-uri" > /dev/null
+      curl -s -X DELETE "$CONTROLLER/secrets/$tenant-secret/metadata/annotations/ns.mdn.io%2Fmigration-complete" > /dev/null
       
       # Revert to shared storage
       curl -s -X POST -H "Content-Type: application/json" \
         -d '{"ns.mdn.io/storage-type":"shared"}' \
-        "$CONTROLLER/secrets/storage-$tenant/metadata/annotations/ns.mdn.io%2Fstorage-type" > /dev/null
+        "$CONTROLLER/secrets/$tenant-secret/metadata/annotations/ns.mdn.io%2Fstorage-type" > /dev/null
       
       echo "✓ Rollback complete for $tenant"
       echo "  - Storage type reverted to 'shared'"
       echo "  - Migration annotations removed"
       echo "  - StatefulSet will be deleted by storage webhook"
+      ;;
+
+    label-configmap)
+      tenant=$2
+      test -z "$tenant" && (echo "Error: Missing tenant name" && exit 1)
+      
+      echo "Adding Gen 4 labels to ConfigMap $tenant..."
+      
+      # Add composite label (triggers compute controller)
+      curl -s -X POST -H "Content-Type: application/json" \
+        -d '{"ns.mdn.io/composite":"compute"}' \
+        "$CONTROLLER/configmaps/$tenant/metadata/labels/ns.mdn.io%2Fcomposite" > /dev/null
+      
+      # Add storage account link (for Gen 3b migration, account ID = tenant ID)
+      curl -s -X POST -H "Content-Type: application/json" \
+        -d "{\"storage.nightscout.org/account\":\"$tenant\"}" \
+        "$CONTROLLER/configmaps/$tenant/metadata/labels/storage.nightscout.org%2Faccount" > /dev/null
+      
+      # Remove old Gen 3b label (optional)
+      curl -s -X DELETE "$CONTROLLER/configmaps/$tenant/metadata/labels/ns.mdn.io%2Fcontroller" > /dev/null 2>&1
+      
+      echo "✓ ConfigMap $tenant labeled for Gen 4"
+      echo "  - Added: ns.mdn.io/composite=compute"
+      echo "  - Added: storage.nightscout.org/account=$tenant"
+      echo "  - Removed: ns.mdn.io/controller (Gen 3b label)"
       ;;
 
     migrate-tenant)
@@ -184,18 +199,18 @@ EOF
       echo "=== Migrating $tenant to Gen 4 ==="
       echo ""
       
-      # Step 1: Create storage Secret
+      # Step 1: Create storage Secret via provisioner API
       $0 create-storage "$tenant" || exit 1
       echo ""
       
       # Wait for Secret to be created
       sleep 2
       
-      # Step 2: Trigger migration
+      # Step 2: Trigger migration to dedicated MongoDB
       $0 trigger-migration "$tenant" || exit 1
       echo ""
       
-      # Step 3: Wait and validate (with timeout)
+      # Step 3: Wait and validate migration (with timeout)
       echo "Waiting for migration to complete (timeout: 5 minutes)..."
       timeout=300
       elapsed=0
@@ -203,12 +218,18 @@ EOF
         if $0 validate-migration "$tenant" > /dev/null 2>&1; then
           echo ""
           $0 validate-migration "$tenant"
-          
-          # Step 4: Wait for Consul registration (critical validation)
           echo ""
+          
+          # Step 4: Label ConfigMap for Gen 4 (triggers compute controller)
+          $0 label-configmap "$tenant" || exit 1
+          echo ""
+          
+          # Step 5: Wait for Consul registration (critical validation)
           echo "Waiting for Consul registration..."
           if "$SCRIPT_DIR/tenant-operations.sh" wait-for-srv "$tenant" 1 30 > /dev/null 2>&1; then
             echo "✓ Consul registration confirmed for $tenant"
+            echo ""
+            echo "=== Migration Complete for $tenant ==="
             exit 0
           else
             echo "⚠ Migration complete but Consul registration failed for $tenant"
@@ -299,8 +320,7 @@ EOF
       curl -s "$CONTROLLER/secrets?labelSelector=ns.mdn.io%2Fcomposite%3Dstorage" \
         | json -a response.body.items \
         | json -c 'this.metadata.annotations["ns.mdn.io/storage-type"]=="shared"' \
-        | json -a metadata.name \
-        | sed 's/^storage-//'
+        | json -a metadata.labels[\"storage.nightscout.org/account\"]
       ;;
 
     list-migrated)
@@ -308,8 +328,7 @@ EOF
       curl -s "$CONTROLLER/secrets?labelSelector=ns.mdn.io%2Fcomposite%3Dstorage" \
         | json -a response.body.items \
         | json -c 'this.metadata.annotations["ns.mdn.io/storage-type"]=="dedicated" && this.metadata.annotations["ns.mdn.io/migration-complete"]=="true"' \
-        | json -a metadata.name \
-        | sed 's/^storage-//'
+        | json -a metadata.labels[\"storage.nightscout.org/account\"]
       ;;
 
     migration-progress)
