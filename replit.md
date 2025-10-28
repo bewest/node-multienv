@@ -144,11 +144,16 @@ The deployment controller (`k8s-deployment-controller.js`) provides **REST API e
 - `POST /secrets/:name/metadata/annotations/:field` - Add migration annotations
 - `DELETE /configmaps/:name/metadata/labels/:field` - Remove old labels
 
-**Migration Workflow**:
-1. Create storage account with migration annotations (old MongoDB URI)
-2. Label existing Gen 3b ConfigMap with Gen 4 labels (`ns.mdn.io/composite: compute`)
-3. ConfigMap names stay the same - only labels change (label cycling)
-4. Metacontroller discovers labeled resources and orchestrates migration
+**Migration Workflow** (Gen 3b → Gen 4):
+1. Create storage account via `POST /accounts/:accountId` with `storageType: shared` (do nothing, ready for migration)
+   - For Gen 3b: account ID = tenant name (1:1 mapping)
+   - Creates Secret `{accountId}-secret`
+2. Prime Secret with migration annotations (`migration-needed`, `migration-source-uri`)
+3. Switch storage type: `shared → dedicated` (triggers migration Job)
+4. Label existing Gen 3b ConfigMap with Gen 4 labels (`ns.mdn.io/composite: compute`)
+   - Links ConfigMap to storage account via `storage.nightscout.org/account` label
+5. ConfigMap names stay the same - only labels change (label cycling)
+6. Metacontroller discovers labeled resources and orchestrates deployment
 
 ### Migration Tooling
 

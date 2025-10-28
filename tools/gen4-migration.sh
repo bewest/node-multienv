@@ -44,14 +44,25 @@ COMMANDS:
     list-migrated                       List successfully migrated tenants
     migration-progress                  Show overall migration progress
 
+ARCHITECTURE:
+  - Storage Account (Secret): Owns MongoDB resources, identified by account ID
+  - Tenant (ConfigMap): Owns Nightscout compute, linked to storage via label
+  - For Gen 3b migration: account ID = tenant name (1:1 mapping)
+
 WORKFLOW:
-  1. Create storage Secret via provisioner API (POST /accounts/:tenant)
-  2. Trigger migration by adding annotations (storageType: shared → dedicated)
-  3. Storage webhook creates migration Job
-  4. Job copies data from shared → dedicated MongoDB
-  5. Validate migration completed successfully
-  6. Label ConfigMap with ns.mdn.io/composite: compute (triggers compute controller)
-  7. Compute controller creates Deployment + Service pointing to dedicated MongoDB
+  1. Create storage account via provisioner API (POST /accounts/:accountId)
+     → Creates Secret "{accountId}-secret" with storageType: shared
+  2. Trigger migration by adding annotations to storage Secret
+     → Switches storageType: shared → dedicated
+  3. Storage webhook renders migration Job
+     → Job copies data from shared MongoDB URI → dedicated StatefulSet
+  4. Validate migration completed successfully
+     → Check migration-complete annotation on Secret
+  5. Label ConfigMap with ns.mdn.io/composite: compute
+     → Links ConfigMap to storage account via storage.nightscout.org/account
+  6. Compute controller creates Deployment + Service
+     → Points to dedicated MongoDB, registers with Consul
+  7. Resolver routes traffic via Consul to new Deployment
 
 EXAMPLES:
   # Migrate single tenant
@@ -71,18 +82,28 @@ EOF
       tenant=$2
       test -z "$tenant" && (echo "Error: Missing tenant name" && exit 1)
       
-      echo "Creating storage Secret for $tenant..."
+      echo "Creating storage account for $tenant..."
       
       # Use provisioner API to create storage account
-      # For Gen 3b migration, account ID = tenant ID (1:1 mapping)
-      # The API creates a Secret named "{accountId}-secret" via template_initial_storage_secret()
-      curl -s -X POST -H "Content-Type: application/json" \
+      # For Gen 3b migration: use tenant name as account ID (1:1 mapping)
+      # API creates Secret named "{accountId}-secret" with storageType: shared (no migration yet)
+      response=$(curl -s -X POST -H "Content-Type: application/json" \
         -d '{"storageType": "shared", "tier": "basic"}' \
-        "$CONTROLLER/accounts/$tenant" | json
+        "$CONTROLLER/accounts/$tenant")
       
-      echo "✓ Storage Secret created: $tenant-secret"
-      echo "  - Account ID: $tenant"
-      echo "  - Storage type: shared"
+      account_id=$(echo "$response" | json account)
+      secret_name=$(echo "$response" | json resource.metadata.name)
+      
+      if [ -z "$account_id" ] || [ -z "$secret_name" ]; then
+        echo "✗ Failed to create storage account"
+        echo "$response" | json
+        exit 1
+      fi
+      
+      echo "✓ Storage account created:"
+      echo "  - Account ID: $account_id"
+      echo "  - Secret name: $secret_name"
+      echo "  - Storage type: shared (do nothing, ready for migration)"
       echo "  - Tier: basic"
       ;;
 
@@ -90,56 +111,75 @@ EOF
       tenant=$2
       test -z "$tenant" && (echo "Error: Missing tenant name" && exit 1)
       
-      echo "Triggering migration for $tenant..."
+      # For Gen 3b migration: account ID = tenant name (1:1)
+      account_id=$tenant
+      secret_name="$account_id-secret"
       
-      # Get current MongoDB URI for migration source
+      echo "Triggering migration for tenant $tenant (account: $account_id)..."
+      
+      # Get current MongoDB URI from ConfigMap (shared MongoDB connection string)
       mongo_uri=$(curl -s "$CONTROLLER/configmaps/$tenant/env/MONGODB_URI" 2>/dev/null | json)
       
+      if [ -z "$mongo_uri" ]; then
+        echo "✗ Could not retrieve MONGODB_URI from ConfigMap $tenant"
+        exit 1
+      fi
+      
       # Add migration annotations to storage Secret
+      # This primes the Secret to trigger migration Job when switched to dedicated
       curl -s -X POST -H "Content-Type: application/json" \
         -d '{"ns.mdn.io/migration-needed":"true"}' \
-        "$CONTROLLER/secrets/$tenant-secret/metadata/annotations/ns.mdn.io%2Fmigration-needed" > /dev/null
+        "$CONTROLLER/secrets/$secret_name/metadata/annotations/ns.mdn.io%2Fmigration-needed" > /dev/null
       
       curl -s -X POST -H "Content-Type: application/json" \
         -d "{\"ns.mdn.io/migration-source-uri\":\"$mongo_uri\"}" \
-        "$CONTROLLER/secrets/$tenant-secret/metadata/annotations/ns.mdn.io%2Fmigration-source-uri" > /dev/null
+        "$CONTROLLER/secrets/$secret_name/metadata/annotations/ns.mdn.io%2Fmigration-source-uri" > /dev/null
       
-      # Change storage type to dedicated
+      # Switch storage type: shared → dedicated (triggers migration Job)
       curl -s -X POST -H "Content-Type: application/json" \
         -d '{"ns.mdn.io/storage-type":"dedicated"}' \
-        "$CONTROLLER/secrets/$tenant-secret/metadata/annotations/ns.mdn.io%2Fstorage-type" > /dev/null
+        "$CONTROLLER/secrets/$secret_name/metadata/annotations/ns.mdn.io%2Fstorage-type" > /dev/null
       
-      echo "✓ Migration triggered for $tenant"
-      echo "  - Migration Job will be created by storage webhook"
-      echo "  - Check status with: $0 validate-migration $tenant"
+      echo "✓ Migration triggered:"
+      echo "  - Source: $mongo_uri"
+      echo "  - Target: Dedicated MongoDB StatefulSet"
+      echo "  - Storage webhook will create migration Job"
+      echo "  - Check status: $0 validate-migration $tenant"
       ;;
 
     validate-migration)
       tenant=$2
       test -z "$tenant" && (echo "Error: Missing tenant name" && exit 1)
       
-      echo "Validating migration for $tenant..."
+      # For Gen 3b migration: account ID = tenant name (1:1)
+      account_id=$tenant
+      secret_name="$account_id-secret"
       
-      # Check migration complete annotation
-      migration_complete=$(curl -s "$CONTROLLER/secrets/$tenant-secret/metadata/annotations/ns.mdn.io%2Fmigration-complete" 2>/dev/null | json)
+      echo "Validating migration for tenant $tenant (account: $account_id)..."
+      
+      # Check migration complete annotation on storage Secret
+      migration_complete=$(curl -s "$CONTROLLER/secrets/$secret_name/metadata/annotations/ns.mdn.io%2Fmigration-complete" 2>/dev/null | json)
       
       if [ "$migration_complete" = "true" ]; then
-        echo "✓ Migration COMPLETE for $tenant"
+        echo "✓ Migration COMPLETE"
         
         # Check Secret status
-        ready_condition=$(curl -s "$CONTROLLER/secrets/$tenant-secret" | json status.conditions | json -c 'this.type=="Ready" && this.status=="True"')
+        ready_condition=$(curl -s "$CONTROLLER/secrets/$secret_name" | json status.conditions | json -c 'this.type=="Ready" && this.status=="True"')
         if [ -n "$ready_condition" ]; then
           echo "✓ Storage Secret is Ready"
+          echo "✓ Dedicated MongoDB StatefulSet operational"
         else
           echo "⚠ Storage Secret not yet ready"
         fi
         
         exit 0
       else
-        echo "⏳ Migration IN PROGRESS or FAILED for $tenant"
+        echo "⏳ Migration IN PROGRESS or FAILED"
         
         # Check for migration Job status
-        kubectl get job "$tenant-migration" -n "$NAMESPACE" 2>/dev/null || echo "Migration Job not found"
+        echo ""
+        echo "Migration Job status:"
+        kubectl get job "$account_id-migration" -n "$NAMESPACE" 2>/dev/null || echo "  Migration Job not found (may not be created yet)"
         
         exit 1
       fi
@@ -149,57 +189,73 @@ EOF
       tenant=$2
       test -z "$tenant" && (echo "Error: Missing tenant name" && exit 1)
       
-      echo "Rolling back $tenant to shared MongoDB..."
+      # For Gen 3b migration: account ID = tenant name (1:1)
+      account_id=$tenant
+      secret_name="$account_id-secret"
       
-      # Remove migration annotations
-      curl -s -X DELETE "$CONTROLLER/secrets/$tenant-secret/metadata/annotations/ns.mdn.io%2Fmigration-needed" > /dev/null
-      curl -s -X DELETE "$CONTROLLER/secrets/$tenant-secret/metadata/annotations/ns.mdn.io%2Fmigration-source-uri" > /dev/null
-      curl -s -X DELETE "$CONTROLLER/secrets/$tenant-secret/metadata/annotations/ns.mdn.io%2Fmigration-complete" > /dev/null
+      echo "Rolling back tenant $tenant (account: $account_id) to shared MongoDB..."
       
-      # Revert to shared storage
+      # Remove migration annotations from storage Secret
+      curl -s -X DELETE "$CONTROLLER/secrets/$secret_name/metadata/annotations/ns.mdn.io%2Fmigration-needed" > /dev/null
+      curl -s -X DELETE "$CONTROLLER/secrets/$secret_name/metadata/annotations/ns.mdn.io%2Fmigration-source-uri" > /dev/null
+      curl -s -X DELETE "$CONTROLLER/secrets/$secret_name/metadata/annotations/ns.mdn.io%2Fmigration-complete" > /dev/null
+      
+      # Revert storage type: dedicated → shared
       curl -s -X POST -H "Content-Type: application/json" \
         -d '{"ns.mdn.io/storage-type":"shared"}' \
-        "$CONTROLLER/secrets/$tenant-secret/metadata/annotations/ns.mdn.io%2Fstorage-type" > /dev/null
+        "$CONTROLLER/secrets/$secret_name/metadata/annotations/ns.mdn.io%2Fstorage-type" > /dev/null
       
-      echo "✓ Rollback complete for $tenant"
-      echo "  - Storage type reverted to 'shared'"
+      echo "✓ Rollback complete:"
+      echo "  - Storage type: dedicated → shared"
       echo "  - Migration annotations removed"
-      echo "  - StatefulSet will be deleted by storage webhook"
+      echo "  - Storage webhook will delete dedicated MongoDB StatefulSet"
+      echo "  - Tenant will use shared MongoDB again"
       ;;
 
     label-configmap)
       tenant=$2
       test -z "$tenant" && (echo "Error: Missing tenant name" && exit 1)
       
-      echo "Adding Gen 4 labels to ConfigMap $tenant..."
+      # For Gen 3b migration: account ID = tenant name (1:1)
+      account_id=$tenant
+      
+      echo "Labeling tenant ConfigMap $tenant for Gen 4 (storage account: $account_id)..."
       
       # Add composite label (triggers compute controller)
       curl -s -X POST -H "Content-Type: application/json" \
         -d '{"ns.mdn.io/composite":"compute"}' \
         "$CONTROLLER/configmaps/$tenant/metadata/labels/ns.mdn.io%2Fcomposite" > /dev/null
       
-      # Add storage account link (for Gen 3b migration, account ID = tenant ID)
+      # Add storage account link - links compute (ConfigMap) to storage (Secret)
       curl -s -X POST -H "Content-Type: application/json" \
-        -d "{\"storage.nightscout.org/account\":\"$tenant\"}" \
+        -d "{\"storage.nightscout.org/account\":\"$account_id\"}" \
         "$CONTROLLER/configmaps/$tenant/metadata/labels/storage.nightscout.org%2Faccount" > /dev/null
       
-      # Remove old Gen 3b label (optional)
+      # Remove old Gen 3b label (optional cleanup)
       curl -s -X DELETE "$CONTROLLER/configmaps/$tenant/metadata/labels/ns.mdn.io%2Fcontroller" > /dev/null 2>&1
       
-      echo "✓ ConfigMap $tenant labeled for Gen 4"
-      echo "  - Added: ns.mdn.io/composite=compute"
-      echo "  - Added: storage.nightscout.org/account=$tenant"
-      echo "  - Removed: ns.mdn.io/controller (Gen 3b label)"
+      echo "✓ ConfigMap labeled for Gen 4:"
+      echo "  - Tenant: $tenant (compute)"
+      echo "  - Storage account: $account_id"
+      echo "  - Added: ns.mdn.io/composite=compute (triggers compute controller)"
+      echo "  - Added: storage.nightscout.org/account=$account_id (links to storage Secret)"
+      echo "  - Removed: ns.mdn.io/controller (old Gen 3b label)"
       ;;
 
     migrate-tenant)
       tenant=$2
       test -z "$tenant" && (echo "Error: Missing tenant name" && exit 1)
       
-      echo "=== Migrating $tenant to Gen 4 ==="
+      # For Gen 3b migration: account ID = tenant name (1:1)
+      account_id=$tenant
+      
+      echo "=== Migrating tenant $tenant to Gen 4 ==="
+      echo "  - Tenant: $tenant (compute ConfigMap)"
+      echo "  - Storage account: $account_id (storage Secret)"
       echo ""
       
-      # Step 1: Create storage Secret via provisioner API
+      # Step 1: Create storage account via provisioner API
+      # Creates Secret "{account_id}-secret" with storageType: shared (no migration yet)
       $0 create-storage "$tenant" || exit 1
       echo ""
       
@@ -207,11 +263,12 @@ EOF
       sleep 2
       
       # Step 2: Trigger migration to dedicated MongoDB
+      # Adds migration annotations and switches storageType: shared → dedicated
       $0 trigger-migration "$tenant" || exit 1
       echo ""
       
       # Step 3: Wait and validate migration (with timeout)
-      echo "Waiting for migration to complete (timeout: 5 minutes)..."
+      echo "Waiting for migration Job to complete (timeout: 5 minutes)..."
       timeout=300
       elapsed=0
       while [ $elapsed -lt $timeout ]; do
@@ -221,6 +278,7 @@ EOF
           echo ""
           
           # Step 4: Label ConfigMap for Gen 4 (triggers compute controller)
+          # Links ConfigMap (compute) to Secret (storage) via storage.nightscout.org/account label
           $0 label-configmap "$tenant" || exit 1
           echo ""
           
@@ -230,6 +288,9 @@ EOF
             echo "✓ Consul registration confirmed for $tenant"
             echo ""
             echo "=== Migration Complete for $tenant ==="
+            echo "  - Storage: Dedicated MongoDB StatefulSet ($account_id)"
+            echo "  - Compute: Nightscout Deployment ($tenant)"
+            echo "  - Traffic: Resolver → Consul → Pod"
             exit 0
           else
             echo "⚠ Migration complete but Consul registration failed for $tenant"
@@ -244,7 +305,7 @@ EOF
       
       echo ""
       echo "✗ Migration timed out for $tenant"
-      echo "Check Job logs: kubectl logs -n $NAMESPACE job/$tenant-migration"
+      echo "Check Job logs: kubectl logs -n $NAMESPACE job/$account_id-migration"
       exit 1
       ;;
 
