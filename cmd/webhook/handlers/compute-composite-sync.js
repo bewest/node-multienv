@@ -20,7 +20,7 @@
 
 const { renderNightscout, renderKafkaTopics, renderKafkaConnector } = require('./resources');
 
-async function computeCompositeSync(req, res, next) {
+async function computeCompositeSync(req, res) {
   const { parent, children, related } = req.body;
   
   const tenantId = parent.metadata.name;
@@ -74,7 +74,7 @@ async function computeCompositeSync(req, res, next) {
         }]
       };
       res.send(response);
-      return next();
+      return;
     }
 
     // Check MongoDB readiness from related StatefulSet
@@ -102,11 +102,9 @@ async function computeCompositeSync(req, res, next) {
     });
 
     res.send(response);
-    return next();
   } catch (error) {
     console.error('Error in compute composite sync:', error);
     res.send(500, { error: error.message });
-    return next();
   }
 }
 

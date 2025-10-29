@@ -16,7 +16,7 @@ server.use(restify.plugins.bodyParser());
 
 server.use((req, res, next) => {
   console.log(`${new Date().toISOString()} ${req.method} ${req.path()}`);
-  return next();
+  next();
 });
 
 // Gen 4: Two-Composite Architecture

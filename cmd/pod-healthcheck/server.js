@@ -17,7 +17,7 @@ const server = restify.createServer({
 
 server.use(restify.plugins.queryParser());
 
-server.get('/health', (req, res, next) => {
+server.get('/health', (req, res) => {
   const field = req.query.field;
   const expected = req.query.expected;
 
@@ -28,7 +28,7 @@ server.get('/health', (req, res, next) => {
       available_fields: Object.keys(podMetadata),
       metadata: podMetadata,
     });
-    return next();
+    return;
   }
 
   const actual = podMetadata[field];
@@ -39,7 +39,7 @@ server.get('/health', (req, res, next) => {
       message: `Unknown field: ${field}`,
       available_fields: Object.keys(podMetadata),
     });
-    return next();
+    return;
   }
 
   if (expected === undefined) {
@@ -49,7 +49,7 @@ server.get('/health', (req, res, next) => {
       actual: actual,
       message: 'No expected value provided, returning actual value only',
     });
-    return next();
+    return;
   }
 
   const match = actual === expected;
@@ -62,15 +62,13 @@ server.get('/health', (req, res, next) => {
     match: match,
     timestamp: new Date().toISOString(),
   });
-  return next();
 });
 
-server.get('/ready', (req, res, next) => {
+server.get('/ready', (req, res) => {
   res.send(200, {
     status: 'ready',
     timestamp: new Date().toISOString(),
   });
-  return next();
 });
 
 server.listen(PORT, '0.0.0.0', () => {

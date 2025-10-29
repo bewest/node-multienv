@@ -20,7 +20,7 @@
 
 const { renderMongoDB } = require('./resources');
 
-async function storageCompositeSync(req, res, next) {
+async function storageCompositeSync(req, res) {
   const { parent, children, related } = req.body;
   
   const storageAccount = parent.metadata.name;
@@ -142,11 +142,9 @@ async function storageCompositeSync(req, res, next) {
     };
 
     res.send(response);
-    return next();
   } catch (error) {
     console.error('Error in storage composite sync:', error);
     res.send(500, { error: error.message });
-    return next();
   }
 }
 
