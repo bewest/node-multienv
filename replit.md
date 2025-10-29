@@ -59,6 +59,7 @@ The platform employs a **two-composite architecture** (Storage and Compute) to s
 
 ### Operations
 - **[Quick Start](./docs/QUICK-START.md)**: Get up and running in 5 minutes
+- **[Tanka Deployment](./docs/TANKA-DEPLOYMENT.md)**: Jsonnet/Tanka deployment patterns, blue/green, multi-component scaling
 - **[Migration Playbook](./docs/MIGRATION-PLAYBOOK.md)**: Gen 3b → Gen 4 migration procedures
 - **[Migration from Legacy](./docs/MIGRATION-FROM-LEGACY.md)**: Legacy system migration patterns
 - **[Validation Checklist](./docs/VALIDATION-CHECKLIST.md)**: Pre-deployment validation steps
