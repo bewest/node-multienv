@@ -46,6 +46,30 @@ The platform employs a **two-composite architecture** (Storage and Compute) to s
 - **Provisioner API Facade**: A REST API provides external systems with endpoints for account and site provisioning, abstracting the underlying two-composite architecture.
 - **Resolver Interface**: Routes Nightscout traffic using Consul for service discovery, ensuring efficient and scalable traffic serving on worker nodes.
 
+## Documentation
+
+### Core Architecture
+- **[Two-Composite Architecture](./docs/TWO-COMPOSITE-ARCHITECTURE.md)**: Storage and Compute separation, Gen 4 design, REST API provisioner
+- **[Architecture Evolution](./docs/ARCHITECTURE-EVOLUTION.md)**: Historical progression through Gen 1-4
+- **[Metacontroller Integration](./docs/METACONTROLLER-INTEGRATION.md)**: Webhook protocol, CompositeController and DecoratorController patterns
+- **[Webhook Architecture](./docs/WEBHOOK-ARCHITECTURE.md)**: Node.js webhook implementation details
+
+### Security & RBAC
+- **[RBAC Design](./docs/RBAC-DESIGN.md)**: Permission breakdown, security rationale, blue/green deployment RBAC, troubleshooting
+
+### Operations
+- **[Quick Start](./docs/QUICK-START.md)**: Get up and running in 5 minutes
+- **[Tanka Deployment](./docs/TANKA-DEPLOYMENT.md)**: Jsonnet/Tanka deployment patterns, blue/green, multi-component scaling
+- **[Migration Playbook](./docs/MIGRATION-PLAYBOOK.md)**: Gen 3b → Gen 4 migration procedures
+- **[Migration from Legacy](./docs/MIGRATION-FROM-LEGACY.md)**: Legacy system migration patterns
+- **[Validation Checklist](./docs/VALIDATION-CHECKLIST.md)**: Pre-deployment validation steps
+
+### Reference
+- **[Labels and Annotations](./docs/LABELS-AND-ANNOTATIONS.md)**: Comprehensive label/annotation catalog
+- **[Component Relationships](./docs/COMPONENT-RELATIONSHIPS.md)**: How system components interact
+- **[Container Parameters](./docs/CONTAINER-PARAMETERS.md)**: Environment variables and configuration
+- **[Testing Guide](./docs/testing-guide.md)**: Testing strategies and patterns
+
 ## External Dependencies
 - **Strimzi Kafka Operator**: Manages Kafka clusters and KafkaConnect for CDC.
 - **MongoDB**: Primary database, deployed as per-tenant StatefulSets.
