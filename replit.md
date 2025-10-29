@@ -5,6 +5,7 @@ This project delivers a production-grade, multi-tenant Nightscout platform orche
 
 ## User Preferences
 - Prefer Node.js/JavaScript for webhook implementation
+- Use Restify as standard web server framework
 - Use existing @kubernetes/client-node library
 - Follow Metacontroller webhook protocol specifications
 - Follow Kubernetes recommended labels, annotations, and status patterns
@@ -24,7 +25,7 @@ All tenants are deployed within a single `hosted-tenants` namespace. Resources a
 - **Orchestration**: Kubernetes, Metacontroller.
 - **Messaging**: Strimzi Kafka for CDC.
 - **Database**: MongoDB (per-tenant replica sets).
-- **Webhook Implementation**: Node.js with Express and `@kubernetes/client-node`.
+- **Webhook Implementation**: Node.js with Restify and `@kubernetes/client-node`.
 - **Traffic Serving**: Resolver + Consul coordination.
 
 ### Feature Specifications

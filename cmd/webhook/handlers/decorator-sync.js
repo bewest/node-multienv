@@ -1,4 +1,4 @@
-async function decoratorSync(req, res) {
+async function decoratorSync(req, res, next) {
   const { object } = req.body;
   
   console.log('Decorator sync for PVC:', object.metadata?.name);
@@ -44,10 +44,12 @@ async function decoratorSync(req, res) {
     
     console.log(`Decorator processed PVC ${object.metadata.name} for tenant ${tenantId}`);
 
-    res.json(response);
+    res.send(response);
+    return next();
   } catch (error) {
     console.error('Error in decorator sync:', error);
-    res.status(500).json({ error: error.message });
+    res.send(500, { error: error.message });
+    return next();
   }
 }
 

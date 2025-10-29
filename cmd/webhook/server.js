@@ -1,36 +1,41 @@
-const express = require('express');
+const restify = require('restify');
 const k8s = require('@kubernetes/client-node');
 const storageCompositeSync = require('./handlers/storage-composite-sync');
 const computeCompositeSync = require('./handlers/compute-composite-sync');
 const decoratorSync = require('./handlers/decorator-sync');
 const decoratorFinalize = require('./handlers/decorator-finalize');
 
-const app = express();
+const server = restify.createServer({
+  name: 'metacontroller-webhook',
+  version: '1.0.0',
+});
+
 const port = process.env.PORT || 3000;
 
-app.use(express.json());
+server.use(restify.plugins.bodyParser());
 
-app.use((req, res, next) => {
-  console.log(`${new Date().toISOString()} ${req.method} ${req.path}`);
-  next();
+server.use((req, res, next) => {
+  console.log(`${new Date().toISOString()} ${req.method} ${req.path()}`);
+  return next();
 });
 
 // Gen 4: Two-Composite Architecture
 // Storage composite: Secret → MongoDB StatefulSet + Migration Jobs
-app.post('/composite/storage/sync', storageCompositeSync);
+server.post('/composite/storage/sync', storageCompositeSync);
 
 // Compute composite: ConfigMap → Nightscout Deployment + CDC resources
-app.post('/composite/compute/sync', computeCompositeSync);
+server.post('/composite/compute/sync', computeCompositeSync);
 
 // Decorator: PVC backup policy enforcement
-app.post('/decorator/sync', decoratorSync);
-app.post('/decorator/finalize', decoratorFinalize);
+server.post('/decorator/sync', decoratorSync);
+server.post('/decorator/finalize', decoratorFinalize);
 
-app.get('/health', (req, res) => {
-  res.json({ status: 'healthy', timestamp: new Date().toISOString() });
+server.get('/health', (req, res, next) => {
+  res.send({ status: 'healthy', timestamp: new Date().toISOString() });
+  return next();
 });
 
-app.listen(port, '0.0.0.0', () => {
+server.listen(port, '0.0.0.0', () => {
   console.log(`Metacontroller webhook server listening on port ${port}`);
   console.log(`Gen 4: Two-Composite Architecture`);
   console.log(`Endpoints:`);

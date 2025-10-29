@@ -5,7 +5,7 @@ kc.loadFromDefault();
 const k8sApi = kc.makeApiClient(k8s.CoreV1Api);
 const snapshotApi = kc.makeApiClient(k8s.CustomObjectsApi);
 
-async function decoratorFinalize(req, res) {
+async function decoratorFinalize(req, res, next) {
   const { object, attachments } = req.body;
   
   console.log('Decorator finalize for PVC:', object.metadata?.name);
@@ -15,10 +15,11 @@ async function decoratorFinalize(req, res) {
     
     if (backupPolicy === 'skip') {
       console.log('Backup policy is skip, removing finalizer');
-      return res.json({
+      res.send({
         finalized: true,
         attachments: []
       });
+      return next();
     }
 
     const namespace = object.metadata.namespace;
@@ -85,21 +86,24 @@ async function decoratorFinalize(req, res) {
         }
       };
 
-      return res.json({
+      res.send({
         finalized: false,
         attachments: [volumeSnapshot]
       });
+      return next();
     }
 
     console.log(`VolumeSnapshot ${snapshotName} is ready, removing finalizer`);
-    return res.json({
+    res.send({
       finalized: true,
       attachments: existingSnapshots
     });
+    return next();
 
   } catch (error) {
     console.error('Error in decorator finalize:', error);
-    res.status(500).json({ error: error.message });
+    res.send(500, { error: error.message });
+    return next();
   }
 }
 

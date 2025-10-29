@@ -1,5 +1,4 @@
-const express = require('express');
-const app = express();
+const restify = require('restify');
 
 const PORT = process.env.PORT || 3000;
 
@@ -11,41 +10,51 @@ const podMetadata = {
   node_name: process.env.NODE_NAME || '',
 };
 
-app.get('/health', (req, res) => {
+const server = restify.createServer({
+  name: 'pod-healthcheck',
+  version: '1.0.0',
+});
+
+server.use(restify.plugins.queryParser());
+
+server.get('/health', (req, res, next) => {
   const field = req.query.field;
   const expected = req.query.expected;
 
   if (!field) {
-    return res.status(200).json({
+    res.send(200, {
       status: 'ok',
       message: 'Health check endpoint ready',
       available_fields: Object.keys(podMetadata),
       metadata: podMetadata,
     });
+    return next();
   }
 
   const actual = podMetadata[field];
   
   if (actual === undefined) {
-    return res.status(400).json({
+    res.send(400, {
       status: 'error',
       message: `Unknown field: ${field}`,
       available_fields: Object.keys(podMetadata),
     });
+    return next();
   }
 
   if (expected === undefined) {
-    return res.status(200).json({
+    res.send(200, {
       status: 'ok',
       field: field,
       actual: actual,
       message: 'No expected value provided, returning actual value only',
     });
+    return next();
   }
 
   const match = actual === expected;
 
-  res.status(match ? 200 : 503).json({
+  res.send(match ? 200 : 503, {
     status: match ? 'ok' : 'mismatch',
     field: field,
     actual: actual,
@@ -53,16 +62,18 @@ app.get('/health', (req, res) => {
     match: match,
     timestamp: new Date().toISOString(),
   });
+  return next();
 });
 
-app.get('/ready', (req, res) => {
-  res.status(200).json({
+server.get('/ready', (req, res, next) => {
+  res.send(200, {
     status: 'ready',
     timestamp: new Date().toISOString(),
   });
+  return next();
 });
 
-app.listen(PORT, '0.0.0.0', () => {
+server.listen(PORT, '0.0.0.0', () => {
   console.log(`Pod health check server listening on port ${PORT}`);
   console.log('Available metadata:', podMetadata);
 });
