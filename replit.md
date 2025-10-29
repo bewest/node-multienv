@@ -45,6 +45,7 @@ The platform employs a **two-composite architecture** (Storage and Compute) to s
 - **Annotation-Driven Migration**: A robust pattern for orchestrating migrations, particularly from shared to dedicated MongoDB instances.
 - **Provisioner API Facade**: A REST API provides external systems with endpoints for account and site provisioning, abstracting the underlying two-composite architecture.
 - **Resolver Interface**: Routes Nightscout traffic using Consul for service discovery, ensuring efficient and scalable traffic serving on worker nodes.
+- **Pod Health Check Sidecar**: Lightweight sidecar container injected into Nightscout pods to provide localhost-based health validation for Consul, eliminating DNS queries and API calls to central controllers. This design removes critical bottlenecks at scale and enables linear scaling to 10,000+ tenants.
 
 ## Documentation
 
@@ -68,6 +69,7 @@ The platform employs a **two-composite architecture** (Storage and Compute) to s
 - **[Labels and Annotations](./docs/LABELS-AND-ANNOTATIONS.md)**: Comprehensive label/annotation catalog
 - **[Component Relationships](./docs/COMPONENT-RELATIONSHIPS.md)**: How system components interact
 - **[Container Parameters](./docs/CONTAINER-PARAMETERS.md)**: Environment variables and configuration
+- **[Pod Health Check](./docs/POD-HEALTHCHECK.md)**: Sidecar-based health validation for Consul, scaling improvements, multi-cluster support
 - **[Testing Guide](./docs/testing-guide.md)**: Testing strategies and patterns
 
 ## External Dependencies

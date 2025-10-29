@@ -1,0 +1,15 @@
+{
+  "name": "pod-healthcheck",
+  "version": "1.0.0",
+  "description": "Lightweight sidecar health check server for Consul pod identity validation",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "keywords": ["health-check", "sidecar", "consul", "kubernetes"],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "express": "^4.18.2"
+  }
+}

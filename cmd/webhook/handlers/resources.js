@@ -282,6 +282,16 @@ function renderNightscout(parent) {
   // PDB configuration
   const nsPdbMinAvailable = parseInt(parent.data.NS_PDB_MIN_AVAILABLE || '1');
   
+  // Health check sidecar configuration
+  const healthCheckEnabled = parent.data.POD_HEALTHCHECK_ENABLED !== 'false';
+  const healthCheckImage = parent.data.POD_HEALTHCHECK_IMAGE || 'pod-healthcheck:latest';
+  const healthCheckImagePullPolicy = parent.data.POD_HEALTHCHECK_IMAGE_PULL_POLICY || 'IfNotPresent';
+  const healthCheckPort = parseInt(parent.data.POD_HEALTHCHECK_PORT || '3000');
+  const healthCheckCpuRequest = parent.data.POD_HEALTHCHECK_CPU_REQUEST || '10m';
+  const healthCheckCpuLimit = parent.data.POD_HEALTHCHECK_CPU_LIMIT || '50m';
+  const healthCheckMemRequest = parent.data.POD_HEALTHCHECK_MEM_REQUEST || '32Mi';
+  const healthCheckMemLimit = parent.data.POD_HEALTHCHECK_MEM_LIMIT || '64Mi';
+  
   // Extract version from image
   const nsVersion = nsImage.split(':')[1] || 'latest';
   
@@ -330,66 +340,142 @@ function renderNightscout(parent) {
           imagePullSecrets: parent.data.IMAGE_PULL_SECRET 
             ? [{ name: parent.data.IMAGE_PULL_SECRET }] 
             : undefined,
-          containers: [
-            {
-              name: 'nightscout',
-              image: nsImage,
-              imagePullPolicy: nsImagePullPolicy,
-              ports: [
-                {
-                  containerPort: 1337,
-                  name: 'http'
-                }
-              ],
-              env: [
-                {
-                  name: 'MONGO_CONNECTION',
-                  value: `mongodb://$(MONGO_USER):$(MONGO_PASS)@${mongoHost}:27017/$(MONGO_DB)?replicaSet=rs0`
-                },
-                {
-                  name: 'MONGO_USER',
-                  valueFrom: {
-                    secretKeyRef: {
-                      name: secretName,
-                      key: 'username'
-                    }
-                  }
-                },
-                {
-                  name: 'MONGO_PASS',
-                  valueFrom: {
-                    secretKeyRef: {
-                      name: secretName,
-                      key: 'password'
-                    }
-                  }
-                },
-                {
-                  name: 'MONGO_DB',
-                  valueFrom: {
-                    secretKeyRef: {
-                      name: secretName,
-                      key: 'database'
-                    }
-                  }
-                }
-              ],
-              resources: {
-                requests: {
-                  cpu: nsCpuRequest,
-                  memory: nsMemRequest
-                },
-                limits: {
-                  cpu: nsCpuLimit,
-                  memory: nsMemLimit
-                }
-              }
-            }
-          ]
+          containers: buildContainers()
         }
       }
     }
   };
+
+  function buildContainers() {
+    const containers = [
+      {
+        name: 'nightscout',
+        image: nsImage,
+        imagePullPolicy: nsImagePullPolicy,
+        ports: [
+          {
+            containerPort: 1337,
+            name: 'http'
+          }
+        ],
+        env: [
+          {
+            name: 'MONGO_CONNECTION',
+            value: `mongodb://$(MONGO_USER):$(MONGO_PASS)@${mongoHost}:27017/$(MONGO_DB)?replicaSet=rs0`
+          },
+          {
+            name: 'MONGO_USER',
+            valueFrom: {
+              secretKeyRef: {
+                name: secretName,
+                key: 'username'
+              }
+            }
+          },
+          {
+            name: 'MONGO_PASS',
+            valueFrom: {
+              secretKeyRef: {
+                name: secretName,
+                key: 'password'
+              }
+            }
+          },
+          {
+            name: 'MONGO_DB',
+            valueFrom: {
+              secretKeyRef: {
+                name: secretName,
+                key: 'database'
+              }
+            }
+          }
+        ],
+        resources: {
+          requests: {
+            cpu: nsCpuRequest,
+            memory: nsMemRequest
+          },
+          limits: {
+            cpu: nsCpuLimit,
+            memory: nsMemLimit
+          }
+        }
+      }
+    ];
+
+    if (healthCheckEnabled) {
+      containers.push({
+        name: 'pod-healthcheck',
+        image: healthCheckImage,
+        imagePullPolicy: healthCheckImagePullPolicy,
+        ports: [
+          {
+            containerPort: healthCheckPort,
+            name: 'healthcheck'
+          }
+        ],
+        env: [
+          {
+            name: 'PORT',
+            value: String(healthCheckPort)
+          },
+          {
+            name: 'POD_UID',
+            valueFrom: {
+              fieldRef: {
+                fieldPath: 'metadata.uid'
+              }
+            }
+          },
+          {
+            name: 'POD_IP',
+            valueFrom: {
+              fieldRef: {
+                fieldPath: 'status.podIP'
+              }
+            }
+          },
+          {
+            name: 'POD_NAME',
+            valueFrom: {
+              fieldRef: {
+                fieldPath: 'metadata.name'
+              }
+            }
+          },
+          {
+            name: 'POD_NAMESPACE',
+            valueFrom: {
+              fieldRef: {
+                fieldPath: 'metadata.namespace'
+              }
+            }
+          },
+          {
+            name: 'NODE_NAME',
+            valueFrom: {
+              fieldRef: {
+                fieldPath: 'spec.nodeName'
+              }
+            }
+          }
+        ],
+        resources: {
+          requests: {
+            cpu: healthCheckCpuRequest,
+            memory: healthCheckMemRequest
+          },
+          limits: {
+            cpu: healthCheckCpuLimit,
+            memory: healthCheckMemLimit
+          }
+        }
+      });
+    }
+
+    return containers;
+  }
 
   const service = {
     apiVersion: 'v1',
