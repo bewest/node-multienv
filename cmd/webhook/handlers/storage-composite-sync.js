@@ -89,7 +89,7 @@ function createStorageCompositeSync(config) {
     if (nsuserUsername && nsuserPassword) {
       const mongoHost = storageType === 'shared'
         ? (secretData.mongoHost || 'shared-mongodb')
-        : `${storageAccount}-mongodb`;
+        : `${storageAccount}-mongo`;
       const mongoPort = secretData.mongoPort || '27017';
       const databaseName = generateDatabaseName(storageAccount);
       
@@ -199,7 +199,7 @@ function createStorageCompositeSync(config) {
     // Build status
     const mongoHost = storageType === 'shared' 
       ? (Buffer.from(parent.data?.mongoHost || '', 'base64').toString('utf-8') || 'shared-mongodb')
-      : `${storageAccount}-mongodb`;
+      : `${storageAccount}-mongo`;
     
     const conditions = [mongoReadiness.condition];
     if (migrationState.condition) {
@@ -483,7 +483,7 @@ function renderMigrationJob(secret, storageAccount, sourceUri, config) {
     });
   }
   
-  const targetHost = `${storageAccount}-mongodb`;
+  const targetHost = `${storageAccount}-mongo`;
   const targetUser = secretData.username || 'admin';
   const targetPassword = secretData.password || secretData['root-password'];
   const targetDb = generateDatabaseName(storageAccount);
@@ -575,7 +575,7 @@ function renderCreateUserJob(secret, storageAccount, forceCreate, config) {
   const nsuserPassword = secretData['nsuser-password'];
   const rootUser = secretData.username || secretData['root-user'] || 'admin';
   const rootPassword = secretData.password || secretData['root-password'];
-  const targetHost = `${storageAccount}-mongodb`;
+  const targetHost = `${storageAccount}-mongo`;
   const targetDb = generateDatabaseName(storageAccount);
   
   return {

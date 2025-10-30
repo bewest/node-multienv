@@ -284,7 +284,7 @@ function enrichWithStorageInfo(parent, storageSecret, appCredentialsSecret, stor
       TENANT_ID: parent.metadata.name,
       // App credentials Secret will be projected into Nightscout containers
       APP_CREDENTIALS_SECRET: appCredentialsSecret.metadata.name,
-      MONGO_HOST: appCredentials.MONGO_HOST || `${storageAccountLabel}-mongodb`,
+      MONGO_HOST: appCredentials.MONGO_HOST || `${storageAccountLabel}-mongo`,
       STORAGE_ACCOUNT: storageAccountLabel,
       STORAGE_TYPE: storageType
     }
