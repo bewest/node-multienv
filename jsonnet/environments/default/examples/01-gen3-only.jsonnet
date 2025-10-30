@@ -6,7 +6,7 @@
 // Deploy with:
 //   tk apply environments/default
 
-local config = import '../lib/config.libsonnet';
+local config = import '../../lib/config.libsonnet';
 
 // Your original Gen 3 deployment (import your current main.jsonnet)
 (import '../main.jsonnet.original') + config + {
