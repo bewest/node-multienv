@@ -25,7 +25,8 @@ All tenants are deployed within a single `hosted-tenants` namespace. Resources a
 - **Orchestration**: Kubernetes, Metacontroller.
 - **Messaging**: Strimzi Kafka for CDC.
 - **Database**: MongoDB (per-tenant replica sets).
-- **Webhook Implementation**: Node.js with Restify and `@kubernetes/client-node`.
+- **Webhook Implementation**: Node.js with Restify and `@kubernetes/client-node` (code in `lib/` directory).
+- **Deployment**: Jsonnet library in `jsonnet/lib/`, installable via jsonnet-bundler.
 - **Traffic Serving**: Resolver + Consul coordination.
 
 ### Feature Specifications
@@ -78,9 +79,40 @@ The platform employs a **two-composite architecture** (Storage and Compute) to s
 - **[Pod Health Check](./docs/POD-HEALTHCHECK.md)**: Sidecar-based health validation for Consul, scaling improvements, multi-cluster support
 - **[Testing Guide](./docs/testing-guide.md)**: Testing strategies and patterns
 
+## Project Structure
+
+```
+.
+├── jsonnet/                      # Jsonnet library (jb installable)
+│   ├── lib/                     # Reusable Jsonnet modules
+│   │   ├── main.libsonnet       # Entry point
+│   │   ├── webhook.libsonnet    # Webhook deployments
+│   │   ├── metacontroller.libsonnet # Metacontroller CRDs
+│   │   ├── rbac.libsonnet       # RBAC helpers
+│   │   ├── config.libsonnet     # Configuration templates
+│   │   ├── gen4.libsonnet       # Gen 4 deployment addon
+│   │   └── k.libsonnet          # k8s-libsonnet alias
+│   ├── jsonnetfile.json         # Package metadata
+│   ├── environments/default/
+│   │   └── examples/            # Deployment pattern examples
+│   └── README.md                # Library documentation
+├── lib/                         # Node.js/JavaScript webhook server
+│   ├── routes/                  # Express routes
+│   ├── templates/               # K8s template generators
+│   └── webhook/                 # Webhook handlers
+├── cmd/webhook/                 # Webhook server entry point
+├── docs/                        # Documentation
+│   ├── TWO-COMPOSITE-ARCHITECTURE.md
+│   ├── TANKA-DEPLOYMENT.md
+│   ├── RBAC-DESIGN.md
+│   └── ...
+└── package.json                 # Node.js dependencies
+```
+
 ## External Dependencies
 - **Strimzi Kafka Operator**: Manages Kafka clusters and KafkaConnect for CDC.
 - **MongoDB**: Primary database, deployed as per-tenant StatefulSets.
 - **CSI Driver with Snapshot Support**: Used for creating VolumeSnapshots for PVC backups.
 - **Metacontroller**: Kubernetes add-on for custom controller development and orchestration.
 - **Consul**: Utilized for service discovery and health checking within the resolver interface.
+- **jsonnet-bundler (jb)**: Dependency manager for Jsonnet libraries.
