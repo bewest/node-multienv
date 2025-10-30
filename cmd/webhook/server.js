@@ -1,5 +1,5 @@
 const restify = require('restify');
-const k8s = require('@kubernetes/client-node');
+var bunyan = require('bunyan');
 const config = require('./config');
 
 // Import handler factories
@@ -20,6 +20,14 @@ const server = restify.createServer({
 });
 
 const port = config.server.port;
+
+server.on('after', restify.plugins.auditLogger({
+  log: bunyan.createLogger({
+    name: 'audit',
+    stream: process.stdout
+  }),
+  event: 'after'
+}));
 
 server.use(restify.plugins.bodyParser());
 
