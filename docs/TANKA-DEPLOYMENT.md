@@ -692,6 +692,333 @@ metacontroller.blueGreenControllers(environment='blue')
 
 ---
 
+## Gen 3 to Gen 4 Migration
+
+### Overview
+
+If you have an existing Gen 3 deployment using the monolithic Jsonnet file, you can migrate to Gen 4 webhooks **without disrupting your production tenants**. The migration path preserves all Gen 3 components while optionally enabling Gen 4.
+
+### Backward Compatibility Guarantee
+
+**Core Principle**: Gen 4 is **opt-in**. Your existing deployments continue working unchanged.
+
+- ✅ **All existing `_config` parameters preserved** - Your environment overrides work exactly as before
+- ✅ **Gen 4 disabled by default** - No impact unless you explicitly enable it
+- ✅ **Gen 3 components untouched** - Runners, dispatchers, resolvers, demuxers remain unchanged
+- ✅ **Progressive migration** - Run Gen 3 and Gen 4 side-by-side during transition
+
+### Migration Structure
+
+**New file organization** (in `jsonnet/environments/default/`):
+
+```
+jsonnet/environments/default/
+├── main.jsonnet.original      # Your existing Gen 3 file (preserved)
+├── lib/
+│   ├── config.libsonnet       # _config and _images extracted
+│   └── gen4-addon.libsonnet   # Gen 4 webhook deployment (opt-in)
+└── examples/
+    ├── 01-gen3-only.jsonnet           # Existing Gen 3 (no changes)
+    ├── 02-gen4-simple.jsonnet         # Add Gen 4 webhooks
+    ├── 03-gen4-multicomponent.jsonnet # Separate webhook/provisioner/healthcheck
+    ├── 04-gen4-bluegreen.jsonnet      # Blue/green Gen 4 deployment
+    └── 05-gen4-custom-names.jsonnet   # Progressive migration pattern
+```
+
+### Migration Step 1: Gen 3 Only (Current State)
+
+Your existing environment continues working unchanged:
+
+**`environments/prod/main.jsonnet`:**
+```jsonnet
+// Import your existing Gen 3 file
+(import '../default/main.jsonnet.original') + {
+  _config+:: {
+    // Your existing overrides work exactly as before
+    num_runners: 5,
+    scaling: {
+      resolvers: 10,
+      backends: 10,
+    },
+    
+    // Gen 4 disabled by default
+    gen4+:: {
+      enabled: false,
+    },
+  },
+}
+```
+
+**Deploy:** No changes to your deployment process.
+
+### Migration Step 2: Enable Gen 4 (Progressive)
+
+Add Gen 4 webhooks alongside existing Gen 3 infrastructure:
+
+**`environments/prod/main.jsonnet`:**
+```jsonnet
+local config = import '../default/lib/config.libsonnet';
+local gen4 = import '../default/lib/gen4-addon.libsonnet';
+
+// Gen 3 + Gen 4 running side-by-side
+(import '../default/main.jsonnet.original') + config + {
+  _config+:: {
+    // Existing Gen 3 config
+    num_runners: 5,
+    scaling: {
+      resolvers: 10,
+      backends: 10,
+    },
+    
+    // Enable Gen 4 webhooks
+    gen4+:: {
+      enabled: true,
+      webhook_name: 'gen4-webhooks',
+      webhook_replicas: 2,
+      
+      // Start with low resync period for testing
+      storage_resync_seconds: 60,
+      compute_resync_seconds: 60,
+    },
+  },
+} + gen4.resources($)
+```
+
+**Deploy:**
+```bash
+# Preview what will be added
+tk diff environments/prod
+
+# Deploy Gen 4 alongside Gen 3
+tk apply environments/prod
+```
+
+**What gets deployed:**
+- ✅ All existing Gen 3 components (unchanged)
+- ✅ Gen 4 webhook Deployment + Service
+- ✅ Gen 4 Metacontroller CRDs (storage, compute, PVC decorator)
+- ✅ Gen 4 RBAC (ServiceAccount, ClusterRole, ClusterRoleBinding)
+
+### Migration Step 3: Test Gen 4 with Pilot Tenants
+
+Use custom webhook names to test Gen 4 with a subset of tenants:
+
+**`environments/prod/main.jsonnet`:**
+```jsonnet
+local config = import '../default/lib/config.libsonnet';
+local gen4 = import '../default/lib/gen4-addon.libsonnet';
+
+(import '../default/main.jsonnet.original') + config + {
+  _config+:: {
+    num_runners: 5,
+    gen4+:: { enabled: true },
+  },
+} +
+// Deploy separate "pilot" webhook for testing
+gen4.custom($, webhookName='gen4-pilot', controllerPrefix='pilot')
+```
+
+**This creates:**
+- `gen4-pilot` Deployment and Service
+- `pilot-storage-composite` CompositeController
+- `pilot-compute-composite` CompositeController
+- `pilot-pvc-backup-decorator` DecoratorController
+
+**Test with specific tenants:**
+```bash
+# Label a test storage account to use pilot controllers
+kubectl label secret test-storage-account ns.mdn.io/controller=pilot
+
+# Label a test tenant to use pilot controllers
+kubectl label configmap test-tenant ns.mdn.io/controller=pilot
+
+# Verify pilot controllers pick them up
+kubectl get compositecontrollers pilot-storage-composite -o yaml
+kubectl logs deploy/gen4-pilot
+```
+
+### Migration Step 4: Blue/Green Cutover
+
+Once Gen 4 is validated, use blue/green deployment for zero-downtime cutover:
+
+**`environments/prod/main.jsonnet`:**
+```jsonnet
+local config = import '../default/lib/config.libsonnet';
+local gen4 = import '../default/lib/gen4-addon.libsonnet';
+
+(import '../default/main.jsonnet.original') + config + {
+  _config+:: { 
+    gen4+:: { 
+      enabled: true,
+      webhook_name: 'gen4-webhooks',
+    },
+  },
+} + 
+// Deploy both blue (Gen 3 controllers) and green (Gen 4 controllers)
+gen4.blueGreen($, 'blue') +
+gen4.blueGreen($, 'green')
+```
+
+**Cutover process:**
+1. Deploy green canary (1 replica)
+2. Test green with pilot tenants
+3. Scale green up, migrate controllers
+4. Verify all tenants healthy on green
+5. Scale blue down, remove blue deployment
+6. Decommission Gen 3 runners/dispatchers
+
+### Migration Step 5: Multi-Component (Production Scale)
+
+For 1000+ tenants, split webhook into separate components:
+
+**`environments/prod/main.jsonnet`:**
+```jsonnet
+local config = import '../default/lib/config.libsonnet';
+local gen4 = import '../default/lib/gen4-addon.libsonnet';
+
+(import '../default/main.jsonnet.original') + config + {
+  _config+:: {
+    gen4+:: {
+      enabled: true,
+      webhook_name: 'gen4',
+      
+      multicomponent: {
+        enabled: true,
+        webhook_replicas: 3,        // Metacontroller sync (low volume)
+        provisioner_replicas: 5,    // REST API provisioning (moderate)
+        healthcheck_replicas: 20,   // Consul checks (high volume, 1300 tenants)
+      },
+      
+      resources: {
+        healthcheck: {
+          requests: { cpu: '50m', memory: '64Mi' },
+          limits: { cpu: '200m', memory: '256Mi' },
+        },
+      },
+    },
+  },
+} + gen4.resources($)
+```
+
+**This creates:**
+- `gen4-webhook` Deployment (Metacontroller endpoints only)
+- `gen4-provisioner` Deployment (REST API for account/site provisioning)
+- `gen4-healthcheck` Deployment (Consul health validation, scales independently)
+- Three separate ServiceAccounts with least-privilege RBAC
+
+### Configuration Reference
+
+**`_config.gen4` parameters:**
+
+```jsonnet
+gen4: {
+  // Core settings
+  enabled: false,                        // Enable Gen 4 deployment
+  webhook_name: 'gen4-webhooks',         // Deployment/Service name
+  webhook_namespace: 'default',
+  webhook_replicas: 2,
+  webhook_port: 3000,
+  
+  // ServiceAccount names (from docs/RBAC-DESIGN.md)
+  webhook_metacontroller_sa: 'webhook-metacontroller',
+  webhook_provisioner_sa: 'deployment-server',
+  webhook_healthcheck_sa: 'consul-healthcheck',
+  
+  // Metacontroller controller names
+  storage_composite_name: 'storage-composite',
+  compute_composite_name: 'compute-composite',
+  pvc_decorator_name: 'pvc-backup-decorator',
+  
+  // Resync periods (seconds)
+  storage_resync_seconds: 30,
+  compute_resync_seconds: 30,
+  pvc_resync_seconds: 60,
+  
+  // Multi-component deployment
+  multicomponent: {
+    enabled: false,
+    webhook_replicas: 2,
+    provisioner_replicas: 3,
+    healthcheck_replicas: 10,
+  },
+  
+  // Resource limits per component
+  resources: { /* ... */ },
+}
+```
+
+### Rollback Strategy
+
+**If Gen 4 has issues, rollback is simple:**
+
+```jsonnet
+// Disable Gen 4 in _config
+_config+:: {
+  gen4+:: {
+    enabled: false,  // This removes all Gen 4 resources
+  },
+}
+```
+
+```bash
+tk diff environments/prod   # Verify only Gen 4 resources will be deleted
+tk apply environments/prod  # Remove Gen 4, keep Gen 3
+```
+
+**Gen 3 components remain untouched** - your production tenants continue running.
+
+### Example: Real-World Migration (1300 Production Sites)
+
+**Phase 1: Deploy Gen 4 to staging** (Week 1)
+```jsonnet
+// environments/staging/main.jsonnet
+gen4+:: {
+  enabled: true,
+  webhook_replicas: 1,
+}
+```
+
+**Phase 2: Deploy Gen 4 to production** (Week 2)
+```jsonnet
+// environments/prod/main.jsonnet
+gen4+:: {
+  enabled: true,
+  webhook_replicas: 2,
+  storage_resync_seconds: 60,  // Conservative resync
+}
+```
+
+**Phase 3: Pilot 10 tenants** (Week 3)
+```bash
+# Use gen4.custom() with pilot controllers
+# Label 10 test tenants
+# Monitor logs, metrics, tenant health
+```
+
+**Phase 4: Progressive rollout** (Week 4-6)
+```bash
+# Gradually label more tenants
+# Monitor performance, error rates
+# Scale webhook replicas as needed
+```
+
+**Phase 5: Multi-component** (Week 7)
+```jsonnet
+// Split into webhook/provisioner/healthcheck
+gen4+:: {
+  multicomponent: { enabled: true },
+}
+```
+
+**Phase 6: Decommission Gen 3** (Week 8)
+```bash
+# All tenants on Gen 4
+# Remove Gen 3 runners, dispatchers
+# Clean up old deployments
+```
+
+---
+
 ## Next Steps
 
 1. **Initialize Tanka** in your project
@@ -700,5 +1027,6 @@ metacontroller.blueGreenControllers(environment='blue')
 4. **Test with `tk diff`** before applying
 5. **Graduate to blue/green** for production
 6. **Scale to multi-component** when Consul traffic becomes heavy
+7. **For Gen 3 → Gen 4 migration:** Follow the progressive migration path above
 
 For questions or issues, refer to the [RBAC Design Guide](./RBAC-DESIGN.md) for permission details and troubleshooting.

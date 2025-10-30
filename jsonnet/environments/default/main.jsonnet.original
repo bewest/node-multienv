@@ -1,0 +1,1017 @@
+// (import "github.com/jsonnet-libs/k8s-libsonnet/1.30/main.libsonnet") +
+local parseYaml = std.native("parseYaml");
+(import 'ksonnet-util/kausal.libsonnet') +
+{
+
+  local statefulSet = $.apps.v1.statefulSet,
+  local deployment = $.apps.v1.deployment,
+  local container = $.core.v1.container,
+  local service = $.core.v1.service,
+  local port = $.core.v1.containerPort,
+  local configMap = $.core.v1.configMap,
+  local envFrom = container.envFromType,
+  local pvc = $.core.v1.persistentVolumeClaim,
+  local volumeMount = $.core.v1.volumeMount,
+  local envFromConfigMixin(configMap) =
+    envFrom.mixin.configMapRef.withName(configMap.metadata.name),
+  local imagePullSecretsMixin(secretNames) =
+    if secretNames == null then
+      { imagePullSecrets+: [{ name: $._config.registry_name }] }
+    else
+      { imagePullSecrets+: std.map(function(name) { name: name }, secretNames) },
+
+
+  _config+:: {
+    namespace: 'default',
+    num_runners: 3,
+    cpu_request: '100m',
+    memory_request: '500Mi',
+    memory_limit: '3.2Gi',
+    // PARALLEL_UPDATES
+    dispatcher_parallel_updates: '7',
+    registry_name: 'registry-staget1pal0',
+    imagePullSecrets: [
+      // 'registry-staget1pal0',
+    ],
+    dispatchers_scale: 1,
+    dispatchers_bookmark_name: 'dispatcher-bookmark-config',
+    demuxers_scale: 3,
+    multienv_k8s_namespace: 'hosted-tenants',
+    demuxer_search_tenant_cluster_tag: false,
+    runners_use_select_nodepool: false,
+    runners_selected_nodepool: '',
+    scaling: {
+      resolvers: 3,
+      backends: 3,
+      clusters: 3,
+      deployment_controllers: 3,
+    },
+    combined_backends_resolvers: false,
+    use_nodelocal_dns: false,
+    use_deployment_controller: false,
+    use_metacontroller_crds: false,
+    use_deployment_operator: false,
+    tenantManagerServiceAccountName: 'tenant-manager-sa',
+    MULTIENV_HEALTH_CHECK_SERVICE: 'http://multienv-deployment-controller:3000/',
+    tenant_nodepool_target: 'bigger-tenant-runners',
+    ips: {
+      consul: '',
+      nodelocal: '169.254.20.10',
+      kubedns: '',
+    },
+  },
+  _images+:: {
+    consul: 'consul',
+    nginx: 'nginx',
+    multienv: 'registry.digitalocean.com/staget1pal0/multienv:latest',
+    gitclone: 'alpine/git',
+
+  },
+
+  multienv_internal_resolver_socket:
+    { prefix:: 0 } +
+    configMap.new('multienv-internal-resolver-socket') +
+    configMap.withData({
+      PORT: '/opt/sockets/resolver.sock',
+    }),
+
+  multienv_std_internal_port:
+    { prefix:: 0 } +
+    configMap.new('multienv-std-internal-port') +
+    configMap.withData({
+      PORT: '3000',
+    }),
+
+  multienv_dispatcher_config:
+    { prefix:: 0 } +
+    configMap.new('multienv-dispatcher-config') +
+    {
+      metadata+: { namespace: $._config.multienv_k8s_namespace }
+    } +
+    configMap.withData({
+      // service fronting tenant-availability-keeper (demux)
+      CLUSTER_GATEWAY: 'http://' + std.join('.', [
+        $.nginx_demuxer_service.metadata.name,
+        'default', 'svc', 'cluster', 'local']),
+      MULTIENV_K8S_NAMESPACE: $._config.multienv_k8s_namespace, // 'hosted-tenants',
+    }) + {
+      new(name, cluster_gateway):: self +
+        configMap.new(name) +
+        configMap.withData({
+          // service fronting tenant-availability-keeper (demux)
+          CLUSTER_GATEWAY: 'http://' + cluster_gateway,
+          MULTIENV_K8S_NAMESPACE: $._config.multienv_k8s_namespace, // 'hosted-tenants',
+        })
+    },
+
+  multienv_namespace_config:
+    { prefix:: 0 } +
+    configMap.new('multienv-tenant-namespace-config') +
+    configMap.withData({
+      MULTIENV_K8S_NAMESPACE: $._config.multienv_k8s_namespace, // 'hosted-tenants',
+    }),
+
+  multienv_nightscout_config:
+    { prefix:: 0 } +
+    configMap.new('multienv-nightscout-config-env') +
+    configMap.withData({
+      ADMIN_NOTIFIES_ENABLED: 'false',
+    }),
+
+  multienv_std_config:
+    { prefix:: 0 } +
+    configMap.new('multienv-std-config-env') +
+    configMap.withData({
+      WORKER_DIR: '/opt/multi/working/workdir',
+      WORKER_ENV: '/opt/multi/working/environments',
+      ALLOW_MULTIPLE_CLUSTER: '1',
+      CONSUL: 'consul://hashicorp-consul-server',
+    }),
+
+  multienv:: {
+    prefix:: 0,
+    dispatcher:: {},
+    inspector:: {},
+    resolver:: {},
+    demuxer:: {},
+    runner:: {
+      pvc: {},
+      container: {},
+      volumes: {
+
+      },
+    },
+    containers:: {
+      local git2Volume(name, repo, pvc, path='/repo', branch='master') =
+        container.new('multienv-runner-' + name, $._images.gitclone) +
+
+        container.withArgs([
+          'clone',
+          '--single-branch',
+          '--branch',
+          branch,
+          repo,
+          path,
+        ]) +
+        container.withVolumeMountsMixin(
+          volumeMount.new(pvc, path)
+        ) +
+        {},
+      clone_echoenv: git2Volume('init-echoenv', 'https://github.com/bewest/echoenv', 'multienv-workdir'),
+      clone_nightscout: git2Volume('init-nightscout', 'https://github.com/t1pal/cgm-remote-monitor', 'multienv-workdir'),
+
+      nginx:
+        container.new('std-nginx', $._images.nginx) +
+        container.withPorts([
+          port.new('http', 80),
+        ]) +
+        {},
+
+      setup_runner_workdir:
+        container.new('init-runner-workdir', $._images.multienv) +
+        container.withImagePullPolicy('Always') +
+        container.withArgs(['setup_workdir']) +
+        container.withEnvFromMixin([
+          envFromConfigMixin($.multienv_std_config),
+        ]) +
+        container.withVolumeMountsMixin(
+          volumeMount.new('multienv-workdir', $.multienv_std_config.data.WORKER_DIR)
+        ) +
+        {},
+      runner:
+        container.new('multienv-runner', $._images.multienv) +
+
+        container.withImagePullPolicy('Always') +
+        container.withVolumeMountsMixin(
+          volumeMount.new($.multienv_runner_pvc.metadata.name,
+                          $.multienv_std_config.data.WORKER_ENV)
+        ) +
+        // $.util.resourcesLimits('500m', '2.5Gi') +
+        $.util.resourcesRequests($._config.cpu_request, $._config.memory_request) +
+        container.mixin.resources.withLimits({ memory: $._config.memory_limit }) +
+        container.withEnvFromMixin([
+          envFromConfigMixin($.multienv_std_internal_port),
+          envFromConfigMixin($.multienv_std_config),
+          envFromConfigMixin($.multienv_nightscout_config),
+        ]) +
+        (if $._config.limit_tenants_per_runner then
+           container.withEnvMap({
+             MAX_TENANT_LIMIT: $._config.max_tenants_per_runner,
+           })
+         else
+           {}) +
+        container.withArgs(['runner']) +
+        container.withPorts([
+          port.new('http', std.parseInt($.multienv_std_internal_port.data.PORT)),
+          port.new('public-foo', 4545),
+          port.new('public-bar', 3535),
+          port.new('internal-foo', 3636),
+          port.new('internal-bar', 3232),
+        ]),
+
+      assign_linklocal_ip: {
+        name: 'assign-linklocal-ip',
+        image: 'busybox:1.36',
+        securityContext: {
+          capabilities: {
+            add: ['NET_ADMIN'],
+          },
+        },
+        command: [
+          'sh', '-c', 'ip addr add 169.254.1.8/32 dev eth0 && ip address'
+        ]
+      },
+
+      consul_dns_sidecar:
+        // container.new('consul-dns', 'hashicorp/consul:1.20') +
+        container.new('consul-dns', 'hashicorp/consul:1.10') +
+        container.withArgs([
+          'agent',
+          // '-bind=169.254.1.8',
+          '-client=169.254.1.8',
+          '-bind=$(POD_IP)',
+          // '-client=$(POD_IP)',
+          '-dns-port=53',
+          // '-retry-join=provider=k8s',
+          '-retry-join=' + $._config.ips.consul,
+          '-node=$(POD_NAME)',
+          '-advertise=$(POD_IP)',
+          '-data-dir=/tmp/consul',
+          // '-disable-update-check',
+          // '-leave-on-terminate',
+          '-log-level=INFO'
+        ]) +
+        container.withEnv([{
+          name: 'POD_NAME',
+          valueFrom: {
+            fieldRef: {
+              fieldPath: 'metadata.name'
+            }
+          }
+        },
+        {
+          name: 'POD_IP',
+          valueFrom: {
+            fieldRef: {
+              fieldPath: 'status.podIP'
+            }
+          }
+        }]) + {
+          securityContext+: {
+            // allowPrivilegeEscalation: true,
+
+
+            // runAsUser: 0,
+            // capabilities+: {
+            //   drop: ["ALL"],
+            //   add: ["NET_BIND_SERVICE"],
+            // },
+        },
+      },
+
+      resolver_embedded:
+        container.new('multienv-resolver', $._images.multienv) +
+        container.withImagePullPolicy('Always') +
+        container.withArgs(['resolver']) +
+        container.withEnvFromMixin([
+          envFromConfigMixin($.multienv_internal_resolver_socket),
+          envFromConfigMixin($.multienv_std_config),
+        ]) +
+        container.withPorts([
+          // port.new('http', std.parseInt($.multienv_std_internal_port.data.PORT)),
+          // port.new('internal-foo', 3636),
+          // port.new('internal-bar', 3232),
+        ]) + {
+          securityContext: {
+            runAsGroup: 101
+          }
+        },
+
+      resolver:
+        container.new('multienv-resolver', $._images.multienv) +
+        container.withImagePullPolicy('Always') +
+        container.withArgs(['resolver']) +
+        container.withEnvFromMixin([
+          envFromConfigMixin($.multienv_std_internal_port),
+          envFromConfigMixin($.multienv_std_config),
+        ]) +
+        container.withPorts([
+          port.new('http', std.parseInt($.multienv_std_internal_port.data.PORT)),
+          port.new('internal-foo', 3636),
+          port.new('internal-bar', 3232),
+        ]),
+
+      inspector:
+        container.new('multienv-inspector', $._images.multienv) +
+        container.withImagePullPolicy('Always') +
+        container.withArgs(['inspector']) +
+        container.withEnvFromMixin([
+          envFromConfigMixin($.multienv_std_internal_port),
+          envFromConfigMixin($.multienv_namespace_config),
+        ]) +
+        container.withPorts([
+          port.new('http', std.parseInt($.multienv_std_internal_port.data.PORT)),
+          port.new('internal-foo', 3636),
+          port.new('internal-bar', 3232),
+        ]),
+
+      dispatcher:
+        container.new('multienv-dispatcher', $._images.multienv) +
+        container.withImagePullPolicy('Always') +
+        container.withArgs(['dispatcher']) +
+        container.withEnvFromMixin([
+          // envFromConfigMixin($.multienv_namespace_config),
+          envFromConfigMixin($.multienv_dispatcher_config),
+          { configMapRef: { name: $._config.dispatchers_bookmark_name, optional: true } }
+        ]) +
+        container.withEnvMap({
+          PARALLEL_UPDATES: $._config.dispatcher_parallel_updates,
+          BOOKMARK_NAME: $._config.dispatchers_bookmark_name
+        }) +
+        {
+          new(name='multienv-dispatcher', config={ }, parallel_updates):: 
+            container.new(name, $._images.multienv) +
+            container.withImagePullPolicy('Always') +
+            container.withArgs(['dispatcher']) +
+            container.withEnvFromMixin([
+              envFromConfigMixin($.multienv_namespace_config),
+              envFromConfigMixin(config),
+            ]) +
+            container.withEnvMap({
+              PARALLEL_UPDATES: parallel_updates,
+            })
+        },
+
+      demuxer:
+        container.new('multienv-demuxer', $._images.multienv) +
+        container.withImagePullPolicy('Always') +
+        container.withArgs(['demuxer']) +
+        container.withEnvFromMixin([
+          envFromConfigMixin($.multienv_std_internal_port),
+
+        ]) +
+        (if $._config.demuxer_search_tenant_cluster_tag then
+          container.withEnvMap({
+            SEARCH_TENANT_CLUSTER_TAG: '1',
+          })
+         else
+           {}) +
+        container.withPorts([
+          port.new('http', std.parseInt($.multienv_std_internal_port.data.PORT)),
+          port.new('internal-foo', 3636),
+          port.new('internal-bar', 3232),
+        ]),
+
+    },
+  },
+
+  multienv_runner_pvc::
+    { prefix:: 0 } +
+    pvc.new() +
+    pvc.mixin.metadata.withName('multienv-runner-environments') +
+    pvc.mixin.spec.withAccessModes('ReadWriteOnce') +
+    pvc.mixin.spec.resources.withRequests({ storage: '1Gi' }) +
+    { spec+: { storageClassName: 'do-block-storage' } } +
+    {},
+
+
+  multienv_dispatcher:
+    deployment.new(name='dispatchers', replicas=$._config.dispatchers_scale, containers=self.multienv.containers.dispatcher) +
+    deployment.mixin.spec.template.spec.withServiceAccountName($.multienv_rbac.service_account.metadata.name) +
+    { metadata+: { namespace: $._config.multienv_k8s_namespace } } +
+    { new(name, replicas, containers):: 
+      deployment.new(name, replicas=replicas, containers=containers) +
+      deployment.mixin.spec.template.spec.withServiceAccountName($.multienv_rbac.service_account.metadata.name) +
+      { metadata+: { namespace: $._config.multienv_k8s_namespace } }
+    },
+
+  multienv_runners:
+    { prefix:: 0 } +
+    statefulSet.new(name='runners',
+                    replicas=$._config.num_runners,
+                    containers=[self.multienv.containers.runner],
+                    volumeClaims=self.multienv_runner_pvc) +
+    $.util.emptyVolumeMount('multienv-workdir', self.multienv_std_config.data.WORKER_DIR) +
+    // statefulSet.mixin.spec.template.metadata.withLabels({name: 'runners', component: 'runners'}) +
+    statefulSet.mixin.spec.withServiceName(self.multienv_runners.metadata.name) +
+    $.util.antiAffinity +
+    {
+      spec+: { template+: {
+        /*
+        metadata+: {
+          component: 'multienv-runners'
+        },
+        */
+        spec+: {
+        initContainers: [$.multienv.containers[$._config.workload], $.multienv.containers.setup_runner_workdir],
+        affinity+: 
+          (if $._config.runners_use_select_nodepool then
+            {
+            /*
+            nodeAffinity+: {
+              requiredDuringSchedulingIgnoredDuringExecution: {
+                // doks.digitalocean.com/node-pool=pool-qydywk4af
+                nodeSelectorTerms: [
+                  {
+                    matchExpressions: [{
+                      key: 'doks.digitalocean.com/node-pool',
+                      operator: 'In',
+                      values: [$._config.runners_selected_nodepool],
+                    }],
+                  },
+                ],
+              },
+            },
+            */
+            }
+
+          else
+          {})
+      } } },
+    } +
+    {
+      new(name='runners', replicas)::
+        self + 
+        // { metadata: { name: name } },
+        statefulSet.new(name, replicas=replicas,
+                    containers=[$.multienv.containers.runner],
+                    volumeClaims=$.multienv_runner_pvc, podLabels={/*component: 'runners'*/}) +
+        { }
+        // statefulSet.mixin.spec.template.metadata.withLabels({name: name, component: 'runners'}) +
+    },
+  multienv_runners_service: $.util.serviceFor(self.multienv_runners) +
+                            { prefix:: 0 } +
+                            { spec+: { clusterIP: 'None' } },
+
+  local clusterRole = $.rbac.v1.clusterRole,
+  local policyRule = clusterRole.rulesType,
+  local rbacAPI = { apiVersion: 'rbac.authorization.k8s.io/v1' },
+  multienv_rbac:
+
+    local basicRule = policyRule.new() +
+                      policyRule.withApiGroups(['', 'core', 'extensions', 'apps']) +
+                      policyRule.withResources(['configmaps']) +
+                      policyRule.withVerbs(['get', 'list', 'watch', 'create', 'update', 'patch', 'replace', 'delete', 'put', 'post']);
+    $.util.namespacedRBAC('multienv-tenantadmin', [basicRule]) +
+    {
+
+      service_account+: imagePullSecretsMixin($._config.imagePullSecrets),
+      cluster_role_binding+: rbacAPI + { metadata+: { namespace: $.multienv_namespace_config.data.MULTIENV_K8S_NAMESPACE } } +
+      {
+        subjects+: [super.subjects[0] + { namespace: $._config.multienv_k8s_namespace } ]
+      },
+      role+: rbacAPI + { metadata+: { namespace: $._config.multienv_k8s_namespace } },
+      service_account_second: self.service_account + {
+        metadata+: { namespace: $._config.multienv_k8s_namespace }
+      }
+    } +
+    /*
+    */
+    {},
+
+  local nginxConfigFor(name, volumeName='nginx-config') =
+    container.new('init-nginx-for-' + name, $._images.multienv) +
+    container.withArgs([
+      'nginx-for',
+      name,
+      // '/etc/nginx/nginx.conf'
+      // '/etc/nginx/conf.d/default.conf'
+      '/etc/nginx/templates/default.conf.template',
+    ]) +
+    container.withEnvMap({
+      NGINX_PORT: '80',
+    }) +
+    container.withImagePullPolicy('Always') +
+    container.withVolumeMountsMixin(
+      volumeMount.new(volumeName, '/etc/nginx/templates/')
+    ) +
+    {},
+
+
+  nginx_resolvers: (if $._config.combined_backends_resolvers then
+    // Combine backends deployments with a fast consul lookup, and nginx
+    // frontend loadbalancer cohered tightly through a shared unix domain
+    // socket to the resolver component handling auth_request.
+    deployment.new(name='backends', replicas=$._config.scaling.backends, containers=[
+      self.multienv.containers.resolver_embedded,
+      self.multienv.containers.consul_dns_sidecar,
+      self.multienv.containers.nginx,
+    ]) +
+    $.util.emptyVolumeMount('nginx-config', '/etc/nginx/templates/') +
+    $.util.emptyVolumeMount('resolver-socket', '/opt/sockets/') +
+    $.util.antiAffinity +
+    {
+      spec+: { template+: { spec+: {
+        // When a nodelocal cache is available configure special this workload
+        // with optimal dns policies. This allows the purpose built task of
+        // using consul to resolve tenant internal traffic without it touching
+        // coredns, as well as allowing consul and other tooling to contact the
+        // cluster in the usual way.
+        dnsPolicy: 'None',
+        dnsConfig: {
+          nameservers: [
+            // First use our linklocal address with a colocated consul agent.
+            '169.254.1.8',
+            // Second use our linklocal address for nodelocal cache, with
+            // kubedns just for backup?
+            (if $._config.use_nodelocal_dns then
+              $._config.ips.nodelocal // '169.254.20.10',
+            else
+              $._config.ips.kubedns
+            ),
+          ],
+          searches: [
+            'service.consul',
+            'default.svc.cluster.local',
+            'svc.cluster.local',
+            'cluster.local',
+          ],
+          options: [
+            {
+              name: 'ndots',
+              value: '1'
+            }
+          ]
+        },
+
+        // serviceAccountName: 'hashicorp-consul-client',
+        securityContext: {
+          sysctls: [ {
+            name: "net.ipv4.ip_unprivileged_port_start",
+            value: "0"
+          } ],
+          fsGroup: 101,
+          // runAsUser: 101,
+          // runAsGroup: 101,
+        },
+        initContainers: [
+          $.multienv.containers.assign_linklocal_ip,
+          {
+            name: "permission-fix",
+            image: "busybox",
+            command: ["sh", "-c", "chown -R 101:101 /opt/sockets && chmod -R 775 /opt/sockets"],
+            volumeMounts: [ { name: "resolver-socket", mountPath: "/opt/sockets" } ],
+          },
+          nginxConfigFor('resolver') +
+          container.withEnvMap({
+            RESOLVER_IP: '169.254.1.8',
+            PORT: '80',
+            RESOLVER_SERVICE_URI: 'unix:' + $.multienv_internal_resolver_socket.data.PORT
+          }),
+        ],
+        affinity+: {
+          podAntiAffinity+: {
+            requiredDuringSchedulingIgnoredDuringExecution+: [
+                {
+                topologyKey: 'kubernetes.io/hostname',
+                labelSelector: {
+                  matchExpressions: [
+                    {
+                      key: 'name',
+                      operator: 'In',
+                      values: [
+                        'runners',
+                      ],
+                    },
+                  ],
+                }
+                }
+            ]
+          },
+          podAffinity+:: {
+            requiredDuringSchedulingIgnoredDuringExecution+: [
+              {
+                labelSelector: {
+                  topologyKey: 'kubernetes.io/hostname',
+                  matchExpressions: [
+                    {
+                      key: 'name',
+                      operator: 'In',
+                      values: [
+                        'resolvers',
+                      ],
+                    },
+                  ],
+                },
+                weight: 100,
+              },
+            ],
+
+          },
+        },
+      
+      } + imagePullSecretsMixin($._config.imagePullSecrets),
+      } }
+    }
+  else
+    deployment.new(name='backends', replicas=$._config.scaling.backends, containers=self.multienv.containers.nginx) +
+    $.util.emptyVolumeMount('nginx-config', '/etc/nginx/templates/') +
+    $.util.antiAffinity +
+    {
+      spec+: { template+: { spec+: {
+        initContainers: [
+          nginxConfigFor('resolver') +
+          container.withEnvMap({
+            RESOLVER_IP: 'kube-dns.kube-system.svc.cluster.local',
+            PORT: '80',
+            RESOLVER_SERVICE_URI: 'resolvers:3000',
+          }),
+        ],
+        affinity+: {
+          podAntiAffinity+: {
+            requiredDuringSchedulingIgnoredDuringExecution+: [
+                {
+                topologyKey: 'kubernetes.io/hostname',
+                labelSelector: {
+                  matchExpressions: [
+                    {
+                      key: 'name',
+                      operator: 'In',
+                      values: [
+                        'runners',
+                      ],
+                    },
+                  ],
+                }
+                }
+            ]
+          },
+          podAffinity+:: {
+            requiredDuringSchedulingIgnoredDuringExecution+: [
+              {
+                labelSelector: {
+                  topologyKey: 'kubernetes.io/hostname',
+                  matchExpressions: [
+                    {
+                      key: 'name',
+                      operator: 'In',
+                      values: [
+                        'resolvers',
+                      ],
+                    },
+                  ],
+                },
+                weight: 100,
+              },
+            ],
+
+          },
+        },
+      } + imagePullSecretsMixin($._config.imagePullSecrets),
+      } },
+    } +
+    { }) + {},
+  nginx_resolver_service: $.util.serviceFor(self.nginx_resolvers) +
+                          {},
+
+  nginx_demuxers:
+    deployment.new(name='clusters', replicas=$._config.scaling.clusters, containers=self.multienv.containers.nginx) +
+    $.util.emptyVolumeMount('nginx-config', '/etc/nginx/templates/') +
+    $.util.antiAffinity +
+    {
+      spec+: { template+: { spec+: {
+        initContainers: [
+          nginxConfigFor('demuxer') +
+          container.withEnvMap({
+            RESOLVER_IP: 'kube-dns.kube-system.svc.cluster.local',
+            PORT: '80',
+            DEMUXER_SERVICE_URI: 'demuxers:3000',
+          }),
+        ],
+        affinity+:: {
+          podAffinity+: {
+            topologyKey: 'kubernetes.io/hostname',
+            preferredDuringSchedulingIgnoredDuringExecution+: [
+              {
+                preference: {
+                  matchExpressions: [
+                    {
+                      key: 'name',
+                      operator: 'In',
+                      values: [
+                        'demuxers',
+                      ],
+                    },
+                  ],
+                },
+                weight: 100,
+              },
+            ],
+
+          },
+        },
+      } } },
+    } +
+    { new(name='', replicas=3, cluster_service_name='cluster'):: self + deployment.new(name=name, replicas=replicas, containers=$.multienv.containers.nginx) +
+      $.util.emptyVolumeMount('clusters-green-nginx-config', '/etc/nginx/templates/') +
+      {
+        spec+: { template+: { spec+: {
+          initContainers: [
+            nginxConfigFor('demuxer', 'clusters-green-nginx-config') +
+            container.withEnvMap({
+              RESOLVER_IP: 'kube-dns.kube-system.svc.cluster.local',
+              PORT: '80',
+              DEMUXER_SERVICE_URI: 'demuxers:3000',
+              CLUSTER_SERVICE_NAME: cluster_service_name,
+            }),
+          ],
+        } } }
+      }
+    },
+  nginx_demuxer_service: $.util.serviceFor(self.nginx_demuxers) +
+                         {},
+
+  multienv_resolver:
+    deployment.new(name='resolvers', replicas=$._config.scaling.resolvers, containers=self.multienv.containers.resolver) +
+    $.util.antiAffinity +
+    /*
+    */
+    {
+      spec+: { template+: { spec+: {
+        affinity+: {
+          podAntiAffinity+: {
+            requiredDuringSchedulingIgnoredDuringExecution+: [
+                {
+                  topologyKey: 'kubernetes.io/hostname',
+                  labelSelector: {
+                    matchExpressions: [
+                      {
+                        key: 'name',
+                        operator: 'In',
+                        values: [
+                          'runners',
+                        ],
+                      },
+                    ],
+                  }
+                }
+            ]
+          },
+          podAffinity+: {
+            preferredDuringSchedulingIgnoredDuringExecution+: [
+              {
+                podAffinityTerm: {
+                  topologyKey: 'kubernetes.io/hostname',
+                  labelSelector: {
+                    matchExpressions: [
+                      {
+                        key: 'name',
+                        operator: 'In',
+                        values: [
+                          'backends',
+                        ],
+                      },
+                    ],
+                  }
+                },
+                weight: 100,
+              },
+            ],
+          },
+        },
+      } } },
+    } +
+    {},
+  multienv_resolver_service: $.util.serviceFor(self.multienv_resolver) +
+                             {},
+
+  multienv_demuxer:
+    deployment.new(name='demuxers', replicas=$._config.demuxers_scale, containers=self.multienv.containers.demuxer) +
+    $.util.antiAffinity +
+    {
+      /*
+            spec+: { template+: { spec+: {
+              affinity+: {
+                podAffinity+: {
+                  preferredDuringSchedulingIgnoredDuringExecution+: [
+                    {
+                      preference: {
+                        matchExpressions: [
+                          {
+                            key: 'another-node-label-key',
+                            operator: 'In',
+                            values: [
+                              'another-node-label-value',
+                            ],
+                          },
+                        ],
+                      },
+                      weight: 100,
+                    },
+                  ],
+
+                },
+              },
+            } } },
+      */
+    } +
+    {},
+  multienv_demuxer_service: $.util.serviceFor(self.multienv_demuxer) +
+                            {},
+
+  multienv_inspector:
+    deployment.new(name='inspectors', replicas=3, containers=self.multienv.containers.inspector) +
+    deployment.mixin.spec.template.spec.withServiceAccountName($.multienv_rbac.service_account.metadata.name) +
+    $.util.antiAffinity +
+    {
+      /*
+            spec+: { template+: { spec+: {
+              affinity+: {
+              },
+            } } },
+      */
+    } +
+    { metadata+: { namespace: $.multienv_rbac.service_account.metadata.namespace } },
+  multienv_inspector_service: $.util.serviceFor(self.multienv_inspector) +
+                              {},
+
+  multienv_namespace: {
+    apiVersion: 'v1',
+    kind: 'Namespace',
+    metadata: {
+      name: $.multienv_namespace_config.data.MULTIENV_K8S_NAMESPACE,
+    },
+
+  },
+  deployment_controller: { } +
+  (if $._config.use_deployment_controller then
+    {
+    crds: { } + (if $._config.use_metacontroller_crds then
+      {
+        nightscout_controller: parseYaml(importstr "./metacontroller/nightscout-controller.yaml")[0] + { },
+        nightscout_instance: parseYaml(importstr "./metacontroller/nightscoutinstance.yaml")[0] + { },
+        storage_decorator: parseYaml(importstr "./metacontroller/storage-decorator.yaml")[0] + { }
+      } else { }),
+    backends_headless: service.new('backends', null, [
+      { port: 1337, targetPort: 1337 },
+    ]) + { spec+: { selector: { role: 'config-as-deploy' }, clusterIP: 'None' } } + {
+      metadata+: {
+        namespace: $._config.multienv_k8s_namespace, // 'hosted-tenants'
+      }
+    },
+    serviceAccount: $.core.v1.serviceAccount.new($._config.tenantManagerServiceAccountName)
+      .withNamespace($._config.namespace) +
+      imagePullSecretsMixin($._config.imagePullSecrets),
+
+    role: $.rbac.v1.role.new( ) +
+      $.rbac.v1beta1.role.mixin.metadata.withName('tenant-manager-role')
+      .withNamespace($._config.multienv_k8s_namespace) +
+      $.rbac.v1beta1.role.withRules([
+        {
+          apiGroups: ['apps'],
+          resources: ['deployments'],
+          verbs: ['get', 'list', 'watch', 'create', 'update', 'patch', 'delete'],
+        },
+        {
+          apiGroups: [''],
+          resources: ['configmaps', 'secrets', 'pods'],  // Updated to include 'pods'
+          verbs: ['get', 'list', 'watch', 'create', 'update', 'patch', 'delete'],
+        },
+      ]),
+
+    roleBinding: $.rbac.v1.roleBinding.new( ) +
+      $.rbac.v1beta1.roleBinding.mixin.metadata.withName('tenant-manager-binding')
+        .withNamespace($._config.multienv_k8s_namespace) +
+        $.rbac.v1beta1.roleBinding.mixin.roleRef.withApiGroup('rbac.authorization.k8s.io') +
+        $.rbac.v1beta1.roleBinding.mixin.roleRef.withKind('Role') +
+        $.rbac.v1beta1.roleBinding.mixin.roleRef.withName('tenant-manager-role') +
+
+      $.rbac.v1beta1.roleBinding.withSubjects([
+        $.rbac.v1beta1.subject.new( ) + 
+        $.rbac.v1beta1.subject.withName('tenant-manager-sa') + 
+        $.rbac.v1beta1.subject.withKind('ServiceAccount') + 
+        $.rbac.v1beta1.subject.withNamespace($._config.namespace)
+      ]) +
+      { } ,
+    configmap:
+      configMap.new('multienv-std-deployment-controller') +
+      configMap.withData({
+        // PORT and MULTIENV_K8S_NAMESPACE covered by other configmaps.
+        // MULTIENV_MANAGED_BY: 'multienv/k8s-deployment-controller', // default
+        MULTIENV_TENANT_NODEPOOL_TARGET: $._config.tenant_nodepool_target, // 'bigger-tenant-runners'
+        MULTIENV_DEFAULT_COMPONENT_LABEL: 'config',
+        MULTIENV_DEFAULT_CONFIG_ROLE: 'config-as-deploy',
+        CONSUL: 'http://hashicorp-consul-server',
+        MULTIENV_MANAGED_BY: 'multienv/k8s-deployment-controller',
+        MULTIENV_DEFAULT_APP_LABEL: 'deployment',
+        MULTIENV_TENANT_REQUESTS_CPU: '5m',
+        MULTIENV_TENANT_REQUESTS_MEMORY: '138Mi',
+        MULTIENV_TENANT_LIMITS_CPU: '500m',
+        MULTIENV_TENANT_LIMITS_MEMORY: '500Mi',
+        MULTIENV_HEALTH_CHECK_SERVICE: $._config.MULTIENV_HEALTH_CHECK_SERVICE,
+      }),
+    container::
+      container.new('multienv-deployment-controller', $._images.multienv) +
+      container.withImagePullPolicy('Always') +
+      container.withArgs(['deployment-controller']) +
+      container.withEnvFromMixin([
+        envFromConfigMixin($.multienv_std_internal_port),
+        envFromConfigMixin($.multienv_namespace_config),
+        envFromConfigMixin(self.configmap),
+      ]) +
+      container.withPorts([
+        port.new('http', std.parseInt($.multienv_std_internal_port.data.PORT)),
+      ]) +
+      {
+        env+:
+         [ {
+            name: 'POD_IP',
+            valueFrom: {
+              fieldRef: {
+                fieldPath: 'status.podIP'
+              }
+            }
+          } ],
+      },
+    deployment_controller:
+      // Healthchecks API for consul are colocated with the controller REST APi.
+      deployment.new(name='multienv-deployment-controller', replicas=$._config.scaling.deployment_controllers, containers=self.container) +
+      deployment.mixin.spec.template.spec.withServiceAccountName(self.serviceAccount.metadata.name) +
+      $.util.antiAffinity + {
+      spec+: { template+: { spec+: (if $._config.use_nodelocal_dns then {
+        // Use the nodelocaldns policies.
+        dnsPolicy: 'None',
+        dnsConfig: {
+          nameservers: [
+            // First prefer our nodelocal static IP Address.  These
+            // are available due to a daemonset grabbing a linklocal IP.
+            $._config.ips.nodelocal, // '169.254.20.10',
+            // Then use the static IP assigned to kube-dns service.  It points
+            // to coredns in our environments.
+            $._config.ips.kubedns,
+          ],
+          searches: [
+            'default.svc.cluster.local',
+            'svc.cluster.local',
+            'cluster.local',
+            'service.consul',
+          ],
+          options: [
+            {
+              name: 'ndots',
+              value: '1'
+            }
+          ]
+        },
+      } else { })
+      } } } + { },
+    deployment_service: $.util.serviceFor(self.deployment_controller) +
+    {},
+    multienv_deployment_operator: {
+      config:
+        configMap.new('multienv-deployment-operator-config') +
+        configMap.withData({
+          CLUSTER_GATEWAY: "http://multienv-deployment-controller:3000/",
+          INIT_WITH_FULL_AUDIT: "0",
+          SYNC_CONTROLLER: "deployment",
+          WATCH_LABELSELECTOR: "role=config-as-deploy,managed=multienv",
+          DELAY_CROWD_PARALLEL: "6",
+        }),
+      container:: 
+        container.new('multienv-deployment-operator', $._images.multienv) +
+        container.withImagePullPolicy('Always') +
+        container.withArgs(['deployment-operator']) +
+        container.withEnvFromMixin([
+          envFromConfigMixin($.multienv_namespace_config),
+          envFromConfigMixin(self.config),
+        ]) +
+        container.withEnvMap({ }) +
+        {},
+      deployment:
+        deployment.new(name='multienv-deployment-operator', replicas=1, containers=self.container) +
+        deployment.mixin.spec.template.spec.withServiceAccountName($._config.tenantManagerServiceAccountName)
+    },
+    multienv_consul_operator: {
+      config:
+        configMap.new('multienv-consul-operator-config') +
+        configMap.withData({
+          DELAY_CROWD_INTERVAL_MS: "0",
+          DELAY_CROWD_PARALLEL: "12",
+          FILTER_NONE: "1",
+          CLUSTER_GATEWAY: "http://multienv-deployment-controller:3000/consul/",
+          WATCH_ENDPOINT: "/api/v1/namespaces/" + $._config.multienv_k8s_namespace + "/pods",
+          INIT_WITH_FULL_AUDIT: "0",
+          SYNC_CONTROLLER: "deployment",
+          WATCH_LABELSELECTOR: "role=config-as-deploy,managed=multienv",
+        }),
+      container:: 
+        container.new('multienv-consul-operator', $._images.multienv) +
+        container.withImagePullPolicy('Always') +
+        container.withArgs(['deployment-operator']) +
+        container.withEnvFromMixin([
+          envFromConfigMixin($.multienv_namespace_config),
+          envFromConfigMixin(self.config),
+        ]) +
+        container.withEnvMap({ }) +
+        {},
+      deployment:
+        deployment.new(name='multienv-consul-operator', replicas=1, containers=self.container) +
+        deployment.mixin.spec.template.spec.withServiceAccountName($._config.tenantManagerServiceAccountName)
+    }
+// node k8s-dispatcher.js
+
+// node k8s-dispatcher.js
+   }
+  else
+  {}),
+}
