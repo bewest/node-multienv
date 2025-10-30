@@ -57,12 +57,14 @@ jb install ../../jsonnet  # Local development
 ```
 
 **Library modules:**
-- `lib/webhook.libsonnet` - Webhook deployments with health probes
+- `lib/webhook.libsonnet` - Webhook Deployments and Services
 - `lib/metacontroller.libsonnet` - CompositeController/DecoratorController CRDs
-- `lib/rbac.libsonnet` - ServiceAccounts and RBAC rules
+- `lib/rbac.libsonnet` - ServiceAccounts, ClusterRoles, ClusterRoleBindings
 - `lib/config.libsonnet` - Configuration templates
 - `lib/gen4.libsonnet` - Gen 4 deployment addon
 - `lib/main.libsonnet` - Entry point that exports all modules
+
+**Note:** No external Jsonnet dependencies required - all Kubernetes resources are written as plain Jsonnet objects.
 
 ## Quick Start
 

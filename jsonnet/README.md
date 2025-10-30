@@ -10,6 +10,7 @@ A production-ready Jsonnet library for deploying multi-tenant Nightscout platfor
 - 🔄 **Blue/Green Deployments** - Zero-downtime updates
 - 📈 **Multi-Component Scaling** - Separate webhook/provisioner/healthcheck
 - 🛠️ **jsonnet-bundler Compatible** - Install via `jb install`
+- ✨ **Zero Dependencies** - Plain Kubernetes objects, no k8s-libsonnet required
 
 ## Installation
 
@@ -207,9 +208,9 @@ See `environments/default/examples/` for complete examples:
 
 ## Dependencies
 
-- **k8s-libsonnet** - Kubernetes object definitions (installed via jb)
-- **Metacontroller** - Custom controller framework (deployed separately)
-- **Strimzi Kafka Operator** - For CDC (deployed separately)
+- **None** - Self-contained library with no external Jsonnet dependencies
+- **Metacontroller** - Custom controller framework (deployed separately to cluster)
+- **Strimzi Kafka Operator** - For CDC (deployed separately to cluster)
 
 ## License
 

@@ -86,12 +86,11 @@ The platform employs a **two-composite architecture** (Storage and Compute) to s
 ├── jsonnet/                      # Jsonnet library (jb installable)
 │   ├── lib/                     # Reusable Jsonnet modules
 │   │   ├── main.libsonnet       # Entry point
-│   │   ├── webhook.libsonnet    # Webhook deployments
+│   │   ├── webhook.libsonnet    # Webhook deployments (plain K8s objects)
 │   │   ├── metacontroller.libsonnet # Metacontroller CRDs
-│   │   ├── rbac.libsonnet       # RBAC helpers
+│   │   ├── rbac.libsonnet       # RBAC helpers (plain K8s objects)
 │   │   ├── config.libsonnet     # Configuration templates
-│   │   ├── gen4.libsonnet       # Gen 4 deployment addon
-│   │   └── k.libsonnet          # k8s-libsonnet alias
+│   │   └── gen4.libsonnet       # Gen 4 deployment addon
 │   ├── jsonnetfile.json         # Package metadata
 │   ├── environments/default/
 │   │   └── examples/            # Deployment pattern examples

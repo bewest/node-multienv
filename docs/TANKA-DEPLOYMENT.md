@@ -35,25 +35,6 @@ tk --version
 jb --version
 ```
 
-### 2. Install k8s-libsonnet
-
-The Kubernetes API library provides typed interfaces for all Kubernetes resources:
-
-```bash
-# Initialize jsonnet-bundler in your project
-cd your-nightscout-platform
-jb init
-
-# Install k8s-libsonnet matching your cluster version
-# Replace 1.29 with your Kubernetes version (1.24, 1.25, 1.26, 1.27, 1.28, 1.29, 1.30, 1.31)
-jb install github.com/jsonnet-libs/k8s-libsonnet/1.29@main
-```
-
-This creates:
-- `jsonnetfile.json` - Dependency manifest
-- `jsonnetfile.lock.json` - Lock file (commit this)
-- `vendor/` - Downloaded libraries (add to `.gitignore`)
-
 ---
 
 ## Library Installation
@@ -83,8 +64,7 @@ your-nightscout-platform/
 ├── jsonnet/                      # Jsonnet library (jb installable)
 │   ├── lib/                     # Reusable Jsonnet modules
 │   │   ├── main.libsonnet       # Entry point (exports all modules)
-│   │   ├── k.libsonnet          # Alias to k8s-libsonnet
-│   │   ├── rbac.libsonnet       # RBAC helpers
+│   │   ├── rbac.libsonnet       # RBAC helpers (ServiceAccounts, ClusterRoles)
 │   │   ├── webhook.libsonnet    # Webhook deployment helpers
 │   │   ├── metacontroller.libsonnet # Metacontroller CRD helpers
 │   │   ├── config.libsonnet     # Configuration templates
