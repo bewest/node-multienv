@@ -226,6 +226,35 @@ function generateUsername(storageAccount) {
 }
 
 /**
+ * Generate short unique database name for storage account
+ * Format: ns-<short-hash>
+ */
+function generateDatabaseName(storageAccount) {
+  const crypto = require('crypto');
+  const hash = crypto.createHash('sha256').update(storageAccount).digest('hex');
+  return `ns-${hash.substring(0, 6)}`;
+}
+
+/**
+ * Generate complete app credentials object
+ * Returns all fields needed for Nightscout to connect to MongoDB
+ */
+function generateAppCredentials(storageAccount, mongoHost, mongoPort, databaseName, username, password) {
+  const port = mongoPort || '27017';
+  const mongodbUri = `mongodb://${username}:${password}@${mongoHost}:${port}/${databaseName}?authSource=${databaseName}`;
+  
+  return {
+    'MONGODB_URI': mongodbUri,
+    'MONGO_DATABASE': databaseName,
+    'MONGO_HOST': mongoHost,
+    'MONGO_PORT': port,
+    'MONGO_USERNAME': username,
+    'MONGO_PASSWORD': password,
+    'MONGO_AUTH_SOURCE': databaseName
+  };
+}
+
+/**
  * Ensure NS user credentials exist in Secret, generate if missing
  */
 function ensureNSUserCredentials(secret, storageAccount) {
