@@ -395,6 +395,41 @@ function checkMongoReadiness(children, storageAccount) {
 }
 
 /**
+ * Render app-credentials Secret for Nightscout containers
+ * Contains only the credentials needed by application workloads (not root/admin credentials)
+ */
+function renderAppCredentialsSecret(storageAccount, namespace, appCredentials, storageLabels) {
+  const secretName = `${storageAccount}-app-credentials`;
+  
+  // Encode all credential fields to base64
+  const encodedData = {};
+  Object.keys(appCredentials).forEach(key => {
+    encodedData[key] = Buffer.from(appCredentials[key]).toString('base64');
+  });
+  
+  return {
+    apiVersion: 'v1',
+    kind: 'Secret',
+    metadata: {
+      name: secretName,
+      namespace: namespace,
+      labels: {
+        ...storageLabels,
+        'app.kubernetes.io/component': 'app-credentials',
+        'ns.mdn.io/composite': 'storage',
+        'ns.mdn.io/credential-type': 'application'
+      },
+      annotations: {
+        'ns.mdn.io/created-at': new Date().toISOString(),
+        'ns.mdn.io/description': 'MongoDB credentials for Nightscout application containers'
+      }
+    },
+    type: 'Opaque',
+    data: encodedData
+  };
+}
+
+/**
  * Render migration Job based on Secret annotations
  * Uses ns-utility image and scripts for better status reporting
  */
