@@ -1,4 +1,5 @@
-async function decoratorSync(req, res) {
+function createDecoratorSync(config) {
+  return async function decoratorSync(req, res) {
   const { object } = req.body;
   
   console.log('Decorator sync for PVC:', object.metadata?.name);
@@ -15,8 +16,8 @@ async function decoratorSync(req, res) {
     
     const enhancedAnnotations = {
       ...currentAnnotations,
-      'ns.mdn.io/backup-policy': currentAnnotations['ns.mdn.io/backup-policy'] || 'snapshot',
-      'ns.mdn.io/backup-ttl': currentAnnotations['ns.mdn.io/backup-ttl'] || '30d'
+      'ns.mdn.io/backup-policy': currentAnnotations['ns.mdn.io/backup-policy'] || config.backup.defaultPolicy,
+      'ns.mdn.io/backup-ttl': currentAnnotations['ns.mdn.io/backup-ttl'] || config.backup.defaultTtl
     };
     
     if (!currentAnnotations['ns.mdn.io/last-backup-check']) {
@@ -24,7 +25,7 @@ async function decoratorSync(req, res) {
     }
     
     if (!currentAnnotations['ns.mdn.io/backup-snapshot-class']) {
-      enhancedAnnotations['ns.mdn.io/backup-snapshot-class'] = 'csi-snapclass';
+      enhancedAnnotations['ns.mdn.io/backup-snapshot-class'] = config.backup.defaultSnapshotClass;
     }
 
     const pvc = {
@@ -51,4 +52,6 @@ async function decoratorSync(req, res) {
   }
 }
 
-module.exports = decoratorSync;
+}
+
+module.exports = createDecoratorSync;

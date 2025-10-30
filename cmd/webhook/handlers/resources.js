@@ -1,24 +1,24 @@
-function renderMongoDB(parent) {
+function renderMongoDB(parent, config) {
   const tenantId = parent.data.TENANT_ID;
   const namespace = parent.metadata.namespace;
   
-  // Storage configuration
-  const storageGi = parent.data.MONGO_STORAGE_GI || '10';
-  const storageClass = parent.data.MONGO_SC || 'standard';
+  // Storage configuration (tenant-specific overrides config defaults)
+  const storageGi = parent.data.MONGO_STORAGE_GI || config.storage.defaultMongoStorageGi;
+  const storageClass = parent.data.MONGO_SC || config.storage.defaultStorageClass;
   
-  // MongoDB configuration
-  const mongoImage = parent.data.MONGO_IMAGE || 'mongo:6';
-  const mongoImagePullPolicy = parent.data.MONGO_IMAGE_PULL_POLICY || 'IfNotPresent';
-  const mongoReplicas = parseInt(parent.data.MONGO_REPLICAS || '1');
+  // MongoDB configuration (tenant-specific overrides config defaults)
+  const mongoImage = parent.data.MONGO_IMAGE || config.images.mongodb;
+  const mongoImagePullPolicy = parent.data.MONGO_IMAGE_PULL_POLICY || config.imagePullPolicies.mongodb;
+  const mongoReplicas = parseInt(parent.data.MONGO_REPLICAS || config.storage.defaultMongoReplicas);
   
   // Extract version from image
   const mongoVersion = mongoImage.split(':')[1] || 'latest';
   
-  // Resource limits
-  const mongoCpuRequest = parent.data.MONGO_CPU_REQUEST || '100m';
-  const mongoCpuLimit = parent.data.MONGO_CPU_LIMIT || '500m';
-  const mongoMemRequest = parent.data.MONGO_MEM_REQUEST || '256Mi';
-  const mongoMemLimit = parent.data.MONGO_MEM_LIMIT || '512Mi';
+  // Resource limits (tenant-specific overrides config defaults)
+  const mongoCpuRequest = parent.data.MONGO_CPU_REQUEST || config.resources.mongodb.requests.cpu;
+  const mongoCpuLimit = parent.data.MONGO_CPU_LIMIT || config.resources.mongodb.limits.cpu;
+  const mongoMemRequest = parent.data.MONGO_MEM_REQUEST || config.resources.mongodb.requests.memory;
+  const mongoMemLimit = parent.data.MONGO_MEM_LIMIT || config.resources.mongodb.limits.memory;
   
   // PDB configuration
   const mongoPdbMinAvailable = parseInt(parent.data.MONGO_PDB_MIN_AVAILABLE || '1');
@@ -127,9 +127,9 @@ function renderMongoDB(parent) {
           initContainers: [
             {
               name: 'init-replica-set',
-              image: parent.data.NS_UTILITY_IMAGE || 'ns-utility:latest',
-              imagePullPolicy: parent.data.NS_UTILITY_IMAGE_PULL_POLICY || 'IfNotPresent',
-              command: ['init-replica-set.sh'],
+              image: parent.data.NS_UTILITY_IMAGE || config.images.nsUtility,
+              imagePullPolicy: parent.data.NS_UTILITY_IMAGE_PULL_POLICY || config.imagePullPolicies.nsUtility,
+              command: parent.data.INIT_REPLICA_SET_COMMAND ? parent.data.INIT_REPLICA_SET_COMMAND.split(',') : config.commands.initReplicaSet,
               env: [
                 {
                   name: 'MONGO_HOST',
@@ -151,7 +151,7 @@ function renderMongoDB(parent) {
               name: 'mongodb',
               image: mongoImage,
               imagePullPolicy: mongoImagePullPolicy,
-              command: ['mongod', '--replSet', 'rs0', '--bind_ip_all'],
+              command: parent.data.MONGODB_COMMAND ? parent.data.MONGODB_COMMAND.split(',') : config.commands.mongodb,
               ports: [
                 {
                   containerPort: 27017,
@@ -263,34 +263,36 @@ function renderMongoDB(parent) {
   return resources;
 }
 
-function renderNightscout(parent) {
+function renderNightscout(parent, config) {
   const tenantId = parent.data.TENANT_ID;
   const namespace = parent.metadata.namespace;
   
-  // Nightscout configuration
-  const nsImage = parent.data.NS_IMAGE || 'nightscout/cgm-remote-monitor:latest';
-  const nsImagePullPolicy = parent.data.NS_IMAGE_PULL_POLICY || 'IfNotPresent';
+  // Nightscout configuration (tenant-specific overrides config defaults)
+  const nsImage = parent.data.NS_IMAGE || config.images.nightscout;
+  const nsImagePullPolicy = parent.data.NS_IMAGE_PULL_POLICY || config.imagePullPolicies.nightscout;
   const nsReplicas = parseInt(parent.data.NS_REPLICAS || '1');
   const nsServiceType = parent.data.NS_SERVICE_TYPE || 'ClusterIP';
   
-  // Resource limits
-  const nsCpuRequest = parent.data.NS_CPU_REQUEST || '100m';
-  const nsCpuLimit = parent.data.NS_CPU_LIMIT || '500m';
-  const nsMemRequest = parent.data.NS_MEM_REQUEST || '256Mi';
-  const nsMemLimit = parent.data.NS_MEM_LIMIT || '512Mi';
+  // Resource limits (tenant-specific overrides config defaults)
+  const nsCpuRequest = parent.data.NS_CPU_REQUEST || config.resources.nightscout.requests.cpu;
+  const nsCpuLimit = parent.data.NS_CPU_LIMIT || config.resources.nightscout.limits.cpu;
+  const nsMemRequest = parent.data.NS_MEM_REQUEST || config.resources.nightscout.requests.memory;
+  const nsMemLimit = parent.data.NS_MEM_LIMIT || config.resources.nightscout.limits.memory;
   
   // PDB configuration
   const nsPdbMinAvailable = parseInt(parent.data.NS_PDB_MIN_AVAILABLE || '1');
   
-  // Health check sidecar configuration
-  const healthCheckEnabled = parent.data.POD_HEALTHCHECK_ENABLED !== 'false';
-  const healthCheckImage = parent.data.POD_HEALTHCHECK_IMAGE || 'pod-healthcheck:latest';
-  const healthCheckImagePullPolicy = parent.data.POD_HEALTHCHECK_IMAGE_PULL_POLICY || 'IfNotPresent';
-  const healthCheckPort = parseInt(parent.data.POD_HEALTHCHECK_PORT || '3000');
-  const healthCheckCpuRequest = parent.data.POD_HEALTHCHECK_CPU_REQUEST || '10m';
-  const healthCheckCpuLimit = parent.data.POD_HEALTHCHECK_CPU_LIMIT || '50m';
-  const healthCheckMemRequest = parent.data.POD_HEALTHCHECK_MEM_REQUEST || '32Mi';
-  const healthCheckMemLimit = parent.data.POD_HEALTHCHECK_MEM_LIMIT || '64Mi';
+  // Health check sidecar configuration (tenant-specific overrides config defaults)
+  const healthCheckEnabled = parent.data.POD_HEALTHCHECK_ENABLED !== undefined 
+    ? parent.data.POD_HEALTHCHECK_ENABLED !== 'false'
+    : config.podHealthcheck.enabled;
+  const healthCheckImage = parent.data.POD_HEALTHCHECK_IMAGE || config.images.podHealthcheck;
+  const healthCheckImagePullPolicy = parent.data.POD_HEALTHCHECK_IMAGE_PULL_POLICY || config.imagePullPolicies.podHealthcheck;
+  const healthCheckPort = parseInt(parent.data.POD_HEALTHCHECK_PORT || String(config.podHealthcheck.port));
+  const healthCheckCpuRequest = parent.data.POD_HEALTHCHECK_CPU_REQUEST || config.resources.podHealthcheck.requests.cpu;
+  const healthCheckCpuLimit = parent.data.POD_HEALTHCHECK_CPU_LIMIT || config.resources.podHealthcheck.limits.cpu;
+  const healthCheckMemRequest = parent.data.POD_HEALTHCHECK_MEM_REQUEST || config.resources.podHealthcheck.requests.memory;
+  const healthCheckMemLimit = parent.data.POD_HEALTHCHECK_MEM_LIMIT || config.resources.podHealthcheck.limits.memory;
   
   // Extract version from image
   const nsVersion = nsImage.split(':')[1] || 'latest';
@@ -524,17 +526,17 @@ function renderNightscout(parent) {
   return resources;
 }
 
-function renderKafkaTopics(parent) {
+function renderKafkaTopics(parent, config) {
   const tenantId = parent.data.TENANT_ID;
   const namespace = parent.metadata.namespace;
   const collections = (parent.data.CDC_COLLECTIONS || 'entries,treatments').split(',');
   
-  // Kafka configuration
-  const kafkaClusterName = parent.data.KAFKA_CLUSTER_NAME || 'kafka-cluster';
-  const partitionsEntries = parseInt(parent.data.CDC_PARTITIONS_ENTRIES || '3');
+  // Kafka configuration (tenant-specific overrides config defaults)
+  const kafkaClusterName = parent.data.KAFKA_CLUSTER_NAME || config.cdc.kafkaCluster;
+  const partitionsEntries = parseInt(parent.data.CDC_PARTITIONS_ENTRIES || String(config.cdc.topicPartitions));
   const partitionsTreatments = parseInt(parent.data.CDC_PARTITIONS_TREATMENTS || '1');
   const retentionMs = parent.data.CDC_RETENTION_MS || '604800000';
-  const topicReplicas = parseInt(parent.data.KAFKA_TOPIC_REPLICAS || '3');
+  const topicReplicas = parseInt(parent.data.KAFKA_TOPIC_REPLICAS || String(config.cdc.topicReplicas));
   const cdcVersion = parent.data.CDC_VERSION || 'v1beta2';
 
   const topics = [];
@@ -595,13 +597,13 @@ function renderKafkaTopics(parent) {
   return topics;
 }
 
-function renderKafkaConnector(parent) {
+function renderKafkaConnector(parent, config) {
   const tenantId = parent.data.TENANT_ID;
   const namespace = parent.metadata.namespace;
   const collections = (parent.data.CDC_COLLECTIONS || 'entries,treatments').split(',');
 
-  // Kafka configuration
-  const kafkaConnectClusterName = parent.data.KAFKA_CONNECT_CLUSTER_NAME || 'connect-cluster';
+  // Kafka configuration (tenant-specific overrides config defaults)
+  const kafkaConnectClusterName = parent.data.KAFKA_CONNECT_CLUSTER_NAME || config.cdc.kafkaConnectCluster;
   const cdcTasksMax = parseInt(parent.data.CDC_TASKS_MAX || '1');
   const cdcVersion = parent.data.CDC_VERSION || 'v1beta2';
   
@@ -623,7 +625,7 @@ function renderKafkaConnector(parent) {
     'ns.mdn.io/tenant': tenantId
   });
 
-  const config = {
+  const connectorConfig = {
     'database': 'ns',
     'collection': collections.join(','),
     'pipeline': JSON.stringify([
@@ -644,10 +646,10 @@ function renderKafkaConnector(parent) {
   };
 
   if (useExternalConfig) {
-    config['connection.uri'] = `\${file:/opt/kafka/external-configuration/mongo-credentials/${uriKey}}`;
+    connectorConfig['connection.uri'] = `\${file:/opt/kafka/external-configuration/mongo-credentials/${uriKey}}`;
   } else {
     // Note: In production, use externalConfiguration to mount credentials from a Secret
-    config['connection.uri'] = `mongodb://nsuser:CHANGE_THIS_PASSWORD@${mongoHost}:27017/ns?replicaSet=rs0&authSource=admin`;
+    connectorConfig['connection.uri'] = `mongodb://nsuser:CHANGE_THIS_PASSWORD@${mongoHost}:27017/ns?replicaSet=rs0&authSource=admin`;
   }
 
   const connector = {
@@ -661,27 +663,27 @@ function renderKafkaConnector(parent) {
     spec: {
       class: 'com.mongodb.kafka.connect.MongoSourceConnector',
       tasksMax: cdcTasksMax,
-      config: config
+      config: connectorConfig
     }
   };
 
   return connector;
 }
 
-function renderMigrationJob(parent) {
+function renderMigrationJob(parent, config) {
   const tenantId = parent.data.TENANT_ID;
   const namespace = parent.metadata.namespace;
   
   const migrationSourceUri = parent.data.MIGRATION_SOURCE_URI;
   const migrationSourceSecret = parent.data.MIGRATION_SOURCE_SECRET;
   const migrationMethod = parent.data.MIGRATION_METHOD || 'mongodump-restore';
-  const utilityImage = parent.data.NS_UTILITY_IMAGE || 'ns-utility:latest';
-  const utilityImagePullPolicy = parent.data.NS_UTILITY_IMAGE_PULL_POLICY || 'IfNotPresent';
+  const utilityImage = parent.data.NS_UTILITY_IMAGE || config.images.migrationJob;
+  const utilityImagePullPolicy = parent.data.NS_UTILITY_IMAGE_PULL_POLICY || config.imagePullPolicies.migrationJob;
   const utilityImagePullSecret = parent.data.IMAGE_PULL_SECRET;
-  const utilityCpuRequest = parent.data.NS_UTILITY_CPU_REQUEST || '100m';
-  const utilityCpuLimit = parent.data.NS_UTILITY_CPU_LIMIT || '500m';
-  const utilityMemRequest = parent.data.NS_UTILITY_MEM_REQUEST || '256Mi';
-  const utilityMemLimit = parent.data.NS_UTILITY_MEM_LIMIT || '512Mi';
+  const utilityCpuRequest = parent.data.NS_UTILITY_CPU_REQUEST || config.resources.migrationJob.requests.cpu;
+  const utilityCpuLimit = parent.data.NS_UTILITY_CPU_LIMIT || config.resources.migrationJob.limits.cpu;
+  const utilityMemRequest = parent.data.NS_UTILITY_MEM_REQUEST || config.resources.migrationJob.requests.memory;
+  const utilityMemLimit = parent.data.NS_UTILITY_MEM_LIMIT || config.resources.migrationJob.limits.memory;
   
   if (!migrationSourceUri && !migrationSourceSecret) {
     console.error(`Migration enabled for tenant ${tenantId} but neither MIGRATION_SOURCE_URI nor MIGRATION_SOURCE_SECRET provided`);

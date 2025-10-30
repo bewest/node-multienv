@@ -415,6 +415,282 @@ kubectl logs <pod-name> -c init-replica-set -n hosted-tenants
 # 3. Resource constraints (CPU/memory too low)
 ```
 
+## Webhook Configuration Environment Variables
+
+The Metacontroller webhook server (cmd/webhook/server.js) uses environment variables to configure global defaults for all tenants. These defaults are applied when tenant-specific ConfigMap values are not provided.
+
+### Server Configuration
+
+**WEBHOOK_PORT**
+- **Description**: HTTP port for the webhook server
+- **Default**: `3000`
+- **Example**: `8080`, `3000`
+- **Note**: Must match the Metacontroller webhook configuration
+
+### Global Image Defaults
+
+These environment variables set cluster-wide defaults. Tenant ConfigMaps can override any of these values.
+
+**DEFAULT_MONGO_IMAGE**
+- **Description**: Default MongoDB image for all tenants
+- **Default**: `mongo:6`
+- **Override**: Set `MONGO_IMAGE` in tenant ConfigMap
+
+**DEFAULT_MONGO_IMAGE_PULL_POLICY**
+- **Description**: Default image pull policy for MongoDB
+- **Default**: `IfNotPresent`
+- **Override**: Set `MONGO_IMAGE_PULL_POLICY` in tenant ConfigMap
+
+**DEFAULT_NS_IMAGE**
+- **Description**: Default Nightscout application image for all tenants
+- **Default**: `nightscout/cgm-remote-monitor:latest`
+- **Override**: Set `NS_IMAGE` in tenant ConfigMap
+
+**DEFAULT_NS_IMAGE_PULL_POLICY**
+- **Description**: Default image pull policy for Nightscout
+- **Default**: `IfNotPresent`
+- **Override**: Set `NS_IMAGE_PULL_POLICY` in tenant ConfigMap
+
+**DEFAULT_NS_UTILITY_IMAGE**
+- **Description**: Default utility container image for initialization and migration
+- **Default**: `ns-utility:latest`
+- **Override**: Set `NS_UTILITY_IMAGE` in tenant ConfigMap
+
+**DEFAULT_NS_UTILITY_IMAGE_PULL_POLICY**
+- **Description**: Default image pull policy for utility container
+- **Default**: `IfNotPresent`
+- **Override**: Set `NS_UTILITY_IMAGE_PULL_POLICY` in tenant ConfigMap
+
+**DEFAULT_POD_HEALTHCHECK_IMAGE**
+- **Description**: Default pod health check sidecar image
+- **Default**: `pod-healthcheck:latest`
+- **Override**: Set `POD_HEALTHCHECK_IMAGE` in tenant ConfigMap
+
+**DEFAULT_POD_HEALTHCHECK_IMAGE_PULL_POLICY**
+- **Description**: Default image pull policy for pod health check sidecar
+- **Default**: `IfNotPresent`
+- **Override**: Set `POD_HEALTHCHECK_IMAGE_PULL_POLICY` in tenant ConfigMap
+
+### Global Resource Defaults (MongoDB)
+
+**DEFAULT_MONGO_CPU_REQUEST**
+- **Default**: `100m`
+- **Override**: Set `MONGO_CPU_REQUEST` in tenant ConfigMap
+
+**DEFAULT_MONGO_CPU_LIMIT**
+- **Default**: `500m`
+- **Override**: Set `MONGO_CPU_LIMIT` in tenant ConfigMap
+
+**DEFAULT_MONGO_MEM_REQUEST**
+- **Default**: `256Mi`
+- **Override**: Set `MONGO_MEM_REQUEST` in tenant ConfigMap
+
+**DEFAULT_MONGO_MEM_LIMIT**
+- **Default**: `512Mi`
+- **Override**: Set `MONGO_MEM_LIMIT` in tenant ConfigMap
+
+### Global Resource Defaults (Nightscout)
+
+**DEFAULT_NS_CPU_REQUEST**
+- **Default**: `100m`
+- **Override**: Set `NS_CPU_REQUEST` in tenant ConfigMap
+
+**DEFAULT_NS_CPU_LIMIT**
+- **Default**: `500m`
+- **Override**: Set `NS_CPU_LIMIT` in tenant ConfigMap
+
+**DEFAULT_NS_MEM_REQUEST**
+- **Default**: `256Mi`
+- **Override**: Set `NS_MEM_REQUEST` in tenant ConfigMap
+
+**DEFAULT_NS_MEM_LIMIT**
+- **Default**: `512Mi`
+- **Override**: Set `NS_MEM_LIMIT` in tenant ConfigMap
+
+### Global Resource Defaults (Utility Container)
+
+**DEFAULT_NS_UTILITY_CPU_REQUEST**
+- **Default**: `100m`
+- **Override**: Set `NS_UTILITY_CPU_REQUEST` in tenant ConfigMap
+
+**DEFAULT_NS_UTILITY_CPU_LIMIT**
+- **Default**: `500m`
+- **Override**: Set `NS_UTILITY_CPU_LIMIT` in tenant ConfigMap
+
+**DEFAULT_NS_UTILITY_MEM_REQUEST**
+- **Default**: `256Mi`
+- **Override**: Set `NS_UTILITY_MEM_REQUEST` in tenant ConfigMap
+
+**DEFAULT_NS_UTILITY_MEM_LIMIT**
+- **Default**: `512Mi`
+- **Override**: Set `NS_UTILITY_MEM_LIMIT` in tenant ConfigMap
+
+### Global Resource Defaults (Pod Health Check Sidecar)
+
+**DEFAULT_POD_HEALTHCHECK_CPU_REQUEST**
+- **Default**: `10m`
+- **Override**: Set `POD_HEALTHCHECK_CPU_REQUEST` in tenant ConfigMap
+
+**DEFAULT_POD_HEALTHCHECK_CPU_LIMIT**
+- **Default**: `50m`
+- **Override**: Set `POD_HEALTHCHECK_CPU_LIMIT` in tenant ConfigMap
+
+**DEFAULT_POD_HEALTHCHECK_MEM_REQUEST**
+- **Default**: `16Mi`
+- **Override**: Set `POD_HEALTHCHECK_MEM_REQUEST` in tenant ConfigMap
+
+**DEFAULT_POD_HEALTHCHECK_MEM_LIMIT**
+- **Default**: `64Mi`
+- **Override**: Set `POD_HEALTHCHECK_MEM_LIMIT` in tenant ConfigMap
+
+### Pod Health Check Command Configuration
+
+**DEFAULT_POD_HEALTHCHECK_COMMAND**
+- **Description**: Command to run for pod health check sidecar (JSON array format)
+- **Default**: `["node", "cmd/pod-healthcheck/server.js"]`
+- **Override**: Set `POD_HEALTHCHECK_COMMAND` in tenant ConfigMap
+- **Example**: `["node", "cmd/pod-healthcheck/server.js"]`
+- **Note**: Must be valid JSON array when set via environment variable
+
+**DEFAULT_POD_HEALTHCHECK_ARGS**
+- **Description**: Arguments for pod health check command (JSON array format)
+- **Default**: `[]`
+- **Override**: Set `POD_HEALTHCHECK_ARGS` in tenant ConfigMap
+- **Example**: `["--verbose", "--debug"]`
+- **Note**: Must be valid JSON array when set via environment variable
+
+### Backup Policy Defaults
+
+**DEFAULT_BACKUP_POLICY**
+- **Description**: Default backup policy for PVCs managed by DecoratorController
+- **Default**: `snapshot`
+- **Options**: `snapshot`, `skip`
+- **Note**: Applied to MongoDB PVCs via decorator webhook
+
+**DEFAULT_BACKUP_TTL**
+- **Description**: Default time-to-live for backup snapshots
+- **Default**: `30d`
+- **Format**: Number followed by unit (d=days, h=hours, m=minutes)
+- **Example**: `7d`, `90d`, `1h`
+
+**DEFAULT_BACKUP_SNAPSHOT_CLASS**
+- **Description**: Default VolumeSnapshotClass for creating snapshots
+- **Default**: `csi-snapclass`
+- **Note**: Must match an existing VolumeSnapshotClass in your cluster
+
+### CDC (Change Data Capture) Defaults
+
+**DEFAULT_KAFKA_CONNECT_CLUSTER**
+- **Description**: Default Kafka Connect cluster name for CDC
+- **Default**: `kafka-connect`
+- **Override**: Set `KAFKA_CONNECT_CLUSTER_NAME` in tenant ConfigMap
+- **Note**: Must match the Strimzi KafkaConnect resource name
+
+## Webhook Environment Variable Deployment
+
+### Kubernetes Deployment Example
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: metacontroller-webhook
+  namespace: metacontroller-system
+spec:
+  template:
+    spec:
+      containers:
+      - name: webhook
+        image: nightscout-webhook:v1.0.0
+        env:
+        # Server config
+        - name: WEBHOOK_PORT
+          value: "3000"
+        
+        # Global image defaults
+        - name: DEFAULT_MONGO_IMAGE
+          value: "mongo:6"
+        - name: DEFAULT_NS_IMAGE
+          value: "nightscout/cgm-remote-monitor:15.0.0"
+        - name: DEFAULT_NS_UTILITY_IMAGE
+          value: "ghcr.io/myorg/ns-utility:v1.0.0"
+        - name: DEFAULT_POD_HEALTHCHECK_IMAGE
+          value: "ghcr.io/myorg/pod-healthcheck:v1.0.0"
+        
+        # Global pull policies (production: IfNotPresent)
+        - name: DEFAULT_MONGO_IMAGE_PULL_POLICY
+          value: "IfNotPresent"
+        - name: DEFAULT_NS_IMAGE_PULL_POLICY
+          value: "IfNotPresent"
+        
+        # Backup defaults
+        - name: DEFAULT_BACKUP_POLICY
+          value: "snapshot"
+        - name: DEFAULT_BACKUP_TTL
+          value: "90d"
+        - name: DEFAULT_BACKUP_SNAPSHOT_CLASS
+          value: "csi-snapclass"
+        
+        # CDC defaults
+        - name: DEFAULT_KAFKA_CONNECT_CLUSTER
+          value: "kafka-connect-prod"
+        
+        # Optional: Override resource defaults for specific tier
+        - name: DEFAULT_MONGO_MEM_LIMIT
+          value: "1Gi"
+        - name: DEFAULT_NS_MEM_LIMIT
+          value: "1Gi"
+```
+
+### ConfigMap for Environment Variables
+
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: webhook-config
+  namespace: metacontroller-system
+data:
+  # Image configuration
+  DEFAULT_MONGO_IMAGE: "mongo:6"
+  DEFAULT_NS_IMAGE: "nightscout/cgm-remote-monitor:15.0.0"
+  DEFAULT_NS_UTILITY_IMAGE: "ns-utility:v1.0.0"
+  DEFAULT_POD_HEALTHCHECK_IMAGE: "pod-healthcheck:v1.0.0"
+  
+  # Backup configuration
+  DEFAULT_BACKUP_POLICY: "snapshot"
+  DEFAULT_BACKUP_TTL: "90d"
+  DEFAULT_BACKUP_SNAPSHOT_CLASS: "csi-snapclass"
+  
+  # CDC configuration
+  DEFAULT_KAFKA_CONNECT_CLUSTER: "kafka-connect"
+```
+
+Reference in Deployment:
+```yaml
+envFrom:
+- configMapRef:
+    name: webhook-config
+```
+
+## Configuration Hierarchy
+
+The system uses a three-tier configuration hierarchy:
+
+1. **Webhook Environment Variables** (lowest priority) - Global defaults for entire cluster
+2. **Webhook Config Defaults** (hardcoded fallbacks) - Built-in defaults in cmd/webhook/config.js
+3. **Tenant ConfigMap** (highest priority) - Tenant-specific overrides
+
+Example flow for MongoDB image selection:
+1. Check tenant ConfigMap `MONGO_IMAGE` field → if present, use it
+2. Check webhook env var `DEFAULT_MONGO_IMAGE` → if present, use it
+3. Use hardcoded default from config.js → `mongo:6`
+
+This allows operators to:
+- Set cluster-wide standards via webhook environment variables
+- Override for specific tiers or tenants via ConfigMaps
+- Maintain sensible fallback defaults in code
+
 ## Best Practices
 
 1. **Use version tags in production**: Never use `:latest` in production
@@ -425,6 +701,9 @@ kubectl logs <pod-name> -c init-replica-set -n hosted-tenants
 4. **Use pull secrets for private registries**: Keep credentials in Secrets, not ConfigMaps
 5. **Test migrations with increased resources**: Migration jobs need more memory than runtime
 6. **Version your utility container**: Tag utility images with versions for rollback capability
+7. **Configure webhook defaults once**: Set global standards via webhook environment variables
+8. **Override per tier**: Use ConfigMap parameters for tier-specific requirements (basic, premium, enterprise)
+9. **Keep backup policies consistent**: Use webhook defaults unless tenant has specific compliance requirements
 
 ## See Also
 

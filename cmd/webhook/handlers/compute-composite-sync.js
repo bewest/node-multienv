@@ -20,7 +20,8 @@
 
 const { renderNightscout, renderKafkaTopics, renderKafkaConnector } = require('./resources');
 
-async function computeCompositeSync(req, res) {
+function createComputeCompositeSync(config) {
+  return async function computeCompositeSync(req, res) {
   const { parent, children, related } = req.body;
   
   const tenantId = parent.metadata.name;
@@ -84,13 +85,13 @@ async function computeCompositeSync(req, res) {
     const enrichedParent = enrichWithStorageInfo(parent, storageSecret, storageAccountLabel);
     
     // Render Nightscout resources
-    response.children.push(...renderNightscout(enrichedParent));
+    response.children.push(...renderNightscout(enrichedParent, config));
 
     // Optional: CDC resources if enabled
     const cdcEnabled = parent.data?.CDC_ENABLED === 'true';
     if (cdcEnabled && mongoReadiness.ready) {
-      response.children.push(...renderKafkaTopics(enrichedParent));
-      response.children.push(renderKafkaConnector(enrichedParent));
+      response.children.push(...renderKafkaTopics(enrichedParent, config));
+      response.children.push(renderKafkaConnector(enrichedParent, config));
     }
 
     // Build status
@@ -274,4 +275,6 @@ function buildStatus(parent, state) {
   };
 }
 
-module.exports = computeCompositeSync;
+}
+
+module.exports = createComputeCompositeSync;

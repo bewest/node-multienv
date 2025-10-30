@@ -5,13 +5,14 @@ kc.loadFromDefault();
 const k8sApi = kc.makeApiClient(k8s.CoreV1Api);
 const snapshotApi = kc.makeApiClient(k8s.CustomObjectsApi);
 
-async function decoratorFinalize(req, res) {
+function createDecoratorFinalize(config) {
+  return async function decoratorFinalize(req, res) {
   const { object, attachments } = req.body;
   
   console.log('Decorator finalize for PVC:', object.metadata?.name);
   
   try {
-    const backupPolicy = object.metadata?.annotations?.['ns.mdn.io/backup-policy'] || 'snapshot';
+    const backupPolicy = object.metadata?.annotations?.['ns.mdn.io/backup-policy'] || config.backup.defaultPolicy;
     
     if (backupPolicy === 'skip') {
       console.log('Backup policy is skip, removing finalizer');
@@ -41,7 +42,7 @@ async function decoratorFinalize(req, res) {
       console.log(`Creating VolumeSnapshot ${snapshotName} for PVC ${pvcName}`);
       
       // Get snapshot class from PVC annotation or use default
-      const snapshotClass = object.metadata?.annotations?.['ns.mdn.io/backup-snapshot-class'] || 'csi-snapclass';
+      const snapshotClass = object.metadata?.annotations?.['ns.mdn.io/backup-snapshot-class'] || config.backup.defaultSnapshotClass;
       
       // Get metadata from PVC labels
       const tenantId = object.metadata?.labels?.['ns.mdn.io/tenant'] || 'unknown';
@@ -105,4 +106,6 @@ async function decoratorFinalize(req, res) {
   }
 }
 
-module.exports = decoratorFinalize;
+}
+
+module.exports = createDecoratorFinalize;

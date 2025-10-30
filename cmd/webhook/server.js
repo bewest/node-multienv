@@ -1,16 +1,25 @@
 const restify = require('restify');
 const k8s = require('@kubernetes/client-node');
-const storageCompositeSync = require('./handlers/storage-composite-sync');
-const computeCompositeSync = require('./handlers/compute-composite-sync');
-const decoratorSync = require('./handlers/decorator-sync');
-const decoratorFinalize = require('./handlers/decorator-finalize');
+const config = require('./config');
+
+// Import handler factories
+const createStorageCompositeSync = require('./handlers/storage-composite-sync');
+const createComputeCompositeSync = require('./handlers/compute-composite-sync');
+const createDecoratorSync = require('./handlers/decorator-sync');
+const createDecoratorFinalize = require('./handlers/decorator-finalize');
+
+// Create handlers with config
+const storageCompositeSync = createStorageCompositeSync(config);
+const computeCompositeSync = createComputeCompositeSync(config);
+const decoratorSync = createDecoratorSync(config);
+const decoratorFinalize = createDecoratorFinalize(config);
 
 const server = restify.createServer({
-  name: 'metacontroller-webhook',
+  name: config.server.name,
   version: '1.0.0',
 });
 
-const port = process.env.PORT || 3000;
+const port = config.server.port;
 
 server.use(restify.plugins.bodyParser());
 

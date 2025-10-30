@@ -20,7 +20,8 @@
 
 const { renderMongoDB } = require('./resources');
 
-async function storageCompositeSync(req, res) {
+function createStorageCompositeSync(config) {
+  return async function storageCompositeSync(req, res) {
   const { parent, children, related } = req.body;
   
   const storageAccount = parent.metadata.name;
@@ -64,7 +65,7 @@ async function storageCompositeSync(req, res) {
     };
 
     // Extract configuration from Secret
-    const config = extractStorageConfig(parent);
+    const storageConfig = extractStorageConfig(parent);
     const storageType = parent.metadata.annotations?.['ns.mdn.io/storage-type'] || 'dedicated';
     
     // Render MongoDB resources ONLY for dedicated storage
@@ -85,7 +86,7 @@ async function storageCompositeSync(req, res) {
       };
     } else {
       console.log(`  Storage type: dedicated - creating MongoDB StatefulSet`);
-      const mongoResources = renderMongoDB(config);
+      const mongoResources = renderMongoDB(storageConfig, config);
       response.children.push(...mongoResources);
       
       // Check MongoDB readiness
@@ -440,4 +441,6 @@ function countTenantUsage(related, storageAccountLabel) {
   };
 }
 
-module.exports = storageCompositeSync;
+}
+
+module.exports = createStorageCompositeSync;
