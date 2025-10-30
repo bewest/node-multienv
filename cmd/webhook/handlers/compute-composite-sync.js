@@ -35,13 +35,24 @@ function createComputeCompositeSync(config) {
       children: [],
       relatedResourceRules: [
         {
-          // Discover storage Secret (provides MongoDB credentials)
+          // Discover storage Secret (for storage type metadata)
           apiVersion: 'v1',
           resource: 'secrets',
           labelSelector: {
             matchLabels: {
               'storage.nightscout.org/account': storageAccountLabel,
               'ns.mdn.io/composite': 'storage'
+            }
+          }
+        },
+        {
+          // Discover app-credentials Secret (provides MongoDB credentials for Nightscout)
+          apiVersion: 'v1',
+          resource: 'secrets',
+          labelSelector: {
+            matchLabels: {
+              'storage.nightscout.org/account': storageAccountLabel,
+              'ns.mdn.io/credential-type': 'application'
             }
           }
         },
@@ -59,7 +70,7 @@ function createComputeCompositeSync(config) {
       ]
     };
 
-    // Find storage Secret from related resources
+    // Find storage Secret from related resources (for metadata)
     const storageSecret = findStorageSecret(related, storageAccountLabel);
     
     if (!storageSecret) {
@@ -78,11 +89,30 @@ function createComputeCompositeSync(config) {
       return;
     }
 
+    // Find app-credentials Secret from related resources (for Nightscout credentials)
+    const appCredentialsSecret = findAppCredentialsSecret(related, storageAccountLabel);
+    
+    if (!appCredentialsSecret) {
+      console.warn(`App credentials Secret not found for account: ${storageAccountLabel}`);
+      response.status = {
+        observedGeneration: parent.metadata?.generation,
+        conditions: [{
+          type: 'Ready',
+          status: 'False',
+          reason: 'AppCredentialsNotFound',
+          message: `App credentials Secret not found for account ${storageAccountLabel}. Ensure storage Secret is initialized.`,
+          lastTransitionTime: new Date().toISOString()
+        }]
+      };
+      res.send(response);
+      return;
+    }
+
     // Check MongoDB readiness from related StatefulSet
     const mongoReadiness = checkMongoReadinessFromRelated(related, storageAccountLabel);
     
     // Enhance parent with storage information
-    const enrichedParent = enrichWithStorageInfo(parent, storageSecret, storageAccountLabel);
+    const enrichedParent = enrichWithStorageInfo(parent, storageSecret, appCredentialsSecret, storageAccountLabel);
     
     // Render Nightscout resources
     response.children.push(...renderNightscout(enrichedParent, config));
@@ -124,6 +154,28 @@ function findStorageSecret(related, storageAccountLabel) {
     
     if (accountLabel === storageAccountLabel && compositeLabel === 'storage') {
       console.log(`Found storage Secret: ${name} for account: ${storageAccountLabel}`);
+      return secret;
+    }
+  }
+  
+  return null;
+}
+
+/**
+ * Find app-credentials Secret from related resources
+ */
+function findAppCredentialsSecret(related, storageAccountLabel) {
+  if (!related || !related['Secret.v1']) {
+    return null;
+  }
+  
+  const secrets = related['Secret.v1'];
+  for (const [name, secret] of Object.entries(secrets)) {
+    const accountLabel = secret.metadata?.labels?.['storage.nightscout.org/account'];
+    const credentialType = secret.metadata?.labels?.['ns.mdn.io/credential-type'];
+    
+    if (accountLabel === storageAccountLabel && credentialType === 'application') {
+      console.log(`Found app-credentials Secret: ${name} for account: ${storageAccountLabel}`);
       return secret;
     }
   }
@@ -211,31 +263,29 @@ function checkMongoReadinessFromRelated(related, storageAccountLabel) {
 
 /**
  * Enrich parent ConfigMap with storage information
+ * Uses app-credentials Secret for MongoDB connection (not storage Secret)
  */
-function enrichWithStorageInfo(parent, storageSecret, storageAccountLabel) {
-  // Decode Secret data
-  const secretData = {};
-  if (storageSecret.data) {
-    Object.keys(storageSecret.data).forEach(key => {
-      secretData[key] = Buffer.from(storageSecret.data[key], 'base64').toString('utf-8');
+function enrichWithStorageInfo(parent, storageSecret, appCredentialsSecret, storageAccountLabel) {
+  // Get storage type from storage Secret metadata
+  const storageType = storageSecret.metadata?.annotations?.['ns.mdn.io/storage-type'] || 'dedicated';
+  
+  // Decode app credentials to get MONGO_HOST (for reference)
+  const appCredentials = {};
+  if (appCredentialsSecret.data) {
+    Object.keys(appCredentialsSecret.data).forEach(key => {
+      appCredentials[key] = Buffer.from(appCredentialsSecret.data[key], 'base64').toString('utf-8');
     });
   }
-  
-  // Check if using shared MongoDB (no dedicated StatefulSet)
-  const storageType = storageSecret.metadata?.annotations?.['ns.mdn.io/storage-type'] || 'dedicated';
-  const mongoHost = storageType === 'shared' 
-    ? secretData.mongoHost || 'shared-mongodb'
-    : `${storageAccountLabel}-mongodb`;
   
   return {
     ...parent,
     data: {
       ...parent.data,
       TENANT_ID: parent.metadata.name,
-      // Storage connection info (credentials come from Secret reference)
-      MONGO_HOST: mongoHost,
+      // App credentials Secret will be projected into Nightscout containers
+      APP_CREDENTIALS_SECRET: appCredentialsSecret.metadata.name,
+      MONGO_HOST: appCredentials.MONGO_HOST || `${storageAccountLabel}-mongodb`,
       STORAGE_ACCOUNT: storageAccountLabel,
-      STORAGE_SECRET: storageSecret.metadata.name,
       STORAGE_TYPE: storageType
     }
   };

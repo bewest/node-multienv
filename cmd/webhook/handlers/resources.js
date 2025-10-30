@@ -366,7 +366,14 @@ function renderNightscout(parent, config) {
             name: 'http'
           }
         ],
-        env: [
+        envFrom: parent.data.APP_CREDENTIALS_SECRET ? [
+          {
+            secretRef: {
+              name: parent.data.APP_CREDENTIALS_SECRET
+            }
+          }
+        ] : undefined,
+        env: parent.data.APP_CREDENTIALS_SECRET ? undefined : [
           {
             name: 'MONGO_CONNECTION',
             value: `mongodb://$(MONGO_USER):$(MONGO_PASS)@${mongoHost}:27017/$(MONGO_DB)?replicaSet=rs0`
