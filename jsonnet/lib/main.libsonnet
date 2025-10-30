@@ -4,5 +4,4 @@
   rbac: import 'rbac.libsonnet',
   config: import 'config.libsonnet',
   gen4: import 'gen4.libsonnet',
-  k: import 'k.libsonnet',
 }
