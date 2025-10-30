@@ -99,7 +99,7 @@ function createStorageCompositeSync(config) {
       
       if (migrationNeeded && migrationSourceUri && !migrationComplete && mongoReadiness.ready) {
         console.log(`  Migration needed - rendering migration Job`);
-        const migrationJob = renderMigrationJob(parent, storageAccount, migrationSourceUri);
+        const migrationJob = renderMigrationJob(parent, storageAccount, migrationSourceUri, config);
         response.children.push(migrationJob);
       }
     }
@@ -233,8 +233,9 @@ function checkMongoReadiness(children, storageAccount) {
 
 /**
  * Render migration Job based on Secret annotations
+ * Uses ns-utility image and scripts for better status reporting
  */
-function renderMigrationJob(secret, storageAccount, sourceUri) {
+function renderMigrationJob(secret, storageAccount, sourceUri, config) {
   const namespace = secret.metadata.namespace;
   const jobName = `${storageAccount}-migration`;
   
@@ -252,8 +253,12 @@ function renderMigrationJob(secret, storageAccount, sourceUri) {
   const targetDb = secretData.database || 'nightscout';
   const targetUri = `mongodb://${targetUser}:${targetPassword}@${targetHost}:27017/${targetDb}?replicaSet=rs0`;
   
-  const migrationImage = secret.metadata.annotations?.['ns.mdn.io/migration-image'] || 'mongo:6';
+  // Use ns-utility image from config
+  const migrationImage = config.images.nsUtility;
   const migrationMethod = secret.metadata.annotations?.['ns.mdn.io/migration-method'] || 'mongodump-restore';
+  
+  // Get source database name from annotation or default
+  const sourceDb = secret.metadata.annotations?.['ns.mdn.io/migration-source-db'] || 'nightscout';
   
   return {
     apiVersion: 'batch/v1',
@@ -267,7 +272,10 @@ function renderMigrationJob(secret, storageAccount, sourceUri) {
         'ns.mdn.io/composite': 'storage'
       },
       annotations: {
-        'ns.mdn.io/created-at': new Date().toISOString()
+        'ns.mdn.io/created-at': new Date().toISOString(),
+        'ns.mdn.io/migration-method': migrationMethod,
+        'ns.mdn.io/migration-source-db': sourceDb,
+        'ns.mdn.io/migration-target-db': targetDb
       }
     },
     spec: {
@@ -285,33 +293,24 @@ function renderMigrationJob(secret, storageAccount, sourceUri) {
           containers: [{
             name: 'migration',
             image: migrationImage,
-            command: ['/bin/sh', '-c'],
-            args: [
-              `
-              echo "Starting migration from shared MongoDB to dedicated instance..."
-              echo "Source: ${sourceUri.replace(/\/\/.*@/, '//*****@')}"
-              echo "Target: ${targetUri.replace(/\/\/.*@/, '//*****@')}"
-              echo "Method: ${migrationMethod}"
-              
-              mongodump --uri="${sourceUri}" --archive | mongorestore --uri="${targetUri}" --archive
-              
-              if [ $? -eq 0 ]; then
-                echo "Migration completed successfully"
-                exit 0
-              else
-                echo "Migration failed"
-                exit 1
-              fi
-              `
+            imagePullPolicy: config.images.nsUtilityPullPolicy,
+            env: [
+              { name: 'MIGRATION_SOURCE_URI', value: sourceUri },
+              { name: 'MIGRATION_TARGET_URI', value: targetUri },
+              { name: 'MIGRATION_SOURCE_DB', value: sourceDb },
+              { name: 'MIGRATION_TARGET_DB', value: targetDb },
+              { name: 'MIGRATION_METHOD', value: migrationMethod },
+              { name: 'STORAGE_ACCOUNT', value: storageAccount }
             ],
+            command: ['/scripts/migrate-database.sh'],
             resources: {
               requests: {
-                cpu: '100m',
-                memory: '256Mi'
+                cpu: config.resources.nsUtility.cpuRequest,
+                memory: config.resources.nsUtility.memRequest
               },
               limits: {
-                cpu: '500m',
-                memory: '512Mi'
+                cpu: config.resources.nsUtility.cpuLimit,
+                memory: config.resources.nsUtility.memLimit
               }
             }
           }]
