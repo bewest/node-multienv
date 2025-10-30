@@ -47,6 +47,11 @@ The platform employs a **two-composite architecture** (Storage and Compute) to s
 - **Provisioner API Facade**: A REST API provides external systems with endpoints for account and site provisioning, abstracting the underlying two-composite architecture.
 - **Resolver Interface**: Routes Nightscout traffic using Consul for service discovery, ensuring efficient and scalable traffic serving on worker nodes.
 - **Pod Health Check Sidecar**: Lightweight sidecar container injected into Nightscout pods to provide localhost-based health validation for Consul, eliminating DNS queries and API calls to central controllers. This design removes critical bottlenecks at scale and enables linear scaling to 10,000+ tenants.
+- **Two-Secret Architecture**: Gen 4 implements credential separation for enhanced security:
+  - **Storage Secret** (parent): Contains root/admin MongoDB credentials used only by webhook and orchestration Jobs (migration, user initialization). Never projected into application containers.
+  - **App-Credentials Secret** (`<storage-account>-app-credentials`): Contains only the credentials Nightscout needs (MONGODB_URI, MONGO_DATABASE, connection details). Projected into Nightscout containers via `envFrom`. Generated automatically by the storage composite webhook.
+  - **Security Benefits**: Principle of least privilege (apps never see root credentials), separation of concerns (orchestration vs application access), flexible RBAC (different permissions per Secret type).
+  - **Database Naming**: Each dedicated MongoDB instance uses a short, deterministic database name (e.g., `ns-a3f7`) generated from the storage account hash, ensuring consistency across migration, initialization, and application access.
 
 ## Documentation
 
