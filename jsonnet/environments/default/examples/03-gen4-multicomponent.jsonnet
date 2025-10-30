@@ -6,8 +6,8 @@
 // Deploy with:
 //   tk apply environments/production-multicomponent
 
-local config = import '../lib/config.libsonnet';
-local gen4 = import '../lib/gen4-addon.libsonnet';
+local config = import '../../lib/config.libsonnet';
+local gen4 = import '../../lib/gen4.libsonnet';
 
 (import '../main.jsonnet.original') + config + {
   _config+:: {

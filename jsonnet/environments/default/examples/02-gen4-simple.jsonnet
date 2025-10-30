@@ -7,8 +7,8 @@
 // Deploy with:
 //   tk apply environments/production
 
-local config = import '../lib/config.libsonnet';
-local gen4 = import '../lib/gen4-addon.libsonnet';
+local config = import '../../lib/config.libsonnet';
+local gen4 = import '../../lib/gen4.libsonnet';
 
 // Your existing Gen 3 deployment + Gen 4 addon
 (import '../main.jsonnet.original') + config + {
