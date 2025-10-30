@@ -14,8 +14,6 @@
 //   webhook.deployment('webhook-blue', 'myregistry/webhook:v1.0', runtimeMode='webhook') +
 //   webhook.deployment('healthcheck-blue', 'myregistry/webhook:v1.0', runtimeMode='healthcheck', replicas=10)
 
-local k = import 'k.libsonnet';
-
 {
   // Default configuration values
   local defaults = {
@@ -54,46 +52,63 @@ local k = import 'k.libsonnet';
     local allLabels = defaultLabels + labels;
     
     local defaultEnv = [
-      k.core.v1.envVar.new('PORT', std.toString(port)),
-      k.core.v1.envVar.new('RUNTIME_MODE', runtimeMode),
+      { name: 'PORT', value: std.toString(port) },
+      { name: 'RUNTIME_MODE', value: runtimeMode },
     ];
     
-    local httpGetAction = k.core.v1.httpGetAction.new() +
-                          k.core.v1.httpGetAction.withPath('/health') +
-                          k.core.v1.httpGetAction.withPort(port);
-    
-    local livenessProbe = k.core.v1.probe.new() +
-                          k.core.v1.probe.withHttpGet(httpGetAction) +
-                          k.core.v1.probe.withInitialDelaySeconds(10) +
-                          k.core.v1.probe.withPeriodSeconds(10);
-    
-    local readinessProbe = k.core.v1.probe.new() +
-                           k.core.v1.probe.withHttpGet(httpGetAction) +
-                           k.core.v1.probe.withInitialDelaySeconds(5) +
-                           k.core.v1.probe.withPeriodSeconds(5);
-    
-    k.apps.v1.deployment.new(
-      name=name,
-      replicas=replicas,
-      containers=[
-        k.core.v1.container.new('webhook', image) +
-        k.core.v1.container.withPorts([
-          k.core.v1.containerPort.new('http', port),
-        ]) +
-        k.core.v1.container.withEnv(defaultEnv + env) +
-        k.core.v1.container.withLivenessProbe(livenessProbe) +
-        k.core.v1.container.withReadinessProbe(readinessProbe) +
-        k.core.v1.container.withResources({
-          requests: resources.requests,
-          limits: resources.limits,
-        }),
-      ],
-    ) +
-    k.apps.v1.deployment.metadata.withNamespace(namespace) +
-    k.apps.v1.deployment.metadata.withLabels(allLabels) +
-    k.apps.v1.deployment.spec.selector.withMatchLabels(allLabels) +
-    k.apps.v1.deployment.spec.template.metadata.withLabels(allLabels) +
-    k.apps.v1.deployment.spec.template.spec.withServiceAccountName(serviceAccountName),
+    {
+      apiVersion: 'apps/v1',
+      kind: 'Deployment',
+      metadata: {
+        name: name,
+        namespace: namespace,
+        labels: allLabels,
+      },
+      spec: {
+        replicas: replicas,
+        selector: {
+          matchLabels: allLabels,
+        },
+        template: {
+          metadata: {
+            labels: allLabels,
+          },
+          spec: {
+            serviceAccountName: serviceAccountName,
+            containers: [
+              {
+                name: 'webhook',
+                image: image,
+                ports: [
+                  {
+                    name: 'http',
+                    containerPort: port,
+                  },
+                ],
+                env: defaultEnv + env,
+                livenessProbe: {
+                  httpGet: {
+                    path: '/health',
+                    port: port,
+                  },
+                  initialDelaySeconds: 10,
+                  periodSeconds: 10,
+                },
+                readinessProbe: {
+                  httpGet: {
+                    path: '/health',
+                    port: port,
+                  },
+                  initialDelaySeconds: 5,
+                  periodSeconds: 5,
+                },
+                resources: resources,
+              },
+            ],
+          },
+        },
+      },
+    },
 
   // Service constructor
   service(
@@ -106,16 +121,25 @@ local k = import 'k.libsonnet';
     local defaultSelector = { app: name };
     local allSelectors = defaultSelector + selector;
     
-    k.core.v1.service.new(
-      name=name,
-      selector=allSelectors,
-      ports=[
-        k.core.v1.servicePort.new('http', port) +
-        k.core.v1.servicePort.withTargetPort(targetPort),
-      ],
-    ) +
-    k.core.v1.service.metadata.withNamespace(namespace) +
-    k.core.v1.service.spec.withType('ClusterIP'),
+    {
+      apiVersion: 'v1',
+      kind: 'Service',
+      metadata: {
+        name: name,
+        namespace: namespace,
+      },
+      spec: {
+        type: 'ClusterIP',
+        selector: allSelectors,
+        ports: [
+          {
+            name: 'http',
+            port: port,
+            targetPort: targetPort,
+          },
+        ],
+      },
+    },
 
   // Complete webhook stack (Deployment + Service)
   stack(

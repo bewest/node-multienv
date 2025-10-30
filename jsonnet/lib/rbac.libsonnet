@@ -11,13 +11,16 @@
 //   rbac.fullOrchestrationRole('webhook-metacontroller') +
 //   rbac.clusterRoleBinding('webhook-metacontroller')
 
-local k = import 'k.libsonnet';
-
 {
   // ServiceAccount constructor
-  serviceAccount(name, namespace='default')::
-    k.core.v1.serviceAccount.new(name) +
-    k.core.v1.serviceAccount.metadata.withNamespace(namespace),
+  serviceAccount(name, namespace='default'):: {
+    apiVersion: 'v1',
+    kind: 'ServiceAccount',
+    metadata: {
+      name: name,
+      namespace: namespace,
+    },
+  },
 
   // ClusterRole with full orchestration permissions (for Metacontroller webhooks)
   fullOrchestrationRole(name):: {
