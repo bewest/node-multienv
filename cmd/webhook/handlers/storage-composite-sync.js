@@ -484,9 +484,9 @@ function renderMigrationJob(secret, storageAccount, sourceUri, config) {
   }
   
   const targetHost = `${storageAccount}-mongodb`;
-  const targetUser = secretData.username || 'nsuser';
-  const targetPassword = secretData.password;
-  const targetDb = secretData.database || 'nightscout';
+  const targetUser = secretData.username || 'admin';
+  const targetPassword = secretData.password || secretData['root-password'];
+  const targetDb = generateDatabaseName(storageAccount);
   const targetUri = `mongodb://${targetUser}:${targetPassword}@${targetHost}:27017/${targetDb}?replicaSet=rs0`;
   
   // Use ns-utility image from config
@@ -573,11 +573,10 @@ function renderCreateUserJob(secret, storageAccount, forceCreate, config) {
   
   const nsuserUsername = secretData['nsuser-username'];
   const nsuserPassword = secretData['nsuser-password'];
-  const rootUser = secretData.username || secretData['root-user'];
+  const rootUser = secretData.username || secretData['root-user'] || 'admin';
   const rootPassword = secretData.password || secretData['root-password'];
   const targetHost = `${storageAccount}-mongodb`;
-  const targetDb = secretData.database || 'nightscout';
-  const adminUri = `mongodb://${targetUser}:${targetPassword}@${targetHost}:27017/${targetDb}?replicaSet=rs0`;
+  const targetDb = generateDatabaseName(storageAccount);
   
   return {
     apiVersion: 'batch/v1',
@@ -616,7 +615,7 @@ function renderCreateUserJob(secret, storageAccount, forceCreate, config) {
             env: [
               { name: 'MONGO_HOST', value: targetHost },
               { name: 'MONGO_PORT', value: '27017' },
-              { name: 'MONGO_ADMIN_URI', value: rootPassword },
+              { name: 'MONGO_ROOT_PASSWORD', value: rootPassword },
               { name: 'NSUSER_USERNAME', value: nsuserUsername },
               { name: 'NSUSER_PASSWORD', value: nsuserPassword },
               { name: 'NSUSER_DATABASE', value: targetDb },
