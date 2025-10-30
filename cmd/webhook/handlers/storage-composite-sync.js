@@ -68,6 +68,12 @@ function createStorageCompositeSync(config) {
     const storageConfig = extractStorageConfig(parent);
     const storageType = parent.metadata.annotations?.['ns.mdn.io/storage-type'] || 'dedicated';
     
+    // Generate NS user credentials if missing
+    const updatedSecret = ensureNSUserCredentials(parent, storageAccount);
+    if (updatedSecret) {
+      response.children.push(updatedSecret);
+    }
+    
     // Render MongoDB resources ONLY for dedicated storage
     // Shared storage uses external MongoDB cluster (no StatefulSet created)
     let mongoReadiness;
@@ -102,10 +108,52 @@ function createStorageCompositeSync(config) {
         const migrationJob = renderMigrationJob(parent, storageAccount, migrationSourceUri, config);
         response.children.push(migrationJob);
       }
+      
+      // Check if NS user creation is needed
+      const nsuserInitialized = parent.metadata.annotations?.['ns.mdn.io/nsuser-initialized'] === 'true';
+      const rotateCredentials = parent.metadata.annotations?.['ns.mdn.io/rotate-credentials'] === 'true';
+      const hasCredentials = parent.data?.['nsuser-username'] && parent.data?.['nsuser-password'];
+      
+      if (hasCredentials && (!nsuserInitialized || rotateCredentials) && mongoReadiness.ready) {
+        console.log(`  NS user creation needed - rendering create-user Job`);
+        const createUserJob = renderCreateUserJob(parent, storageAccount, rotateCredentials, config);
+        response.children.push(createUserJob);
+      }
     }
     
     // Check migration state
     const migrationState = checkMigrationState(children, parent);
+    
+    // Check user initialization state
+    const userInitState = checkUserInitializationState(children, parent);
+    
+    // Update Secret annotations if user initialization completed
+    if (userInitState.completed && !userInitState.alreadyMarked) {
+      console.log(`  User initialization completed - updating Secret annotations`);
+      const updatedSecretAnnotations = {
+        apiVersion: 'v1',
+        kind: 'Secret',
+        metadata: {
+          name: parent.metadata.name,
+          namespace: parent.metadata.namespace,
+          labels: parent.metadata.labels,
+          annotations: {
+            ...parent.metadata.annotations,
+            'ns.mdn.io/nsuser-initialized': 'true',
+            'ns.mdn.io/nsuser-initialized-at': new Date().toISOString()
+          }
+        },
+        type: parent.type,
+        data: parent.data
+      };
+      
+      // Remove rotation annotation if present
+      if (updatedSecretAnnotations.metadata.annotations['ns.mdn.io/rotate-credentials']) {
+        delete updatedSecretAnnotations.metadata.annotations['ns.mdn.io/rotate-credentials'];
+      }
+      
+      response.children.push(updatedSecretAnnotations);
+    }
     
     // Count tenants using this storage account (from related ConfigMaps)
     const tenantUsage = countTenantUsage(related, storageAccountLabel);
@@ -118,6 +166,9 @@ function createStorageCompositeSync(config) {
     const conditions = [mongoReadiness.condition];
     if (migrationState.condition) {
       conditions.push(migrationState.condition);
+    }
+    if (userInitState.condition) {
+      conditions.push(userInitState.condition);
     }
     
     response.status = {
@@ -147,6 +198,89 @@ function createStorageCompositeSync(config) {
     console.error('Error in storage composite sync:', error);
     res.send(500, { error: error.message });
   }
+}
+
+/**
+ * Generate secure random password
+ */
+function generateSecurePassword(length = 32) {
+  const charset = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%^&*-_+=';
+  const crypto = require('crypto');
+  let password = '';
+  const randomBytes = crypto.randomBytes(length);
+  
+  for (let i = 0; i < length; i++) {
+    password += charset[randomBytes[i] % charset.length];
+  }
+  
+  return password;
+}
+
+/**
+ * Generate unique username with random suffix
+ */
+function generateUsername(storageAccount) {
+  const crypto = require('crypto');
+  const randomSuffix = crypto.randomBytes(4).toString('hex');
+  return `nsuser-${storageAccount}-${randomSuffix}`;
+}
+
+/**
+ * Ensure NS user credentials exist in Secret, generate if missing
+ */
+function ensureNSUserCredentials(secret, storageAccount) {
+  // Decode existing Secret data
+  const existingData = {};
+  if (secret.data) {
+    Object.keys(secret.data).forEach(key => {
+      existingData[key] = Buffer.from(secret.data[key], 'base64').toString('utf-8');
+    });
+  }
+  
+  // Check if credentials already exist
+  const hasUsername = existingData['nsuser-username'];
+  const hasPassword = existingData['nsuser-password'];
+  
+  if (hasUsername && hasPassword) {
+    // Credentials already exist, no update needed
+    return null;
+  }
+  
+  console.log(`  Generating NS user credentials for ${storageAccount}`);
+  
+  // Generate new credentials
+  const nsuserUsername = hasUsername || generateUsername(storageAccount);
+  const nsuserPassword = hasPassword || generateSecurePassword(32);
+  
+  // Build updated Secret data (merge with existing)
+  const updatedData = {
+    ...existingData,
+    'nsuser-username': nsuserUsername,
+    'nsuser-password': nsuserPassword
+  };
+  
+  // Encode to base64 for Kubernetes Secret
+  const encodedData = {};
+  Object.keys(updatedData).forEach(key => {
+    encodedData[key] = Buffer.from(updatedData[key]).toString('base64');
+  });
+  
+  // Return updated Secret
+  return {
+    apiVersion: 'v1',
+    kind: 'Secret',
+    metadata: {
+      name: secret.metadata.name,
+      namespace: secret.metadata.namespace,
+      labels: secret.metadata.labels,
+      annotations: {
+        ...secret.metadata.annotations,
+        'ns.mdn.io/nsuser-credentials-generated': new Date().toISOString()
+      }
+    },
+    type: 'Opaque',
+    data: encodedData
+  };
 }
 
 /**
@@ -302,7 +436,7 @@ function renderMigrationJob(secret, storageAccount, sourceUri, config) {
               { name: 'MIGRATION_METHOD', value: migrationMethod },
               { name: 'STORAGE_ACCOUNT', value: storageAccount }
             ],
-            command: ['/scripts/migrate-database.sh'],
+            command: ['migrate-database.sh'],
             resources: {
               requests: {
                 cpu: config.resources.nsUtility.cpuRequest,
@@ -317,6 +451,168 @@ function renderMigrationJob(secret, storageAccount, sourceUri, config) {
         }
       }
     }
+  };
+}
+
+/**
+ * Render create-user Job to create MongoDB user with NS app credentials
+ */
+function renderCreateUserJob(secret, storageAccount, forceCreate, config) {
+  const namespace = secret.metadata.namespace;
+  const jobName = `${storageAccount}-create-user`;
+  
+  // Decode Secret data for credentials
+  const secretData = {};
+  if (secret.data) {
+    Object.keys(secret.data).forEach(key => {
+      secretData[key] = Buffer.from(secret.data[key], 'base64').toString('utf-8');
+    });
+  }
+  
+  const nsuserUsername = secretData['nsuser-username'];
+  const nsuserPassword = secretData['nsuser-password'];
+  const rootPassword = secretData.password || secretData['root-password'];
+  const targetHost = `${storageAccount}-mongodb`;
+  const targetDb = secretData.database || 'nightscout';
+  
+  return {
+    apiVersion: 'batch/v1',
+    kind: 'Job',
+    metadata: {
+      name: jobName,
+      namespace: namespace,
+      labels: {
+        'storage.nightscout.org/account': storageAccount,
+        'app.kubernetes.io/component': 'user-initialization',
+        'ns.mdn.io/composite': 'storage'
+      },
+      annotations: {
+        'ns.mdn.io/created-at': new Date().toISOString(),
+        'ns.mdn.io/force-create': forceCreate.toString(),
+        'ns.mdn.io/target-user': nsuserUsername,
+        'ns.mdn.io/target-db': targetDb
+      }
+    },
+    spec: {
+      ttlSecondsAfterFinished: 3600, // 1 hour
+      backoffLimit: 3,
+      template: {
+        metadata: {
+          labels: {
+            'storage.nightscout.org/account': storageAccount,
+            'app.kubernetes.io/component': 'user-initialization'
+          }
+        },
+        spec: {
+          restartPolicy: 'OnFailure',
+          containers: [{
+            name: 'create-user',
+            image: config.images.nsUtility,
+            imagePullPolicy: config.images.nsUtilityPullPolicy,
+            env: [
+              { name: 'MONGO_HOST', value: targetHost },
+              { name: 'MONGO_PORT', value: '27017' },
+              { name: 'MONGO_ROOT_PASSWORD', value: rootPassword },
+              { name: 'NSUSER_USERNAME', value: nsuserUsername },
+              { name: 'NSUSER_PASSWORD', value: nsuserPassword },
+              { name: 'NSUSER_DATABASE', value: targetDb },
+              { name: 'FORCE_USER_CREATE', value: forceCreate ? 'true' : 'false' },
+              { name: 'STORAGE_ACCOUNT', value: storageAccount }
+            ],
+            command: ['create-mongodb-user.sh'],
+            resources: {
+              requests: {
+                cpu: config.resources.nsUtility.cpuRequest,
+                memory: config.resources.nsUtility.memRequest
+              },
+              limits: {
+                cpu: config.resources.nsUtility.cpuLimit,
+                memory: config.resources.nsUtility.memLimit
+              }
+            }
+          }]
+        }
+      }
+    }
+  };
+}
+
+/**
+ * Check user initialization state from create-user Job
+ */
+function checkUserInitializationState(children, parent) {
+  const nsuserInitialized = parent.metadata.annotations?.['ns.mdn.io/nsuser-initialized'] === 'true';
+  const jobs = children['Job.batch/v1'] || {};
+  
+  for (const [name, job] of Object.entries(jobs)) {
+    if (name.endsWith('-create-user')) {
+      const conditions = job.status?.conditions || [];
+      const succeeded = job.status?.succeeded || 0;
+      const failed = job.status?.failed || 0;
+      const active = job.status?.active || 0;
+      
+      const completeCondition = conditions.find(c => c.type === 'Complete' && c.status === 'True');
+      const failedCondition = conditions.find(c => c.type === 'Failed' && c.status === 'True');
+      
+      if (completeCondition || succeeded > 0) {
+        return {
+          completed: true,
+          alreadyMarked: nsuserInitialized,
+          condition: {
+            type: 'UserInitialized',
+            status: 'True',
+            reason: 'JobSucceeded',
+            message: 'MongoDB user created successfully',
+            lastTransitionTime: completeCondition?.lastTransitionTime || new Date().toISOString()
+          }
+        };
+      } else if (failedCondition) {
+        return {
+          completed: false,
+          alreadyMarked: nsuserInitialized,
+          condition: {
+            type: 'UserInitialized',
+            status: 'False',
+            reason: 'JobFailed',
+            message: `User creation Job failed (${failed} failures)`,
+            lastTransitionTime: failedCondition?.lastTransitionTime || new Date().toISOString()
+          }
+        };
+      } else if (active > 0) {
+        return {
+          completed: false,
+          alreadyMarked: nsuserInitialized,
+          condition: {
+            type: 'UserInitialized',
+            status: 'False',
+            reason: 'JobRunning',
+            message: 'User creation Job is running',
+            lastTransitionTime: new Date().toISOString()
+          }
+        };
+      }
+    }
+  }
+  
+  // No create-user Job found
+  if (nsuserInitialized) {
+    return {
+      completed: true,
+      alreadyMarked: true,
+      condition: {
+        type: 'UserInitialized',
+        status: 'True',
+        reason: 'PreviouslyInitialized',
+        message: 'MongoDB user previously initialized',
+        lastTransitionTime: parent.metadata.annotations?.['ns.mdn.io/nsuser-initialized-at'] || new Date().toISOString()
+      }
+    };
+  }
+  
+  return {
+    completed: false,
+    alreadyMarked: false,
+    condition: null
   };
 }
 
