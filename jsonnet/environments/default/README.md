@@ -7,18 +7,26 @@ This directory contains modular Jsonnet deployment configuration for the Nightsc
 ## File Structure
 
 ```
-jsonnet/environments/default/
-├── main.jsonnet.original      # Your existing Gen 3 deployment (preserved as-is)
-├── lib/
-│   ├── config.libsonnet       # Centralized _config and _images
-│   └── gen4-addon.libsonnet   # Gen 4 webhook deployment (opt-in)
-├── examples/
-│   ├── 01-gen3-only.jsonnet           # Gen 3 only (backward compatible)
-│   ├── 02-gen4-simple.jsonnet         # Gen 4 simple deployment
-│   ├── 03-gen4-multicomponent.jsonnet # Gen 4 multi-component
-│   ├── 04-gen4-bluegreen.jsonnet      # Gen 4 blue/green
-│   └── 05-gen4-custom-names.jsonnet   # Progressive migration pattern
-└── README.md (this file)
+jsonnet/
+├── lib/                          # Reusable Jsonnet library (jb installable)
+│   ├── main.libsonnet           # Entry point (exports all modules)
+│   ├── webhook.libsonnet        # Webhook deployment helpers
+│   ├── metacontroller.libsonnet # Metacontroller CRD helpers
+│   ├── rbac.libsonnet           # RBAC helpers
+│   ├── config.libsonnet         # Configuration templates
+│   ├── gen4.libsonnet           # Gen 4 deployment addon
+│   └── k.libsonnet              # k8s-libsonnet alias
+├── jsonnetfile.json             # Package metadata for jb
+├── environments/default/
+│   ├── main.jsonnet.original   # Existing Gen 3 deployment (preserved)
+│   ├── examples/
+│   │   ├── 01-gen3-only.jsonnet
+│   │   ├── 02-gen4-simple.jsonnet
+│   │   ├── 03-gen4-multicomponent.jsonnet
+│   │   ├── 04-gen4-bluegreen.jsonnet
+│   │   └── 05-gen4-custom-names.jsonnet
+│   └── README.md (this file)
+└── README.md                    # Library documentation
 ```
 
 ## Key Features
@@ -36,12 +44,25 @@ jsonnet/environments/default/
 - **`lib/gen4-addon.libsonnet`** - Conditionally adds Gen 4 webhooks
 - **Examples** - Ready-to-use deployment patterns
 
-### Uses Existing Libraries
+### Library Organization
 
-Gen 4 addon leverages existing libraries in `lib/`:
+The Jsonnet library is now in `jsonnet/lib/` and can be installed via jsonnet-bundler:
+
+```bash
+# In your Tanka environment
+cd environments/prod
+jb install ../../jsonnet  # Local development
+# Or from GitHub:
+# jb install github.com/your-org/nightscout-k8s/jsonnet@main
+```
+
+**Library modules:**
 - `lib/webhook.libsonnet` - Webhook deployments with health probes
 - `lib/metacontroller.libsonnet` - CompositeController/DecoratorController CRDs
 - `lib/rbac.libsonnet` - ServiceAccounts and RBAC rules
+- `lib/config.libsonnet` - Configuration templates
+- `lib/gen4.libsonnet` - Gen 4 deployment addon
+- `lib/main.libsonnet` - Entry point that exports all modules
 
 ## Quick Start
 
@@ -64,8 +85,9 @@ Your existing environment override pattern works unchanged:
 Add Gen 4 webhooks alongside Gen 3:
 
 ```jsonnet
-local config = import '../default/lib/config.libsonnet';
-local gen4 = import '../default/lib/gen4-addon.libsonnet';
+// After running: jb install ../../jsonnet
+local config = import 'lib/config.libsonnet';
+local gen4 = import 'lib/gen4.libsonnet';
 
 (import '../default/main.jsonnet.original') + config + {
   _config+:: {

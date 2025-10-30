@@ -56,29 +56,61 @@ This creates:
 
 ---
 
+## Library Installation
+
+The Nightscout Jsonnet library is available as a reusable package in `jsonnet/lib/`. You can install it in your Tanka environments using jsonnet-bundler.
+
+### Option 1: Install from GitHub (Recommended for Production)
+
+```bash
+cd environments/prod
+jb install github.com/your-org/nightscout-k8s/jsonnet@main
+```
+
+### Option 2: Install Locally (For Development)
+
+```bash
+cd environments/prod
+jb install ../../jsonnet
+```
+
+This installs the library into `vendor/lib/` and creates appropriate import mappings.
+
 ## Project Structure
 
 ```
 your-nightscout-platform/
-├── lib/                          # Reusable Jsonnet libraries (this repo)
-│   ├── k.libsonnet              # Alias to k8s-libsonnet
-│   ├── rbac.libsonnet           # RBAC helpers
-│   ├── webhook.libsonnet        # Webhook deployment helpers
-│   └── metacontroller.libsonnet # Metacontroller resource helpers
-├── examples/                     # Example configurations
-│   ├── simple.jsonnet           # Single deployment
-│   ├── blue-green.jsonnet       # Blue/green pattern
-│   └── multi-component.jsonnet  # Three-ServiceAccount pattern
-├── environments/                 # Tanka environments (you create these)
-│   ├── dev/
-│   │   ├── main.jsonnet         # Dev configuration
-│   │   └── spec.json            # Environment metadata
-│   ├── staging/
-│   │   ├── main.jsonnet
-│   │   └── spec.json
-│   └── prod/
+├── jsonnet/                      # Jsonnet library (jb installable)
+│   ├── lib/                     # Reusable Jsonnet modules
+│   │   ├── main.libsonnet       # Entry point (exports all modules)
+│   │   ├── k.libsonnet          # Alias to k8s-libsonnet
+│   │   ├── rbac.libsonnet       # RBAC helpers
+│   │   ├── webhook.libsonnet    # Webhook deployment helpers
+│   │   ├── metacontroller.libsonnet # Metacontroller CRD helpers
+│   │   ├── config.libsonnet     # Configuration templates
+│   │   └── gen4.libsonnet       # Gen 4 deployment addon
+│   ├── jsonnetfile.json         # Package metadata
+│   ├── environments/default/
+│   │   └── examples/            # Example configurations
+│   │       ├── 02-gen4-simple.jsonnet
+│   │       ├── 03-gen4-multicomponent.jsonnet
+│   │       ├── 04-gen4-bluegreen.jsonnet
+│   │       └── 05-gen4-custom-names.jsonnet
+│   └── README.md                # Library documentation
+├── lib/                         # Node.js/JavaScript code (webhook server)
+│   ├── routes/                  # Express routes
+│   └── templates/               # K8s template generators
+├── environments/                # Your Tanka environments
+│   ├── prod/
+│   │   ├── main.jsonnet         # Production configuration
+│   │   ├── spec.json            # Tanka environment metadata
+│   │   ├── jsonnetfile.json     # jb dependencies
+│   │   ├── jsonnetfile.lock.json # Dependency lock file
+│   │   └── vendor/              # jb installed libraries (gitignored)
+│   └── staging/
 │       ├── main.jsonnet
-│       └── spec.json
+│       ├── spec.json
+│       └── jsonnetfile.json
 ├── jsonnetfile.json             # Jsonnet dependencies
 ├── jsonnetfile.lock.json        # Dependency lock file
 └── vendor/                      # Downloaded dependencies (gitignore)
@@ -117,10 +149,10 @@ tk env set environments/dev \
 **`environments/dev/main.jsonnet`:**
 
 ```jsonnet
-// Import libraries
-local rbac = import '../../lib/rbac.libsonnet';
-local webhook = import '../../lib/webhook.libsonnet';
-local metacontroller = import '../../lib/metacontroller.libsonnet';
+// Import libraries (after jb install)
+local rbac = import 'lib/rbac.libsonnet';
+local webhook = import 'lib/webhook.libsonnet';
+local metacontroller = import 'lib/metacontroller.libsonnet';
 
 {
   // RBAC
@@ -165,9 +197,9 @@ kubectl get compositecontrollers
 Use `examples/simple.jsonnet` as a starting point:
 
 ```jsonnet
-local rbac = import '../lib/rbac.libsonnet';
-local webhook = import '../lib/webhook.libsonnet';
-local metacontroller = import '../lib/metacontroller.libsonnet';
+local rbac = import 'lib/rbac.libsonnet';
+local webhook = import 'lib/webhook.libsonnet';
+local metacontroller = import 'lib/metacontroller.libsonnet';
 
 {
   rbac: {
@@ -198,9 +230,9 @@ local metacontroller = import '../lib/metacontroller.libsonnet';
 Use `examples/blue-green.jsonnet` for zero-downtime upgrades:
 
 ```jsonnet
-local rbac = import '../lib/rbac.libsonnet';
-local webhook = import '../lib/webhook.libsonnet';
-local metacontroller = import '../lib/metacontroller.libsonnet';
+local rbac = import 'lib/rbac.libsonnet';
+local webhook = import 'lib/webhook.libsonnet';
+local metacontroller = import 'lib/metacontroller.libsonnet';
 
 {
   // Shared ServiceAccount (both blue and green use same permissions)
@@ -281,9 +313,9 @@ local metacontroller = import '../lib/metacontroller.libsonnet';
 Use `examples/multi-component.jsonnet` for independent scaling:
 
 ```jsonnet
-local rbac = import '../lib/rbac.libsonnet';
-local webhook = import '../lib/webhook.libsonnet';
-local metacontroller = import '../lib/metacontroller.libsonnet';
+local rbac = import 'lib/rbac.libsonnet';
+local webhook = import 'lib/webhook.libsonnet';
+local metacontroller = import 'lib/metacontroller.libsonnet';
 
 {
   // Three ServiceAccounts with least-privilege permissions
