@@ -74,6 +74,44 @@ function createStorageCompositeSync(config) {
       response.children.push(updatedSecret);
     }
     
+    // Decode Secret data for app credentials generation
+    const secretData = {};
+    if (parent.data) {
+      Object.keys(parent.data).forEach(key => {
+        secretData[key] = Buffer.from(parent.data[key], 'base64').toString('utf-8');
+      });
+    }
+    
+    // Generate app-credentials Secret if nsuser credentials exist
+    const nsuserUsername = secretData['nsuser-username'];
+    const nsuserPassword = secretData['nsuser-password'];
+    
+    if (nsuserUsername && nsuserPassword) {
+      const mongoHost = storageType === 'shared'
+        ? (secretData.mongoHost || 'shared-mongodb')
+        : `${storageAccount}-mongodb`;
+      const mongoPort = secretData.mongoPort || '27017';
+      const databaseName = generateDatabaseName(storageAccount);
+      
+      const appCredentials = generateAppCredentials(
+        storageAccount,
+        mongoHost,
+        mongoPort,
+        databaseName,
+        nsuserUsername,
+        nsuserPassword
+      );
+      
+      const appCredentialsSecret = renderAppCredentialsSecret(
+        storageAccount,
+        parent.metadata.namespace,
+        appCredentials,
+        parent.metadata.labels
+      );
+      
+      response.children.push(appCredentialsSecret);
+    }
+    
     // Render MongoDB resources ONLY for dedicated storage
     // Shared storage uses external MongoDB cluster (no StatefulSet created)
     let mongoReadiness;
