@@ -13,14 +13,14 @@ main() {
   
   # Validate required environment variables
   require_env "MONGO_HOST"
-  require_env "MONGO_ROOT_PASSWORD"
+  require_env "MONGO_ADMIN_URI"
   require_env "NSUSER_USERNAME"
   require_env "NSUSER_PASSWORD"
   require_env "NSUSER_DATABASE"
   
   local mongo_host="${MONGO_HOST}"
   local mongo_port="${MONGO_PORT:-27017}"
-  local root_password="${MONGO_ROOT_PASSWORD}"
+  local admin_uri="${MONGO_ADMIN_URI}"
   local nsuser_username="${NSUSER_USERNAME}"
   local nsuser_password="${NSUSER_PASSWORD}"
   local nsuser_database="${NSUSER_DATABASE}"
@@ -43,7 +43,7 @@ main() {
   create_nightscout_user \
     "${mongo_host}" \
     "${mongo_port}" \
-    "${root_password}" \
+    "${admin_uri}" \
     "${nsuser_username}" \
     "${nsuser_password}" \
     "${nsuser_database}" \
@@ -64,13 +64,13 @@ main() {
 create_nightscout_user() {
   local host="$1"
   local port="$2"
-  local root_password="$3"
+  local admin_uri="$3"
   local username="$4"
   local password="$5"
   local database="$6"
   local force="${7:-false}"
   
-  local admin_uri="mongodb://admin:${root_password}@${host}:${port}/admin?authSource=admin"
+  # local admin_uri="mongodb://admin:${admin_uri}@${host}:${port}/admin?authSource=admin"
   
   log_info "Creating user '${username}' in database '${database}'"
   

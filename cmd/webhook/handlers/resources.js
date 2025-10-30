@@ -1,20 +1,21 @@
 function renderMongoDB(parent, config) {
-  const tenantId = parent.data.TENANT_ID;
+  // Storage account ID from parent labels/annotation?
+  const storageAccount = parent.metadata.labels?.['storage.nightscout.org/account'];
   const namespace = parent.metadata.namespace;
   
   // Storage configuration (tenant-specific overrides config defaults)
   const storageGi = parent.data.MONGO_STORAGE_GI || config.storage.defaultMongoStorageGi;
   const storageClass = parent.data.MONGO_SC || config.storage.defaultStorageClass;
   
-  // MongoDB configuration (tenant-specific overrides config defaults)
-  const mongoImage = parent.data.MONGO_IMAGE || config.images.mongodb;
-  const mongoImagePullPolicy = parent.data.MONGO_IMAGE_PULL_POLICY || config.imagePullPolicies.mongodb;
-  const mongoReplicas = parseInt(parent.data.MONGO_REPLICAS || config.storage.defaultMongoReplicas);
+  // MongoDB configuration
+  const mongoImage = config.images.mongodb;
+  const mongoImagePullPolicy = config.imagePullPolicies.mongodb;
+  const mongoReplicas = parseInt(config.storage.defaultMongoReplicas);
   
   // Extract version from image
   const mongoVersion = mongoImage.split(':')[1] || 'latest';
   
-  // Resource limits (tenant-specific overrides config defaults)
+  // Resource limits
   const mongoCpuRequest = parent.data.MONGO_CPU_REQUEST || config.resources.mongodb.requests.cpu;
   const mongoCpuLimit = parent.data.MONGO_CPU_LIMIT || config.resources.mongodb.limits.cpu;
   const mongoMemRequest = parent.data.MONGO_MEM_REQUEST || config.resources.mongodb.requests.memory;
@@ -23,24 +24,22 @@ function renderMongoDB(parent, config) {
   // PDB configuration
   const mongoPdbMinAvailable = parseInt(parent.data.MONGO_PDB_MIN_AVAILABLE || '1');
   
-  // Resource names with tenant prefix
-  const secretName = `${tenantId}-mongo-auth`;
-  const serviceName = `${tenantId}-mongo`;
-  const statefulSetName = `${tenantId}-mongo`;
-  const pdbName = `${tenantId}-mongo-pdb`;
-  const pod0Hostname = `${tenantId}-mongo-0.${tenantId}-mongo`;
+  // Resource names with storage prefix
+  const secretName = `${storageAccount}-mongo-auth`;
+  const serviceName = `${storageAccount}-mongo`;
+  const statefulSetName = `${storageAccount}-mongo`;
+  const pdbName = `${storageAccount}-mongo-pdb`;
+  const pod0Hostname = `${storageAccount}-mongo-0.${storageAccount}-mongo`;
 
   const resources = [];
 
-  // Storage account ID from parent labels
-  const storageAccount = parent.metadata.labels?.['storage.nightscout.org/account'] || tenantId;
 
   // Helper function for standard labels
   const standardLabels = (component, additionalLabels = {}) => ({
     'app.kubernetes.io/name': 'mongodb',
     'app.kubernetes.io/component': component,
     'app.kubernetes.io/part-of': 'nightscout-tenant',
-    'app.kubernetes.io/instance': tenantId,
+    // 'app.kubernetes.io/instance': tenantId,
     'app.kubernetes.io/version': mongoVersion,
     'app.kubernetes.io/managed-by': 'metacontroller',
     'storage.nightscout.org/account': storageAccount,
@@ -61,8 +60,10 @@ function renderMongoDB(parent, config) {
     },
     type: 'Opaque',
     stringData: {
+      // username should be generated randomly
       username: 'nsuser',
       password: generatePassword(),
+      // database name should be generated randomly
       database: 'ns'
     }
   };
@@ -79,7 +80,7 @@ function renderMongoDB(parent, config) {
       clusterIP: 'None',
       selector: {
         'app.kubernetes.io/name': 'mongodb',
-        'app.kubernetes.io/instance': tenantId
+        'app.kubernetes.io/instance': storageAccount
       },
       ports: [
         {
@@ -113,7 +114,8 @@ function renderMongoDB(parent, config) {
       selector: {
         matchLabels: {
           'app.kubernetes.io/name': 'mongodb',
-          'app.kubernetes.io/instance': tenantId
+          'storage.nightscout.org/account': storageAccount,
+          // 'app.kubernetes.io/instance': tenantId
         }
       },
       template: {
@@ -253,7 +255,8 @@ function renderMongoDB(parent, config) {
       selector: {
         matchLabels: {
           'app.kubernetes.io/name': 'mongodb',
-          'app.kubernetes.io/instance': tenantId
+          // 'app.kubernetes.io/instance': tenantId
+          'storage.nightscout.org/account': storageAccount,
         }
       }
     }
@@ -265,6 +268,7 @@ function renderMongoDB(parent, config) {
 
 function renderNightscout(parent, config) {
   const tenantId = parent.data.TENANT_ID;
+  const storageAccount = parent.metadata.labels?.['storage.nightscout.org/account'];
   const namespace = parent.metadata.namespace;
   
   // Nightscout configuration (tenant-specific overrides config defaults)
@@ -301,8 +305,9 @@ function renderNightscout(parent, config) {
   const deploymentName = `${tenantId}-nightscout`;
   const serviceName = `${tenantId}-nightscout`;
   const pdbName = `${tenantId}-nightscout-pdb`;
-  const secretName = `${tenantId}-mongo-auth`;
-  const mongoHost = `${tenantId}-mongo-0.${tenantId}-mongo`;
+  // Resourcces with storageAccount prefix
+  const secretName = `${storageAccount}-mongo-auth`;
+  const mongoHost = `${storageAccount}-mongo-0.${storageAccount}-mongo`;
 
   const resources = [];
 
@@ -315,6 +320,7 @@ function renderNightscout(parent, config) {
     'app.kubernetes.io/version': nsVersion,
     'app.kubernetes.io/managed-by': 'metacontroller',
     'ns.mdn.io/tenant': tenantId,
+    'storage.nightscout.org/account': storageAccount,
     ...additionalLabels
   });
 
@@ -598,6 +604,7 @@ function renderKafkaTopics(parent, config) {
 }
 
 function renderKafkaConnector(parent, config) {
+  const storageAccount = parent.metadata.labels?.['storage.nightscout.org/account'];
   const tenantId = parent.data.TENANT_ID;
   const namespace = parent.metadata.namespace;
   const collections = (parent.data.CDC_COLLECTIONS || 'entries,treatments').split(',');
@@ -610,8 +617,8 @@ function renderKafkaConnector(parent, config) {
   const uriKey = parent.data.CDC_URI_KEY;
   const useExternalConfig = !!uriKey;
   
-  const secretName = `${tenantId}-mongo-auth`;
-  const mongoHost = `${tenantId}-mongo-0.${tenantId}-mongo`;
+  const secretName = `${storageAccount}-mongo-auth`;
+  const mongoHost = `${storageAccount}-mongo-0.${storageAccount}-mongo`;
 
   // Helper function for standard labels
   const standardLabels = () => ({
@@ -671,27 +678,29 @@ function renderKafkaConnector(parent, config) {
 }
 
 function renderMigrationJob(parent, config) {
-  const tenantId = parent.data.TENANT_ID;
+  // const tenantId = parent.data.TENANT_ID;
+  const storageAccount = parent.metadata.labels?.['storage.nightscout.org/account'];
   const namespace = parent.metadata.namespace;
   
   const migrationSourceUri = parent.data.MIGRATION_SOURCE_URI;
   const migrationSourceSecret = parent.data.MIGRATION_SOURCE_SECRET;
-  const migrationMethod = parent.data.MIGRATION_METHOD || 'mongodump-restore';
-  const utilityImage = parent.data.NS_UTILITY_IMAGE || config.images.migrationJob;
-  const utilityImagePullPolicy = parent.data.NS_UTILITY_IMAGE_PULL_POLICY || config.imagePullPolicies.migrationJob;
-  const utilityImagePullSecret = parent.data.IMAGE_PULL_SECRET;
-  const utilityCpuRequest = parent.data.NS_UTILITY_CPU_REQUEST || config.resources.migrationJob.requests.cpu;
-  const utilityCpuLimit = parent.data.NS_UTILITY_CPU_LIMIT || config.resources.migrationJob.limits.cpu;
-  const utilityMemRequest = parent.data.NS_UTILITY_MEM_REQUEST || config.resources.migrationJob.requests.memory;
-  const utilityMemLimit = parent.data.NS_UTILITY_MEM_LIMIT || config.resources.migrationJob.limits.memory;
+  const migrationMethod = parent.data.MIGRATION_METHOD || config.resources.migrationMethod;
+  const utilityImage = config.images.migrationJob;
+  const utilityImagePullPolicy = config.imagePullPolicies.migrationJob;
+  const utilityImagePullSecret = config.imagePullSecrets;
+  const utilityCpuRequest = config.resources.migrationJob.requests.cpu;
+  const utilityCpuLimit = config.resources.migrationJob.limits.cpu;
+  const utilityMemRequest = config.resources.migrationJob.requests.memory;
+  const utilityMemLimit = config.resources.migrationJob.limits.memory;
   
   if (!migrationSourceUri && !migrationSourceSecret) {
-    console.error(`Migration enabled for tenant ${tenantId} but neither MIGRATION_SOURCE_URI nor MIGRATION_SOURCE_SECRET provided`);
+    console.error(`Migration enabled for tenant ${storageAccount} but neither MIGRATION_SOURCE_URI nor MIGRATION_SOURCE_SECRET provided`);
     throw new Error('Migration enabled but no source configured. Provide either MIGRATION_SOURCE_URI or MIGRATION_SOURCE_SECRET.');
   }
   
-  const targetSecretName = `${tenantId}-mongo-auth`;
-  const targetHost = `${tenantId}-mongo-0.${tenantId}-mongo`;
+  const targetSecretName = `${storageAccount}-mongo-auth`;
+  const targetHost = `${storageAccount}-mongo-0.${storageAccount}-mongo`;
+  // targetUri should use the username and password and database from the parent secret.
   const targetUri = `mongodb://nsuser:\${MONGO_PASSWORD}@${targetHost}:27017/ns?replicaSet=rs0&authSource=admin`;
   
   const standardLabels = () => ({
@@ -729,14 +738,28 @@ function renderMigrationJob(parent, config) {
     },
     {
       name: 'MIGRATION_TARGET_DB',
-      value: 'ns'
-    },
-    {
-      name: 'MONGO_PASSWORD',
       valueFrom: {
         secretKeyRef: {
           name: targetSecretName,
-          key: 'password'
+          key: 'MONGO_INITDB_DATABASE'
+        }
+      }
+    },
+    {
+      name: 'MIGRATION_TARGET_USERNAME',
+      valueFrom: {
+        secretKeyRef: {
+          name: targetSecretName,
+          key: 'MONGO_INITDB_ROOT_USERNAME'
+        }
+      }
+    },
+    {
+      name: 'MONGO_TARGET_PASSWORD',
+      valueFrom: {
+        secretKeyRef: {
+          name: targetSecretName,
+          key: 'MONGO_INITDB_ROOT_PASSWORD'
         }
       }
     }
@@ -763,7 +786,7 @@ function renderMigrationJob(parent, config) {
     apiVersion: 'batch/v1',
     kind: 'Job',
     metadata: {
-      name: `${tenantId}-migration`,
+      name: `${storageAccount}-migration`,
       namespace: namespace,
       labels: standardLabels(),
       annotations: {

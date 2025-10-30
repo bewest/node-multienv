@@ -308,7 +308,7 @@ function extractStorageConfig(secret) {
       }
     },
     data: {
-      TENANT_ID: storageAccount,
+      STORAGE: storageAccount,
       MONGO_REPLICAS: data.replicas || '1',
       MONGO_STORAGE_GI: data.storageGi || '2',
       MONGO_IMAGE: data.mongoImage || 'mongo:6',
@@ -471,9 +471,11 @@ function renderCreateUserJob(secret, storageAccount, forceCreate, config) {
   
   const nsuserUsername = secretData['nsuser-username'];
   const nsuserPassword = secretData['nsuser-password'];
+  const rootUser = secretData.username || secretData['root-user'];
   const rootPassword = secretData.password || secretData['root-password'];
   const targetHost = `${storageAccount}-mongodb`;
   const targetDb = secretData.database || 'nightscout';
+  const adminUri = `mongodb://${targetUser}:${targetPassword}@${targetHost}:27017/${targetDb}?replicaSet=rs0`;
   
   return {
     apiVersion: 'batch/v1',
@@ -512,7 +514,7 @@ function renderCreateUserJob(secret, storageAccount, forceCreate, config) {
             env: [
               { name: 'MONGO_HOST', value: targetHost },
               { name: 'MONGO_PORT', value: '27017' },
-              { name: 'MONGO_ROOT_PASSWORD', value: rootPassword },
+              { name: 'MONGO_ADMIN_URI', value: rootPassword },
               { name: 'NSUSER_USERNAME', value: nsuserUsername },
               { name: 'NSUSER_PASSWORD', value: nsuserPassword },
               { name: 'NSUSER_DATABASE', value: targetDb },

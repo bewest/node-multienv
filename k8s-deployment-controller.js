@@ -849,7 +849,7 @@ function configure (opts) {
   server.del('/environs/:name', delete_configmap);
 
   function template_initial_storage_secret (accountId, storageType, tier) {
-    const secretName = `${accountId}-secret`;
+    const secretName = `${accountId}-mongo-auth`;
     
     // Create K8s secret with provisioning root MongoDB credentials
     // This Secret triggers the storage composite controller via ns.mdn.io/composite label
@@ -870,9 +870,11 @@ function configure (opts) {
         }
       },
       stringData: {
-        MONGO_INITDB_ROOT_USERNAME: `user_${accountId}`,
+        MONGO_INITDB_ROOT_USERNAME: `admin_${accountId}`,
         MONGO_INITDB_ROOT_PASSWORD: objectId(),
-        MONGO_INITDB_DATABASE: 'ns'
+        // XXX: should unique database name be assigned here, or always use
+        // admin database for bootstrapping a new dedicated database?
+        MONGO_INITDB_DATABASE: 'admin'
       }
     };
     return secret;
@@ -909,7 +911,7 @@ function configure (opts) {
     const storageType = req.body?.storageType || req.body?.storage_type;
     const tier = req.body?.tier;
     
-    const secretName = `${accountId}-secret`;
+    const secretName = `${accountId}-mongo-auth`;
     var secret = template_initial_storage_secret(accountId, storageType, tier);
     
     // Idempotent: try to get existing secret first
@@ -942,17 +944,9 @@ function configure (opts) {
 
   function handle_new_site_webhook(req, res, next) {
     const accountId = req.params.account;
-    const urlParamName = req.params.name;
     const bodyInternalName = req.body?.internal_name;
-    
-    // Validate that internal_name and URL param match
-    if (urlParamName && bodyInternalName && urlParamName !== bodyInternalName) {
-      return next(new restify.errors.BadRequestError(
-        `URL parameter 'name' (${urlParamName}) must match body 'internal_name' (${bodyInternalName})`
-      ));
-    }
-    
-    const tenantId = urlParamName || bodyInternalName;
+    // const urlParamName = req.params.name || req.query.name || bodyInternalName;
+    const tenantId = bodyInternalName;
     
     if (!tenantId) {
       return next(new restify.errors.BadRequestError(
@@ -960,6 +954,7 @@ function configure (opts) {
       ));
     }
     
+    // XXX: No WEB_NAME?
     // Extract config data from request body
     const configData = { ...req.body };
     delete configData.internal_name; // Remove metadata field
