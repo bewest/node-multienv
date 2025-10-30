@@ -113,6 +113,88 @@ function configure (opts) {
     }
     };
 
+    var healthCheckEnabled = 'pod' == opts.tenant.healthcheck_style;
+    if (healthCheckEnabled) {
+      var tenant_opts = opts.tenant;
+      var healthCheckImage = opts.tenant.healthcheck_image;
+      var healthCheckCommand = opts.tenant.healthcheck_command;
+      var healthCheckImagePullPolicy = 'IfNotPresent';
+      var healthCheckPort = 3000;
+      var healthCheckCpuRequest = opts.tenant.healthcheck_cpu_request;
+      var healthCheckMemRequest = opts.tenant.healthcheck_mem_request;
+      var healthCheckCpuLimit = opts.tenant.healthcheck_cpu_limit;
+      var healthCheckMemLimit = opts.tenant.healthcheck_mem_limit;
+
+      template.spec.template.spec.containers.push({
+        name: 'pod-healthcheck',
+        image: healthCheckImage,
+        args: [healthCheckCommand],
+        imagePullPolicy: healthCheckImagePullPolicy,
+        ports: [
+          {
+            containerPort: healthCheckPort,
+            name: 'healthcheck'
+          }
+        ],
+        env: [
+          {
+            name: 'PORT',
+            value: String(healthCheckPort)
+          },
+          {
+            name: 'POD_UID',
+            valueFrom: {
+              fieldRef: {
+                fieldPath: 'metadata.uid'
+              }
+            }
+          },
+          {
+            name: 'POD_IP',
+            valueFrom: {
+              fieldRef: {
+                fieldPath: 'status.podIP'
+              }
+            }
+          },
+          {
+            name: 'POD_NAME',
+            valueFrom: {
+              fieldRef: {
+                fieldPath: 'metadata.name'
+              }
+            }
+          },
+          {
+            name: 'POD_NAMESPACE',
+            valueFrom: {
+              fieldRef: {
+                fieldPath: 'metadata.namespace'
+              }
+            }
+          },
+          {
+            name: 'NODE_NAME',
+            valueFrom: {
+              fieldRef: {
+                fieldPath: 'spec.nodeName'
+              }
+            }
+          }
+        ],
+        resources: {
+          requests: {
+            cpu: healthCheckCpuRequest,
+            memory: healthCheckMemRequest
+          },
+          limits: {
+            cpu: healthCheckCpuLimit,
+            memory: healthCheckMemLimit
+          }
+        }
+      });
+    }
+
     if (opts.MULTIENV_TENANT_NODEPOOL_TARGET) {
       template.spec.template.spec.nodeSelector = {
         'doks.digitalocean.com/node-pool': opts.MULTIENV_TENANT_NODEPOOL_TARGET
@@ -239,10 +321,12 @@ function configure (opts) {
   function handle_sync_addition (req, res, next) {
     const deploymentName = req.deployment.metadata.name;
 
+    console.log('TRY SYNC ADDITION', req.deployment);
     appsApi.createNamespacedDeployment(selected_namespace, req.deployment).then(function (result) {
       res.result = result;
       return next( );
     }).catch((err) => {
+      console.log('FAILED SYNC ADDITION', err);
       const patch = [{
         op: "add",
         path: "/spec/template/metadata/annotations/updated-at",
@@ -276,13 +360,16 @@ function configure (opts) {
       var options = { headers: { "Content-Type": "application/json-patch+json" } };
       appsApi.patchNamespacedDeployment(targetDeployment, selected_namespace, patch, undefined, undefined, undefined, undefined, undefined, options)
       .then((result) => {
-                                console.log(`deployment ${targetDeployment} updated for rolling restart`);
+        console.log(`deployment ${targetDeployment} updated for rolling restart`);
         res.result = result;
         next( );
       }).catch((err) => {
         console.error("Error updating deployment", err);
         next(err);
       });
+    }).catch((err) => {
+      console.error("Error could not read what should be an existing deployment", err);
+      next(err);
     });
   }
 
@@ -677,6 +764,9 @@ function configure (opts) {
     var host = serviceData.status.podIP;
     var healthCheckService = url.parse(opts.MULTIENV_HEALTH_CHECK_SERVICE);
     var validPodCheckUrl = url.format({ protocol: healthCheckService.protocol, hostname: healthCheckService.hostname, port: healthCheckService.port,  pathname: ('/healthchecks/pod/' + tenantName + '/assigned/podIP/' + host)});
+    if (opts.tenant.healthcheck_style == 'pod') {
+      validPodCheckUrl = url.format({ protocol: healthCheckService.protocol, hostname: host, port: healthCheckService.port,  pathname: ('/healthchecks/pod/' + tenantName + '/assigned/POD_UID/' + id)});
+    }
     var port = 1337;
     var insert = {
       name: 'backends',
@@ -957,6 +1047,13 @@ if (!module.parent) {
       memory: process.env.MULTIENV_TENANT_LIMITS_MEMORY || '500Mi'
     }
   , tenant: {
+    healthcheck_style: process.env.MULTIENV_TENANT_HEALTHCHECK || 'pod',
+    healthcheck_image: process.env.MULTIENV_TENANT_HEALTHCHECK_IMAGE || 'multienv',
+    healthcheck_command: process.env.MULTIENV_TENANT_HEALTHCHECK_COMMAND || 'tenant-pod-healthcheck',
+    healthcheck_cpu_request: process.env.MULTIENV_TENANT_HEALTHCHECK_CPU_REQUEST || '5m',
+    healthcheck_mem_request: process.env.MULTIENV_TENANT_HEALTHCHECK_MEM_REQUEST || '50Mi',
+    healthcheck_cpu_limit: process.env.MULTIENV_TENANT_HEALTHCHECK_CPU_LIMIT || '100m',
+    healthcheck_mem_limit: process.env.MULTIENV_TENANT_HEALTHCHECK_MEM_LIMIT || '250Mi',
     storage_init_job_image: process.env.MULTIENV_TENANT_STORAGE_INIT_JOB_IMAGE || 'multienv',
     storage_init_job_command: process.env.MULTIENV_TENANT_STORAGE_INIT_JOB_COMMAND || 'initialize-tenant-storage',
     storage_provisioner_image: process.env.MULTIENV_TENANT_STORAGE_PROVISIONER_IMAGE || 'provisioner',

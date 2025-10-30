@@ -88,6 +88,10 @@ case "${1-help}" in
   deployment-operator)
     SYNC_CONTROLLER="deployment" exec -a deployment-operator node k8s-dispatcher.js
   ;;
+  tenant-pod-healthcheck)
+    cd cmd/pod-healthcheck
+    exec -a tenant-pod-healthcheck node server.js
+  ;;
   dispatcher)
     exec -a dispatcher node k8s-dispatcher.js
   ;;

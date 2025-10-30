@@ -1,4 +1,5 @@
 const restify = require('restify');
+var bunyan = require('bunyan');
 
 const PORT = process.env.PORT || 3000;
 
@@ -10,14 +11,40 @@ const podMetadata = {
   node_name: process.env.NODE_NAME || '',
 };
 
+const podDownstream = {
+  POD_UID: process.env.POD_UID || '',
+  POD_IP: process.env.POD_IP || '',
+  POD_NAME: process.env.POD_NAME || '',
+  POD_NAMESPACE: process.env.POD_NAMESPACE || '',
+  NODE_NAME: process.env.NODE_NAME || '',
+  HOSTNAME: process.env.HOSTNAME || '',
+};
+
 const server = restify.createServer({
   name: 'pod-healthcheck',
   version: '1.0.0',
 });
 
+server.on('after', restify.plugins.auditLogger({
+  log: bunyan.createLogger({
+    name: 'audit',
+    stream: process.stdout
+  }),
+  event: 'after'
+}));
+
 server.use(restify.plugins.queryParser());
 
-server.get('/health', (req, res) => {
+server.get('/healthchecks/pod/:name/assigned/:field/:value', function (req, res, next) {
+
+  var found = podDownstream[req.params.field];
+  var valid = req.params.value == found;
+
+  res.send(valid ? 200 : 500, found);
+  next( );
+});
+
+server.get('/health', (req, res, next) => {
   const field = req.query.field;
   const expected = req.query.expected;
 
@@ -28,7 +55,7 @@ server.get('/health', (req, res) => {
       available_fields: Object.keys(podMetadata),
       metadata: podMetadata,
     });
-    return;
+    return next( );
   }
 
   const actual = podMetadata[field];
@@ -39,7 +66,7 @@ server.get('/health', (req, res) => {
       message: `Unknown field: ${field}`,
       available_fields: Object.keys(podMetadata),
     });
-    return;
+    return next( );
   }
 
   if (expected === undefined) {
@@ -49,7 +76,7 @@ server.get('/health', (req, res) => {
       actual: actual,
       message: 'No expected value provided, returning actual value only',
     });
-    return;
+    return next( );
   }
 
   const match = actual === expected;
@@ -62,6 +89,7 @@ server.get('/health', (req, res) => {
     match: match,
     timestamp: new Date().toISOString(),
   });
+  return next( );
 });
 
 server.get('/ready', (req, res) => {
@@ -69,6 +97,7 @@ server.get('/ready', (req, res) => {
     status: 'ready',
     timestamp: new Date().toISOString(),
   });
+  return next( );
 });
 
 server.listen(PORT, '0.0.0.0', () => {
