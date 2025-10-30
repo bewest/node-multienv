@@ -1,3 +1,29 @@
+/**
+ * LEGACY GEN 3 PATTERN: renderMongoDB
+ * 
+ * This function is part of the legacy Gen 3 architecture and is kept for backward compatibility.
+ * 
+ * Gen 4 Two-Secret Architecture:
+ * ===============================
+ * Storage Composite creates TWO Secrets:
+ * 1. Storage Secret (parent, ns.mdn.io/composite=storage):
+ *    - Contains root/admin MongoDB credentials
+ *    - Used only by webhook, init Jobs, and migration Jobs
+ *    - Never projected into Nightscout containers
+ * 
+ * 2. App-Credentials Secret (<storage-account>-app-credentials):
+ *    - Contains ONLY credentials needed by Nightscout app
+ *    - Projected into Nightscout containers via envFrom
+ *    - Includes: MONGODB_URI, MONGO_DATABASE, MONGO_HOST, MONGO_PORT, MONGO_USERNAME, MONGO_PASSWORD
+ * 
+ * Security Benefits:
+ * - Principle of least privilege: Apps never see root credentials
+ * - Separation of concerns: Storage orchestration vs application access
+ * - RBAC flexibility: Different permissions for different Secret types
+ * 
+ * This renderMongoDB function creates a legacy Secret that is NOT used in Gen 4.
+ * It remains for backward compatibility during migration from Gen 3.
+ */
 function renderMongoDB(parent, config) {
   // Storage account ID from parent labels/annotation?
   const storageAccount = parent.metadata.labels?.['storage.nightscout.org/account'];
@@ -366,6 +392,9 @@ function renderNightscout(parent, config) {
             name: 'http'
           }
         ],
+        // Gen 4 Two-Secret Architecture: Use envFrom to project app-credentials Secret
+        // The app-credentials Secret contains MONGODB_URI and all MongoDB connection details
+        // This follows the principle of least privilege - Nightscout never sees root credentials
         envFrom: parent.data.APP_CREDENTIALS_SECRET ? [
           {
             secretRef: {
@@ -373,6 +402,8 @@ function renderNightscout(parent, config) {
             }
           }
         ] : undefined,
+        // Legacy Gen 3 fallback: Individual env vars with secretKeyRef
+        // Kept for backward compatibility during migration
         env: parent.data.APP_CREDENTIALS_SECRET ? undefined : [
           {
             name: 'MONGO_CONNECTION',
