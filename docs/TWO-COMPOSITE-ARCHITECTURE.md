@@ -50,6 +50,32 @@ The two-composite architecture separates storage (MongoDB) from compute (Nightsc
 
 **Webhook**: `POST /composite/compute/sync`
 
+### Kafka/CDC Integration Scope
+
+**Optional per-tenant CDC** (enabled via `CDC_ENABLED: "true"` in ConfigMap):
+
+**Children** (owned by Compute Composite):
+- KafkaTopic resources (per collection: entries, treatments, etc.)
+- KafkaConnector resource (MongoDB source connector)
+
+**External Infrastructure** (NOT managed by this repository):
+- Strimzi Kafka Operator (installation, CRD management)
+- Kafka cluster (brokers, Zookeeper, storage)
+- KafkaConnect cluster (workers, MongoDB connector plugin)
+- Connection endpoints (bootstrap servers, Connect REST API)
+
+**Integration Contract:**
+- External infrastructure provides running Kafka + Connect clusters
+- Connection details exported via ConfigMap/Secret to tenant namespace
+- This repository generates per-tenant KafkaTopic and KafkaConnector resources
+- Webhooks validate Kafka availability before generating CDC resources
+
+See [Kafka CDC Integration Contract](KAFKA-CDC-INTEGRATION.md) for complete details on:
+- What infrastructure must exist before enabling CDC
+- Required ConfigMaps/Secrets format
+- Per-tenant resource generation
+- Validation and troubleshooting
+
 ## Annotation-Driven Behavior
 
 ### Storage Composite Annotations

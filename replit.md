@@ -18,8 +18,10 @@ This project delivers a production-grade, multi-tenant Nightscout platform orche
 All tenants are deployed within a single `hosted-tenants` namespace. Resources are uniquely identified and isolated using a tenant ID prefix and standard Kubernetes labels.
 
 ### Controllers (Metacontroller)
-- **CompositeController (Tenant Orchestration)**: Manages tenant-specific resources (Nightscout deployments, MongoDB StatefulSets, Kafka topics, Kafka connectors) based on Kubernetes ConfigMaps.
+- **CompositeController (Tenant Orchestration)**: Manages tenant-specific resources (Nightscout deployments, MongoDB StatefulSets, and optionally per-tenant Kafka topics/connectors) based on Kubernetes ConfigMaps.
 - **DecoratorController (PVC Backup Policy)**: Enforces backup policies for MongoDB PVCs by injecting annotations, finalizers, and triggering VolumeSnapshot creation upon PVC deletion.
+
+**Note:** Kafka/CDC integration orchestrates **per-tenant resources** (KafkaTopic, KafkaConnector) while external infrastructure provides the shared Kafka platform. See [Kafka CDC Integration Contract](./docs/KAFKA-CDC-INTEGRATION.md).
 
 ### Key Technologies
 - **Orchestration**: Kubernetes, Metacontroller.
@@ -71,6 +73,9 @@ The platform employs a **two-composite architecture** (Storage and Compute) to s
 - **[Migration Playbook](./docs/MIGRATION-PLAYBOOK.md)**: Gen 3b → Gen 4 migration procedures
 - **[Migration from Legacy](./docs/MIGRATION-FROM-LEGACY.md)**: Legacy system migration patterns
 - **[Validation Checklist](./docs/VALIDATION-CHECKLIST.md)**: Pre-deployment validation steps
+
+### Integration & Dependencies
+- **[Kafka CDC Integration](./docs/KAFKA-CDC-INTEGRATION.md)**: Contract between node-multienv and external Kafka infrastructure, scope boundaries, prerequisites
 
 ### Reference
 - **[Labels and Annotations](./docs/LABELS-AND-ANNOTATIONS.md)**: Comprehensive label/annotation catalog
@@ -140,9 +145,13 @@ tk eval jsonnet/environments/gen4-test
 See `jsonnet/environments/gen4-test/` for complete examples.
 
 ## External Dependencies
-- **Strimzi Kafka Operator**: Manages Kafka clusters and KafkaConnect for CDC.
+- **Strimzi Kafka Operator**: Manages Kafka clusters and KafkaConnect for CDC (infrastructure-provided, not deployed by this repo).
+- **Kafka Cluster**: Brokers, Zookeeper/KRaft, storage (infrastructure-provided, not deployed by this repo).
+- **KafkaConnect Cluster**: Workers with MongoDB connector plugin (infrastructure-provided, not deployed by this repo).
 - **MongoDB**: Primary database, deployed as per-tenant StatefulSets.
 - **CSI Driver with Snapshot Support**: Used for creating VolumeSnapshots for PVC backups.
 - **Metacontroller**: Kubernetes add-on for custom controller development and orchestration.
 - **Consul**: Utilized for service discovery and health checking within the resolver interface.
 - **jsonnet-bundler (jb)**: Dependency manager for Jsonnet libraries (optional - library has zero dependencies).
+
+**Kafka/CDC Scope:** This repository orchestrates per-tenant CDC resources (KafkaTopic, KafkaConnector) but does NOT deploy Kafka infrastructure. See [Kafka CDC Integration Contract](./docs/KAFKA-CDC-INTEGRATION.md) for the complete boundary definition.
