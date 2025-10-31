@@ -3,7 +3,7 @@ run = "npm run start"
 
 [nix]
 channel = "stable-24_05"
-packages = ["python3"]
+packages = ["python3", "tanka"]
 
 [deployment]
 run = ["sh", "-c", "npm run start"]
