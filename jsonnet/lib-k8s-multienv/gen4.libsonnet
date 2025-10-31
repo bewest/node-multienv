@@ -215,6 +215,7 @@ local rbac = import 'rbac.libsonnet';
   //   gen4.stack(
   //     webhookImage: 'registry/webhook:v1.0',
   //     webhookReplicas: 3,
+  //     imagePullSecrets: [{name: 'registry-credentials'}],
   //   )
   stack(
     webhookImage='webhook:latest',
@@ -223,6 +224,7 @@ local rbac = import 'rbac.libsonnet';
     webhookReplicas=2,
     webhookPort=3000,
     webhookServiceAccount='webhook-metacontroller',
+    imagePullSecrets=[],
     storageResyncSeconds=30,
     computeResyncSeconds=30,
     pvcResyncSeconds=60,
@@ -257,6 +259,7 @@ local rbac = import 'rbac.libsonnet';
         port=webhookPort,
         runtimeMode='all',
         serviceAccountName=webhookServiceAccount,
+        imagePullSecrets=imagePullSecrets,
         resources=webhookResources,
       ),
       
