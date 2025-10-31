@@ -872,8 +872,9 @@ function configure (opts) {
       stringData: {
         MONGO_INITDB_ROOT_USERNAME: `admin_${accountId}`,
         MONGO_INITDB_ROOT_PASSWORD: objectId(),
-        // XXX: should unique database name be assigned here, or always use
-        // admin database for bootstrapping a new dedicated database?
+        // Use 'admin' database for root credentials initialization
+        // The storage composite webhook will generate app-credentials Secret
+        // with the actual database name (e.g., ns-a3f7) for application access
         MONGO_INITDB_DATABASE: 'admin'
       }
     };
@@ -954,8 +955,9 @@ function configure (opts) {
       ));
     }
     
-    // XXX: No WEB_NAME?
     // Extract config data from request body
+    // WEB_NAME was a legacy field from earlier generations
+    // Gen 4 uses TENANT_ID for site identification, automatically set below
     const configData = { ...req.body };
     delete configData.internal_name; // Remove metadata field
     
