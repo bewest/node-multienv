@@ -83,6 +83,9 @@
           matchLabels: {
             'ns.mdn.io/composite': 'storage'
           }
+        },
+        revisionHistory: {
+          fieldPaths: ['data']
         }
       },
       childResources=[
@@ -110,6 +113,9 @@
           matchLabels: {
             'ns.mdn.io/composite': 'compute'
           }
+        },
+        revisionHistory: {
+          fieldPaths: ['data']
         }
       },
       childResources=[
