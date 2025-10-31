@@ -30,6 +30,7 @@ local rbac = import '../../lib-k8s-multienv/rbac.libsonnet';
     webhookName='gen4-webhooks',
     webhookNamespace='default',
     webhookReplicas=3,
+    imagePullSecrets=[{name: 'registry-staget1pal0'}],  // DigitalOcean registry credentials
     storageResyncSeconds=60,
     computeResyncSeconds=60,
     pvcResyncSeconds=120,
@@ -65,6 +66,7 @@ local rbac = import '../../lib-k8s-multienv/rbac.libsonnet';
       port=3000,
       runtimeMode='webhook',
       serviceAccountName='webhook-metacontroller',
+      imagePullSecrets=[{name: 'registry-staget1pal0'}],
       resources={
         requests: { cpu: '100m', memory: '128Mi' },
         limits: { cpu: '500m', memory: '512Mi' },
@@ -79,6 +81,7 @@ local rbac = import '../../lib-k8s-multienv/rbac.libsonnet';
       port=3000,
       runtimeMode='provisioner',
       serviceAccountName='deployment-server',
+      imagePullSecrets=[{name: 'registry-staget1pal0'}],
       resources={
         requests: { cpu: '200m', memory: '256Mi' },
         limits: { cpu: '1000m', memory: '1Gi' },
@@ -93,6 +96,7 @@ local rbac = import '../../lib-k8s-multienv/rbac.libsonnet';
       port=3000,
       runtimeMode='healthcheck',
       serviceAccountName='consul-healthcheck',
+      imagePullSecrets=[{name: 'registry-staget1pal0'}],
       resources={
         requests: { cpu: '50m', memory: '64Mi' },
         limits: { cpu: '200m', memory: '256Mi' },
