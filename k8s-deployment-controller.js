@@ -893,14 +893,17 @@ function configure (opts) {
           'app.kubernetes.io/managed-by': 'metacontroller',
           'ns.mdn.io/composite': 'compute',
           'ns.mdn.io/tenant': tenantId,
-          'storage.nightscout.org/account': accountId
+          'storage.nightscout.org/account': accountId,
+          ...opts.default.configmap.labels
         },
         annotations: {
-          'ns.mdn.io/created-at': new Date().toISOString()
+          'ns.mdn.io/created-at': new Date().toISOString(),
+          ...opts.default.configmap.annotations
         }
       },
       data: {
         TENANT_ID: tenantId,
+        WEB_NAME: tenantId,
         ...configData
       }
     };
@@ -946,8 +949,8 @@ function configure (opts) {
   function handle_new_site_webhook(req, res, next) {
     const accountId = req.params.account;
     const bodyInternalName = req.body?.internal_name;
-    // const urlParamName = req.params.name || req.query.name || bodyInternalName;
-    const tenantId = bodyInternalName;
+    const urlParamName = req.params.name || req.query.name;
+    const tenantId = bodyInternalName || urlParamName;
     
     if (!tenantId) {
       return next(new restify.errors.BadRequestError(
@@ -955,9 +958,6 @@ function configure (opts) {
       ));
     }
     
-    // Extract config data from request body
-    // WEB_NAME was a legacy field from earlier generations
-    // Gen 4 uses TENANT_ID for site identification, automatically set below
     const configData = { ...req.body };
     delete configData.internal_name; // Remove metadata field
     
@@ -982,6 +982,7 @@ function configure (opts) {
         console.log("SITE CONFIGMAP READY", tenantId);
         res.json({
           tenant: tenantId,
+          compute: tenantId,
           account: accountId,
           resource: result.body
         });
