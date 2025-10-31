@@ -691,6 +691,316 @@ This allows operators to:
 - Override for specific tiers or tenants via ConfigMaps
 - Maintain sensible fallback defaults in code
 
+## Container Entry Points
+
+The platform uses a single multi-mode container image that can run different components based on command-line arguments. The `start_container.sh` script serves as the entrypoint, accepting a mode argument to determine which component to launch.
+
+### Usage
+
+```bash
+# In Kubernetes Pod spec
+command: ["./start_container.sh"]
+args: ["<mode>"]
+
+# Examples
+args: ["multienv-metactl-webhooks"]  # Gen 4 webhook server
+args: ["resolver"]                    # Traffic resolver
+args: ["tenant-pod-healthcheck"]      # Health check sidecar
+```
+
+### Gen 4 Active Components
+
+These components are actively used in Gen 4 deployments alongside Metacontroller:
+
+**multienv-metactl-webhooks**
+- **Purpose**: Metacontroller webhook server for Gen 4 two-composite architecture
+- **Entry Point**: `cmd/webhook/server.js`
+- **Endpoints**:
+  - `POST /composite/storage/sync` - Storage composite (Secret → MongoDB + Migration)
+  - `POST /composite/compute/sync` - Compute composite (ConfigMap → Nightscout + CDC)
+  - `POST /decorator/sync` - PVC backup policy decorator
+  - `POST /decorator/finalize` - PVC cleanup finalizer
+  - `GET /health` - Health check
+- **Port**: 3000 (configurable via `PORT` env var)
+- **Use Case**: Primary orchestration engine for Gen 4, handles resource generation from ConfigMaps/Secrets
+
+**deployment-controller**
+- **Purpose**: Gen 3 deployment controller providing /environs/ REST API
+- **Entry Point**: `k8s-deployment-controller.js`
+- **Endpoints**:
+  - `GET /environs/:name` - Fetch tenant configuration
+  - `POST /environs/:name` - Create/update tenant configuration
+  - `POST /accounts` - Provision new storage account (Gen 4)
+  - `POST /accounts/:account/sites/:name` - Provision new site (Gen 4)
+- **Use Case**: Frontend dashboard API for tenant configuration management
+- **Note**: Kept in Gen 4 for /environs/ API compatibility, orchestration handled by Metacontroller
+
+**deployment-operator**
+- **Purpose**: Pod watcher that syncs Consul updates via deployment-controller
+- **Entry Point**: `k8s-dispatcher.js` with `SYNC_CONTROLLER="deployment"`
+- **Behavior**: Watches Pod events, triggers deployment-controller sync
+- **Use Case**: Maintains Consul service discovery state for tenant pods
+- **Note**: Works alongside Gen 4 webhooks for Consul integration
+
+**resolver**
+- **Purpose**: Traffic routing and resolution for tenant HTTP requests
+- **Entry Point**: `redirector-server.js`
+- **Port**: Configured via `REDIRECTOR_PORT` (default: 3636)
+- **Use Case**: Routes external user requests to correct Nightscout instance via Consul DNS
+- **Note**: Core traffic component used across all generations
+
+**inspector**
+- **Purpose**: Alternative /environs/ REST API using direct ConfigMap access
+- **Entry Point**: `k8s-inspector.js`
+- **Endpoints**: Similar to deployment-controller but with direct K8s API access
+- **Use Case**: Lightweight alternative to deployment-controller for simple environments
+
+**tenant-pod-healthcheck**
+- **Purpose**: Health check sidecar injected into Nightscout pods
+- **Entry Point**: `cmd/pod-healthcheck/server.js`
+- **Port**: Configured via `HEALTHCHECK_PORT` (default: varies)
+- **Use Case**: Provides localhost-based health validation for Consul, eliminates DNS/API bottlenecks
+- **Note**: Critical for scaling to 10,000+ tenants (see [POD-HEALTHCHECK.md](POD-HEALTHCHECK.md))
+
+**demuxer**
+- **Purpose**: Consul-based load balancer and availability keeper
+- **Entry Point**: `tenant-availability-keeper.js`
+- **Use Case**: Cluster-wide load balancing and tenant availability tracking
+
+### Gen 3 Components (Replaced by Metacontroller)
+
+These components were used in Gen 3 but are replaced by Metacontroller webhooks in Gen 4:
+
+**dispatcher**
+- **Purpose**: ConfigMap watcher that triggers deployment-controller
+- **Entry Point**: `k8s-dispatcher.js`
+- **Status**: ⚠️ **Deprecated in Gen 4** - Metacontroller handles ConfigMap watching
+- **Migration**: Use Metacontroller CompositeController instead
+
+### Gen 1 Components (Legacy)
+
+These components supported the original single-host multi-tenant architecture:
+
+**multienv**
+- **Purpose**: Full Gen 1 stack: master.js + redirector-server.js + nginx
+- **Entry Point**: Runs `setup_main()` then launches both master.js and redirector-server.js
+- **Use Case**: Legacy single-host deployments (pre-Kubernetes)
+- **Status**: Legacy - Gen 4 uses Kubernetes-native orchestration
+
+**runner**
+- **Purpose**: Process manager only (master.js)
+- **Entry Point**: `master.js`
+- **Use Case**: Worker process management for Gen 1
+- **Status**: Legacy - Gen 4 uses Kubernetes Deployments for process management
+
+### Utility Commands
+
+**bash**
+- **Purpose**: Interactive shell for debugging
+- **Example**: `kubectl exec -it <pod> -- ./start_container.sh bash`
+
+**env**
+- **Purpose**: Print all environment variables
+- **Example**: `kubectl exec <pod> -- ./start_container.sh env`
+
+**setup_workdir**
+- **Purpose**: Install npm dependencies in worker directory
+- **Command**: `cd $WORKER_DIR && npm install`
+
+**nginx-for <type> [output]**
+- **Purpose**: Generate nginx configuration templates
+- **Types**:
+  - `std-multienv` - Legacy nginx config for hybrid runner+resolver
+  - `inspector` - Nginx config for inspector interface
+  - `demuxer` - Nginx config for cluster-wide demuxer
+  - `resolver` - Nginx config for resolver interface
+- **Example**: `./start_container.sh nginx-for resolver /etc/nginx/nginx.conf`
+
+**help**
+- **Purpose**: Display usage information
+- **Example**: `./start_container.sh help`
+
+### Kubernetes Pod Examples
+
+#### Gen 4 Webhook Deployment
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gen4-webhooks
+  namespace: default
+spec:
+  replicas: 3
+  template:
+    spec:
+      containers:
+      - name: webhook
+        image: nightscout-multienv:latest
+        command: ["./start_container.sh"]
+        args: ["multienv-metactl-webhooks"]
+        env:
+        - name: PORT
+          value: "3000"
+        - name: DEFAULT_MONGO_IMAGE
+          value: "mongo:6"
+        ports:
+        - containerPort: 3000
+          name: http
+```
+
+#### Deployment Controller (Frontend API)
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: deployment-controller
+  namespace: default
+spec:
+  replicas: 2
+  template:
+    spec:
+      containers:
+      - name: controller
+        image: nightscout-multienv:latest
+        command: ["./start_container.sh"]
+        args: ["deployment-controller"]
+        env:
+        - name: PORT
+          value: "3000"
+        - name: NAMESPACE
+          value: "hosted-tenants"
+```
+
+#### Resolver (Traffic Routing)
+
+```yaml
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: resolvers
+  namespace: default
+spec:
+  template:
+    spec:
+      containers:
+      - name: resolver
+        image: nightscout-multienv:latest
+        command: ["./start_container.sh"]
+        args: ["resolver"]
+        env:
+        - name: REDIRECTOR_PORT
+          value: "3636"
+        - name: CONSUL_HOST
+          value: "consul.service.consul"
+```
+
+#### Pod Healthcheck Sidecar
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: nightscout-tenant
+spec:
+  containers:
+  - name: nightscout
+    image: nightscout/cgm-remote-monitor:latest
+    # ... nightscout config ...
+  
+  - name: healthcheck
+    image: nightscout-multienv:latest
+    command: ["./start_container.sh"]
+    args: ["tenant-pod-healthcheck"]
+    env:
+    - name: NIGHTSCOUT_HOST
+      value: "localhost"
+    - name: NIGHTSCOUT_PORT
+      value: "1337"
+```
+
+### Migration Guide: Gen 3 → Gen 4
+
+**Gen 3 Setup:**
+```yaml
+# ConfigMap watcher
+- args: ["dispatcher"]
+
+# Deployment controller
+- args: ["deployment-controller"]
+
+# Operator (pod watcher)
+- args: ["deployment-operator"]
+```
+
+**Gen 4 Setup:**
+```yaml
+# NEW: Metacontroller webhooks (replaces dispatcher)
+- args: ["multienv-metactl-webhooks"]
+
+# KEEP: Deployment controller (provides /environs/ API)
+- args: ["deployment-controller"]
+
+# KEEP: Operator (syncs Consul)
+- args: ["deployment-operator"]
+
+# REMOVE: dispatcher (Metacontroller handles ConfigMap watching)
+```
+
+### Environment Variables by Component
+
+| Component | Key Variables | Default |
+|-----------|--------------|---------|
+| **multienv-metactl-webhooks** | `PORT` | `3000` |
+| | `DEFAULT_MONGO_IMAGE` | `mongo:6` |
+| | `DEFAULT_NS_IMAGE` | `nightscout/cgm-remote-monitor:latest` |
+| **deployment-controller** | `PORT` | `3000` |
+| | `NAMESPACE` | `hosted-tenants` |
+| **deployment-operator** | `SYNC_CONTROLLER` | `deployment` |
+| **resolver** | `REDIRECTOR_PORT` | `3636` |
+| | `CONSUL_HOST` | Auto-discovered |
+| **tenant-pod-healthcheck** | `NIGHTSCOUT_HOST` | `localhost` |
+| | `NIGHTSCOUT_PORT` | `1337` |
+| **inspector** | `PORT` | `3000` |
+| **demuxer** | `PORT` | `3000` |
+| | `DEMUXER_SERVICE_URI` | `http://demuxers:3000` |
+
+### Troubleshooting Entry Points
+
+**Check which component is running:**
+```bash
+kubectl exec <pod> -- ps aux
+# Look for process name (-a flag from exec)
+```
+
+**View startup logs:**
+```bash
+kubectl logs <pod>
+# First line: "starting container..."
+# Shows which entry point was executed
+```
+
+**Test entry point locally:**
+```bash
+docker run -it nightscout-multienv:latest ./start_container.sh help
+docker run -it nightscout-multienv:latest ./start_container.sh bash
+```
+
+**Common issues:**
+
+1. **Wrong entry point**: Pod crashes immediately
+   - Check args in Pod spec matches available modes
+   - View: `./start_container.sh help`
+
+2. **Missing environment variables**: Process starts but fails
+   - Check required env vars for specific component
+   - Use: `kubectl exec <pod> -- ./start_container.sh env`
+
+3. **Port conflicts**: Pod runs but health check fails
+   - Ensure PORT environment variable matches containerPort
+   - Verify no port overlap between components
+
 ## Best Practices
 
 1. **Use version tags in production**: Never use `:latest` in production
@@ -704,6 +1014,7 @@ This allows operators to:
 7. **Configure webhook defaults once**: Set global standards via webhook environment variables
 8. **Override per tier**: Use ConfigMap parameters for tier-specific requirements (basic, premium, enterprise)
 9. **Keep backup policies consistent**: Use webhook defaults unless tenant has specific compliance requirements
+10. **Use correct entry point for Gen 4**: `multienv-metactl-webhooks` for orchestration, keep `deployment-controller` for /environs/ API
 
 ## See Also
 
