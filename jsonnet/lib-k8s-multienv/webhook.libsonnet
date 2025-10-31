@@ -95,7 +95,6 @@
               {
                 name: 'webhook',
                 image: image,
-                command: ['./start_container.sh'],
                 args: containerArgs,
                 ports: [
                   {
