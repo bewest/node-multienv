@@ -92,6 +92,10 @@ case "${1-help}" in
     cd cmd/pod-healthcheck
     exec -a tenant-pod-healthcheck node server.js
   ;;
+  multienv-metactl-webhooks)
+    cd cmd/webhook
+    exec -a multienv-metactl-webhooks node server.js
+  ;;
   dispatcher)
     exec -a dispatcher node k8s-dispatcher.js
   ;;
@@ -144,15 +148,27 @@ case "${1-help}" in
     cat <<-EOF
       $1 - this messsage
       bash - run bash
-      multienv - classic setup with master/server, redirector-server.js
-      resolver - just redirector-server.js
-      runner - just master.js
-      inspector - k8s-inspector.js - REST API using ConfigMaps
-      dispatcher - k8s-dispatcher.js
-      demuxer - tenant-availability-keeper.js
 
+      Gen 4 Components (Active):
+      multienv-metactl-webhooks - Metacontroller webhook server (cmd/webhook/server.js)
+                                  Handles Storage/Compute composite controllers
+      deployment-controller - k8s-deployment-controller.js
+                             Provides /environs/ REST API for frontend dashboard
+      deployment-operator - k8s-dispatcher.js with SYNC_CONTROLLER="deployment"
+                           Watches pods, syncs Consul updates
+      resolver - redirector-server.js - Traffic routing to tenant instances
+      inspector - k8s-inspector.js - Alternative /environs/ REST API
+      tenant-pod-healthcheck - Health check sidecar for Nightscout pods
+      demuxer - tenant-availability-keeper.js - Consul-based load balancer
 
-      Helpers
+      Gen 3 Components (Replaced by Metacontroller):
+      dispatcher - k8s-dispatcher.js - ConfigMap watcher (use Metacontroller instead)
+
+      Gen 1 Components (Legacy - Multi-Tenant Single Host):
+      multienv - Classic setup: master.js + redirector-server.js + nginx
+      runner - Process manager only (master.js)
+
+      Helpers:
       setup_workdir - (cd \$WORKER_DIR && npm install)
       nginx-for <container> [/dev/stdout]
         Print and optionally save nginx configuration for container.
@@ -160,7 +176,6 @@ case "${1-help}" in
         * inspector - nginx config for inspector interface
         * demuxer - nginx config for cluster-wide cluster demuxer
         * resolver - nginx config for resolver interface
-        
 
 EOF
   ;;
