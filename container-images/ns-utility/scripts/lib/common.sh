@@ -1,8 +1,8 @@
 #!/bin/bash
 set -euo pipefail
 
-readonly SCRIPT_NAME="$(basename "${BASH_SOURCE[0]}")"
-readonly LOG_LEVEL="${LOG_LEVEL:-INFO}"
+SCRIPT_NAME="$(basename "${BASH_SOURCE[0]}")"
+LOG_LEVEL="${LOG_LEVEL:-INFO}"
 
 log() {
   local level="$1"

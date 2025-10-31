@@ -9,7 +9,7 @@
 //   // Create storage composite controller
 //   metacontroller.compositeController(
 //     name='storage-composite',
-//     webhookUrl='http://webhook-service:3000/sync-storage',
+//     webhookUrl='http://webhook-service:3000/storage/sync',
 //     parentResource={ apiVersion: 'v1', resource: 'secrets' }
 //   )
 
@@ -70,7 +70,7 @@
 
   // Storage Composite Controller (Secret → MongoDB + Migration)
   storageComposite(
-    webhookUrl='http://webhook-service:3000/sync-storage',
+    webhookUrl='http://webhook-service:3000/composite/storage/sync',
     resyncPeriodSeconds=30,
   )::
     $.compositeController(
@@ -79,6 +79,11 @@
       parentResource={
         apiVersion: 'v1',
         resource: 'secrets',
+        labelSelector: {
+          matchLabels: {
+            'ns.mdn.io/composite': 'storage'
+          }
+        }
       },
       childResources=[
         { apiVersion: 'apps/v1', resource: 'statefulsets' },
@@ -92,7 +97,7 @@
 
   // Compute Composite Controller (ConfigMap → Nightscout + CDC)
   computeComposite(
-    webhookUrl='http://webhook-service:3000/sync-compute',
+    webhookUrl='http://webhook-service:3000/composite/compute/sync',
     resyncPeriodSeconds=30,
   )::
     $.compositeController(
@@ -101,6 +106,11 @@
       parentResource={
         apiVersion: 'v1',
         resource: 'configmaps',
+        labelSelector: {
+          matchLabels: {
+            'ns.mdn.io/composite': 'compute'
+          }
+        }
       },
       childResources=[
         { apiVersion: 'apps/v1', resource: 'deployments' },
@@ -142,15 +152,15 @@
     pvcResyncSeconds=60,
   ):: {
     storage: $.storageComposite(
-      webhookUrl=webhookServiceUrl + '/sync-storage',
+      webhookUrl=webhookServiceUrl + '/composite/storage/sync',
       resyncPeriodSeconds=storageResyncSeconds,
     ),
     compute: $.computeComposite(
-      webhookUrl=webhookServiceUrl + '/sync-compute',
+      webhookUrl=webhookServiceUrl + '/composite/compute/sync',
       resyncPeriodSeconds=computeResyncSeconds,
     ),
     pvcBackup: $.pvcBackupDecorator(
-      webhookUrl=webhookServiceUrl + '/sync-pvc-decorator',
+      webhookUrl=webhookServiceUrl + '/decorator/sync',
       resyncPeriodSeconds=pvcResyncSeconds,
     ),
   },
