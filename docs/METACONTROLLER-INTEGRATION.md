@@ -6,6 +6,16 @@
 
 This document describes how the webhook server integrates with Metacontroller and provides the technical details for the webhook protocol implementation in the **two-composite architecture**.
 
+## Version Requirements
+
+**Metacontroller v4.0 or higher is required** for the Gen 4 architecture. The Jsonnet library generates CompositeController CRDs with `revisionHistory` fields, which are mandatory in Metacontroller v4.x+.
+
+- **Tested Version**: v4.12.0
+- **Minimum Version**: v4.0.0
+- **Required Feature**: `parentResource.revisionHistory.fieldPaths` support
+
+The `revisionHistory` field tells Metacontroller which fields to track for changes (e.g., `data` field in ConfigMaps/Secrets). Without this field, v4.x will return errors like `"CustomResourceDefinition.apiextensions.k8s.io \"configmaps.\" not found"`.
+
 ## Metacontroller Webhook Protocol
 
 Metacontroller uses a webhook-based reconciliation model. Controllers watch resources and call webhooks to determine desired state.

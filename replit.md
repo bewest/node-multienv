@@ -86,6 +86,12 @@ The platform employs a **two-composite architecture** (Storage and Compute) to s
 
 ## Recent Changes
 
+### 2025-10-31: Metacontroller v4.x Compatibility
+- Added required `revisionHistory` field to CompositeController CRDs for Metacontroller v4.x+
+- Storage and Compute composites now include `revisionHistory.fieldPaths: ['data']`
+- Fixes `"configmaps." not found"` error in Metacontroller v4.12.0
+- Updated documentation to specify minimum version requirement (v4.0+)
+
 ### 2025-10-31: imagePullSecrets Support
 - Added `imagePullSecrets` parameter to all Jsonnet webhook deployment functions
 - Supports private container registries (DigitalOcean, ECR, GCR, etc.)
@@ -166,7 +172,7 @@ See `jsonnet/environments/gen4-test/` for complete examples.
 - **KafkaConnect Cluster**: Workers with MongoDB connector plugin (infrastructure-provided, not deployed by this repo).
 - **MongoDB**: Primary database, deployed as per-tenant StatefulSets.
 - **CSI Driver with Snapshot Support**: Used for creating VolumeSnapshots for PVC backups.
-- **Metacontroller**: Kubernetes add-on for custom controller development and orchestration.
+- **Metacontroller v4.x+**: Kubernetes add-on for custom controller development and orchestration. Requires v4.0+ for `revisionHistory` support in CompositeController CRDs (tested with v4.12.0).
 - **Consul**: Utilized for service discovery and health checking within the resolver interface.
 - **jsonnet-bundler (jb)**: Dependency manager for Jsonnet libraries (optional - library has zero dependencies).
 
