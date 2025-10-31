@@ -31,37 +31,50 @@ jb install  # Install dependencies (k8s-libsonnet)
 
 ## Quick Start
 
-### Simple Deployment
+### Gen 4 Complete Stack (Recommended)
+
+One function call deploys everything - webhook server, RBAC, and Metacontroller CRDs:
 
 ```jsonnet
-local nightscout = import 'lib/main.libsonnet';
-
-nightscout.webhook.stack(
-  name='webhook-service',
-  image='your-registry/webhook:latest',
-  namespace='default',
-  replicas=2,
-)
-```
-
-### Gen 4 Full Stack
-
-```jsonnet
-local webhook = import 'lib/webhook.libsonnet';
-local rbac = import 'lib/rbac.libsonnet';
-local metacontroller = import 'lib/metacontroller.libsonnet';
+local gen4 = import 'lib-k8s-multienv/gen4.libsonnet';
 
 {
+  gen4: gen4.stack(
+    webhookImage: 'your-registry/webhook:v1.0',
+    webhookReplicas: 3,
+  ),
+}
+```
+
+This generates **8 Kubernetes resources**:
+- ServiceAccount with full orchestration permissions
+- ClusterRole and ClusterRoleBinding
+- Webhook Deployment (all-in-one) + Service
+- Storage, Compute, and PVC Backup controllers
+
+Test without a cluster:
+```bash
+tk eval jsonnet/environments/gen4-test
+```
+
+### Custom Webhook Deployment
+
+For advanced use cases (multi-component, blue/green), use individual modules:
+
+```jsonnet
+local webhook = import 'lib-k8s-multienv/webhook.libsonnet';
+local rbac = import 'lib-k8s-multienv/rbac.libsonnet';
+
+{
+  rbac: rbac.serviceAccount('webhook-metacontroller', 'default') +
+        rbac.fullOrchestrationRole('webhook-metacontroller') +
+        rbac.clusterRoleBinding('webhook-metacontroller'),
+  
   webhook: webhook.stack(
     name='gen4-webhooks',
     image='your-registry/webhook:v1.0',
     replicas=3,
-  ),
-  rbac: rbac.serviceAccount('webhook-metacontroller') +
-        rbac.fullOrchestrationRole('webhook-metacontroller') +
-        rbac.clusterRoleBinding('webhook-metacontroller'),
-  controllers: metacontroller.controllers(
-    webhookServiceUrl='http://gen4-webhooks.default.svc:3000',
+    runtimeMode='webhook',  // or 'provisioner', 'healthcheck', 'all'
   ),
 }
 ```
@@ -104,11 +117,19 @@ rbac.clusterRoleBinding(name, serviceAccountNamespace)
 
 ### gen4.libsonnet
 
-Gen 4 deployment addon (opt-in):
+Gen 4 deployment helpers:
 
 ```jsonnet
-local gen4 = import 'lib/gen4.libsonnet';
+local gen4 = import 'lib-k8s-multienv/gen4.libsonnet';
 
+// Simple: Complete Gen 4 stack in one call
+gen4.stack(
+  webhookImage: 'registry/webhook:v1.0',
+  webhookReplicas: 3,
+  storageResyncSeconds: 60,
+)
+
+// Advanced: Config-based deployment (requires parent object)
 gen4.resources($)  // Add Gen 4 based on _config.gen4
 gen4.blueGreen($, 'blue')
 gen4.custom($, webhookName='pilot', controllerPrefix='pilot')

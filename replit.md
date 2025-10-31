@@ -108,10 +108,41 @@ The platform employs a **two-composite architecture** (Storage and Compute) to s
 └── package.json                 # Node.js dependencies
 ```
 
+## Jsonnet Library Usage
+
+The platform includes a batteries-included Jsonnet library for easy deployment:
+
+### Simple Gen 4 Deployment
+
+```jsonnet
+local gen4 = import 'lib-k8s-multienv/gen4.libsonnet';
+
+{
+  gen4: gen4.stack(
+    webhookImage: 'registry/webhook:v1.0',
+    webhookReplicas: 3,
+  ),
+}
+```
+
+This single function call generates:
+- ServiceAccount with full orchestration permissions
+- ClusterRole and ClusterRoleBinding
+- Webhook Deployment (all-in-one) + Service
+- Storage, Compute, and PVC Backup Metacontroller CRDs
+
+### Test Without Cluster
+
+```bash
+tk eval jsonnet/environments/gen4-test
+```
+
+See `jsonnet/environments/gen4-test/` for complete examples.
+
 ## External Dependencies
 - **Strimzi Kafka Operator**: Manages Kafka clusters and KafkaConnect for CDC.
 - **MongoDB**: Primary database, deployed as per-tenant StatefulSets.
 - **CSI Driver with Snapshot Support**: Used for creating VolumeSnapshots for PVC backups.
 - **Metacontroller**: Kubernetes add-on for custom controller development and orchestration.
 - **Consul**: Utilized for service discovery and health checking within the resolver interface.
-- **jsonnet-bundler (jb)**: Dependency manager for Jsonnet libraries.
+- **jsonnet-bundler (jb)**: Dependency manager for Jsonnet libraries (optional - library has zero dependencies).
