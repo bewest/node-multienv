@@ -12,6 +12,110 @@ The two-composite architecture separates storage (MongoDB) from compute (Nightsc
 4. **Mixed Environment**: Gen 3b and Gen 4 run simultaneously via label-based routing
 5. **Gradual Migration**: 1300 existing sites migrate one-at-a-time using label changes
 
+## Gen 4 Component Architecture
+
+Gen 4 introduces Metacontroller-based webhooks for orchestration while preserving critical Gen 1-3 components for specific purposes:
+
+### Active Components in Gen 4
+
+**New: Metacontroller Webhooks**
+- **multienv-metactl-webhooks**: Replaces Gen 3 `dispatcher` for ConfigMap/Secret orchestration
+  - Handles Storage composite (Secret → MongoDB StatefulSet + Migration)
+  - Handles Compute composite (ConfigMap → Nightscout Deployment + CDC)
+  - Handles PVC decorator (backup policy enforcement)
+  - Entry point: `cmd/webhook/server.js`
+  - Port: 3000
+
+**Preserved: Frontend API**
+- **deployment-controller**: Provides `/environs/` REST API for frontend dashboard
+  - Allows users to personalize configuration via web interface
+  - Handles account/site provisioning endpoints
+  - Entry point: `k8s-deployment-controller.js`
+  - **Why kept**: Frontend dashboard depends on this API
+
+**Preserved: Service Discovery**
+- **deployment-operator**: Watches pods and syncs Consul updates
+  - Entry point: `k8s-dispatcher.js` with `SYNC_CONTROLLER="deployment"`
+  - **Why kept**: Maintains Consul service discovery state
+- **resolver**: Traffic routing via Consul DNS
+  - Entry point: `redirector-server.js`
+  - **Why kept**: Core traffic component for tenant HTTP requests
+
+**Preserved: Health Validation**
+- **tenant-pod-healthcheck**: Sidecar for localhost-based health checks
+  - Entry point: `cmd/pod-healthcheck/server.js`
+  - **Why kept**: Eliminates DNS/API bottlenecks, enables 10,000+ tenant scaling
+
+**Optional: Alternative APIs**
+- **inspector**: Alternative `/environs/` API using direct K8s access
+  - Entry point: `k8s-inspector.js`
+  - **Use case**: Lightweight environments without full deployment-controller
+
+### Deprecated Components in Gen 4
+
+**Replaced by Metacontroller:**
+- **dispatcher** (ConfigMap watcher): Metacontroller handles ConfigMap watching and triggers webhooks
+- **deployment-controller orchestration**: Webhooks generate resources, deployment-controller only serves API
+
+**Legacy (Gen 1):**
+- **multienv**: Single-host architecture (master.js + redirector-server.js + nginx)
+- **runner**: Process manager (master.js)
+- **Status**: Not used in Kubernetes-based deployments
+
+### Architecture Diagram
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                      Gen 4 Architecture                      │
+├─────────────────────────────────────────────────────────────┤
+│                                                              │
+│  ConfigMap/Secret Changes                                   │
+│         │                                                    │
+│         ▼                                                    │
+│  ┌──────────────────┐                                       │
+│  │ Metacontroller   │  Watches resources with               │
+│  │  (External)      │  ns.mdn.io/composite label            │
+│  └────────┬─────────┘                                       │
+│           │                                                  │
+│           │ HTTP POST                                        │
+│           ▼                                                  │
+│  ┌────────────────────────────┐                             │
+│  │ multienv-metactl-webhooks  │  Gen 4 Orchestration        │
+│  │  /composite/storage/sync   │  - Generate StatefulSets    │
+│  │  /composite/compute/sync   │  - Generate Deployments     │
+│  │  /decorator/sync           │  - Inject backup policies   │
+│  └────────────────────────────┘                             │
+│                                                              │
+│  ┌────────────────────────────┐                             │
+│  │  deployment-controller     │  Preserved for:             │
+│  │  /environs/ API            │  - Frontend dashboard       │
+│  │  /accounts/ API            │  - User configuration       │
+│  └────────────────────────────┘                             │
+│                                                              │
+│  ┌────────────────────────────┐                             │
+│  │  deployment-operator       │  Preserved for:             │
+│  │  Pod → Consul sync         │  - Service discovery        │
+│  └────────────────────────────┘                             │
+│                                                              │
+│  ┌────────────────────────────┐                             │
+│  │  resolver                  │  Preserved for:             │
+│  │  redirector-server.js      │  - Traffic routing          │
+│  └────────────────────────────┘                             │
+│                                                              │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### Migration Summary
+
+| Component | Gen 3 | Gen 4 | Notes |
+|-----------|-------|-------|-------|
+| ConfigMap Orchestration | dispatcher | multienv-metactl-webhooks | Metacontroller replaces custom watcher |
+| Resource Generation | deployment-controller | multienv-metactl-webhooks | Webhooks handle resource templates |
+| Frontend API | deployment-controller | deployment-controller | **Kept** - dashboard dependency |
+| Consul Sync | deployment-operator | deployment-operator | **Kept** - service discovery |
+| Traffic Routing | resolver | resolver | **Kept** - core traffic component |
+| Health Check | tenant-pod-healthcheck | tenant-pod-healthcheck | **Kept** - scaling performance |
+
 ## Architecture
 
 ### Storage Composite
