@@ -8,8 +8,8 @@
 // Deploy with:
 //   tk apply environments/production-progressive
 
-local config = import '../../lib/config.libsonnet';
-local gen4 = import '../../lib/gen4.libsonnet';
+local config = import '../../lib-k8s-multienv/config.libsonnet';
+local gen4 = import '../../lib-k8s-multienv/gen4.libsonnet';
 
 (import '../main.jsonnet.original') + config + {
   _config+:: {

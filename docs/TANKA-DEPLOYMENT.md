@@ -1,5 +1,21 @@
 # Tanka Deployment Guide
 
+## 🚀 Quick Test (No Cluster Required!)
+
+Want to see what the library generates without deploying anything?
+
+```bash
+# Evaluate the test environment (no k8s cluster needed!)
+tk eval jsonnet/environments/gen4-test
+
+# See all generated resources
+tk eval jsonnet/environments/gen4-test | grep "kind:"
+```
+
+This shows both **simple** (one function call) and **advanced** (custom multi-component) deployment patterns.
+
+---
+
 ## Overview
 
 This guide explains how to use **Grafana Tanka** with **Jsonnet** to deploy the Nightscout multi-tenant platform. Tanka provides a clean, reusable alternative to raw YAML manifests, with built-in diff/preview capabilities and strong parameterization support.
@@ -10,6 +26,7 @@ This guide explains how to use **Grafana Tanka** with **Jsonnet** to deploy the 
 - **Diff preview**: See exactly what will change (`tk diff`)
 - **Parameterized**: Easy blue/green deployments, multi-component scaling
 - **GitOps-friendly**: Export to YAML for ArgoCD/Flux
+- **Zero Dependencies**: Library uses plain Kubernetes objects, no k8s-libsonnet required
 
 ---
 
@@ -62,20 +79,21 @@ This installs the library into `vendor/lib/` and creates appropriate import mapp
 ```
 your-nightscout-platform/
 ├── jsonnet/                      # Jsonnet library (jb installable)
-│   ├── lib/                     # Reusable Jsonnet modules
+│   ├── lib-k8s-multienv/        # Reusable Jsonnet modules
 │   │   ├── main.libsonnet       # Entry point (exports all modules)
-│   │   ├── rbac.libsonnet       # RBAC helpers (ServiceAccounts, ClusterRoles)
-│   │   ├── webhook.libsonnet    # Webhook deployment helpers
+│   │   ├── gen4.libsonnet       # Gen 4 stack() + deployment helpers
+│   │   ├── webhook.libsonnet    # Webhook Deployment/Service helpers
+│   │   ├── rbac.libsonnet       # RBAC helpers (plain K8s objects)
 │   │   ├── metacontroller.libsonnet # Metacontroller CRD helpers
-│   │   ├── config.libsonnet     # Configuration templates
-│   │   └── gen4.libsonnet       # Gen 4 deployment addon
-│   ├── jsonnetfile.json         # Package metadata
-│   ├── environments/default/
-│   │   └── examples/            # Example configurations
-│   │       ├── 02-gen4-simple.jsonnet
-│   │       ├── 03-gen4-multicomponent.jsonnet
-│   │       ├── 04-gen4-bluegreen.jsonnet
-│   │       └── 05-gen4-custom-names.jsonnet
+│   │   └── config.libsonnet     # Configuration templates
+│   ├── environments/
+│   │   ├── gen4-test/           # Test environment (tk eval works without cluster!)
+│   │   │   ├── main.jsonnet     # Simple and advanced usage examples
+│   │   │   ├── spec.json
+│   │   │   └── README.md
+│   │   └── default/
+│   │       └── examples/        # Example configurations
+│   ├── jsonnetfile.json         # Package metadata (zero dependencies!)
 │   └── README.md                # Library documentation
 ├── lib/                         # Node.js/JavaScript code (webhook server)
 │   ├── routes/                  # Express routes
@@ -91,9 +109,6 @@ your-nightscout-platform/
 │       ├── main.jsonnet
 │       ├── spec.json
 │       └── jsonnetfile.json
-├── jsonnetfile.json             # Jsonnet dependencies
-├── jsonnetfile.lock.json        # Dependency lock file
-└── vendor/                      # Downloaded dependencies (gitignore)
 ```
 
 ---
@@ -124,37 +139,48 @@ tk env set environments/dev \
 # }
 ```
 
-### 2. Create Your First Deployment
+### 2. Create Your First Deployment (Simple Pattern)
 
 **`environments/dev/main.jsonnet`:**
 
 ```jsonnet
-// Import libraries (after jb install)
-local rbac = import 'lib/rbac.libsonnet';
-local webhook = import 'lib/webhook.libsonnet';
-local metacontroller = import 'lib/metacontroller.libsonnet';
+// Import the gen4 module (after jb install)
+local gen4 = import 'lib-k8s-multienv/gen4.libsonnet';
 
 {
-  // RBAC
-  rbac: {
-    serviceAccount: rbac.serviceAccount('webhook-service'),
-    clusterRole: rbac.fullOrchestrationRole('webhook-service'),
-    clusterRoleBinding: rbac.clusterRoleBinding('webhook-service'),
-  },
-
-  // Webhook deployment
-  webhook: webhook.stack(
-    name='webhook-service',
-    image='your-registry/webhook:latest',
-    replicas=2,
+  // Complete Gen 4 stack in one function call!
+  // This creates: ServiceAccount, ClusterRole, ClusterRoleBinding,
+  // Webhook Deployment, Service, and all 3 Metacontroller CRDs
+  gen4: gen4.stack(
+    webhookImage: 'your-registry/webhook:v1.0',
+    webhookReplicas: 3,
+    storageResyncSeconds: 60,
+    computeResyncSeconds: 60,
   ),
-
-  // Metacontroller
-  controllers: metacontroller.controllers(),
 }
 ```
 
-### 3. Preview and Apply
+**That's it!** This generates 8+ Kubernetes resources including full RBAC, webhook server, and Metacontroller CRDs.
+
+### 3. Test Without a Cluster (Optional)
+
+Before deploying to your cluster, you can test the Jsonnet evaluation locally:
+
+```bash
+# Evaluate and see the generated Kubernetes YAML
+tk eval environments/dev
+
+# Or use the provided test environment
+tk eval jsonnet/environments/gen4-test
+```
+
+This is useful for:
+- Catching syntax errors before deployment
+- Validating generated resources
+- Understanding what will be created
+- CI/CD pipeline validation
+
+### 4. Preview and Apply
 
 ```bash
 # Preview what will be created (like git diff)
@@ -164,22 +190,46 @@ tk diff environments/dev
 tk apply environments/dev
 
 # Verify deployment
-kubectl get pods -l app=webhook-service
+kubectl get pods -l app=gen4-webhooks
 kubectl get compositecontrollers
+kubectl get decoratorcontrollers
 ```
 
 ---
 
 ## Deployment Patterns
 
-### Pattern 1: Simple Deployment (Development)
+### Pattern 1: Simple Gen 4 Stack (Recommended for Most Use Cases)
+
+Use `gen4.stack()` for a complete deployment in one function call:
+
+```jsonnet
+local gen4 = import 'lib-k8s-multienv/gen4.libsonnet';
+
+{
+  gen4: gen4.stack(
+    webhookImage: 'your-registry/webhook:v1.0',
+    webhookName: 'gen4-webhooks',
+    webhookReplicas: 3,
+  ),
+}
+```
+
+**Generates:**
+- ServiceAccount + ClusterRole + ClusterRoleBinding
+- Webhook Deployment (all-in-one) + Service
+- Storage CompositeController
+- Compute CompositeController
+- PVC Backup DecoratorController
+
+### Pattern 2: Manual Assembly (Development/Learning)
 
 Use `examples/simple.jsonnet` as a starting point:
 
 ```jsonnet
-local rbac = import 'lib/rbac.libsonnet';
-local webhook = import 'lib/webhook.libsonnet';
-local metacontroller = import 'lib/metacontroller.libsonnet';
+local rbac = import 'lib-k8s-multienv/rbac.libsonnet';
+local webhook = import 'lib-k8s-multienv/webhook.libsonnet';
+local metacontroller = import 'lib-k8s-multienv/metacontroller.libsonnet';
 
 {
   rbac: {
@@ -210,9 +260,9 @@ local metacontroller = import 'lib/metacontroller.libsonnet';
 Use `examples/blue-green.jsonnet` for zero-downtime upgrades:
 
 ```jsonnet
-local rbac = import 'lib/rbac.libsonnet';
-local webhook = import 'lib/webhook.libsonnet';
-local metacontroller = import 'lib/metacontroller.libsonnet';
+local rbac = import 'lib-k8s-multienv/rbac.libsonnet';
+local webhook = import 'lib-k8s-multienv/webhook.libsonnet';
+local metacontroller = import 'lib-k8s-multienv/metacontroller.libsonnet';
 
 {
   // Shared ServiceAccount (both blue and green use same permissions)
@@ -293,9 +343,9 @@ local metacontroller = import 'lib/metacontroller.libsonnet';
 Use `examples/multi-component.jsonnet` for independent scaling:
 
 ```jsonnet
-local rbac = import 'lib/rbac.libsonnet';
-local webhook = import 'lib/webhook.libsonnet';
-local metacontroller = import 'lib/metacontroller.libsonnet';
+local rbac = import 'lib-k8s-multienv/rbac.libsonnet';
+local webhook = import 'lib-k8s-multienv/webhook.libsonnet';
+local metacontroller = import 'lib-k8s-multienv/metacontroller.libsonnet';
 
 {
   // Three ServiceAccounts with least-privilege permissions

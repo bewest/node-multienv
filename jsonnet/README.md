@@ -140,7 +140,7 @@ gen4.custom($, webhookName='pilot', controllerPrefix='pilot')
 Configuration templates:
 
 ```jsonnet
-local config = import 'lib/config.libsonnet';
+local config = import 'lib-k8s-multienv/config.libsonnet';
 
 config + {
   _config+:: {
@@ -177,8 +177,8 @@ jb install github.com/your-org/nightscout-k8s/jsonnet@main
 ### Use in main.jsonnet
 
 ```jsonnet
-local webhook = import 'lib/webhook.libsonnet';
-local gen4 = import 'lib/gen4.libsonnet';
+local webhook = import 'lib-k8s-multienv/webhook.libsonnet';
+local gen4 = import 'lib-k8s-multienv/gen4.libsonnet';
 
 (import 'gen3-legacy.jsonnet') + {
   _config+:: {
