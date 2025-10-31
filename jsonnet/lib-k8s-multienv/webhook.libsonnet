@@ -29,6 +29,7 @@
     image: 'webhook:latest',
     runtimeMode: 'all',  // all, webhook, provisioner, healthcheck
     serviceAccountName: 'webhook-service',
+    imagePullSecrets: [],  // [{name: 'registry-credentials'}]
     resources: {
       requests: {
         cpu: '100m',
@@ -50,6 +51,7 @@
     port=defaults.port,
     runtimeMode=defaults.runtimeMode,
     serviceAccountName=defaults.serviceAccountName,
+    imagePullSecrets=defaults.imagePullSecrets,
     resources=defaults.resources,
     labels={},
     env=[],
@@ -88,10 +90,12 @@
           },
           spec: {
             serviceAccountName: serviceAccountName,
+            imagePullSecrets: imagePullSecrets,
             containers: [
               {
                 name: 'webhook',
                 image: image,
+                command: ['./start_container.sh'],
                 args: containerArgs,
                 ports: [
                   {
