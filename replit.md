@@ -84,6 +84,21 @@ The platform employs a **two-composite architecture** (Storage and Compute) to s
 - **[Pod Health Check](./docs/POD-HEALTHCHECK.md)**: Sidecar-based health validation for Consul, scaling improvements, multi-cluster support
 - **[Testing Guide](./docs/testing-guide.md)**: Testing strategies and patterns
 
+## Recent Changes
+
+### 2025-10-31: imagePullSecrets Support
+- Added `imagePullSecrets` parameter to all Jsonnet webhook deployment functions
+- Supports private container registries (DigitalOcean, ECR, GCR, etc.)
+- Parameter threads through: `webhook.deployment()` → `webhook.stack()` → `gen4.stack()`
+- Updated gen4-test environment to demonstrate DigitalOcean registry usage
+- Documentation updated in `jsonnet/CONTAINER-ARGS.md`
+
+### 2025-10-31: Container Entry Points
+- Standardized container args mapping: `runtimeMode` → `start_container.sh` args
+- Added `multienv-metactl-webhooks` entry point for Gen 4 webhook server
+- All Jsonnet deployments now use `command: ["./start_container.sh"]` + `args`
+- Replaced legacy RUNTIME_MODE env var with explicit command-line args
+
 ## Project Structure
 
 ```
@@ -91,14 +106,15 @@ The platform employs a **two-composite architecture** (Storage and Compute) to s
 ├── jsonnet/                      # Jsonnet library (jb installable)
 │   ├── lib/                     # Reusable Jsonnet modules
 │   │   ├── main.libsonnet       # Entry point
-│   │   ├── webhook.libsonnet    # Webhook deployments (plain K8s objects)
+│   │   ├── webhook.libsonnet    # Webhook deployments (plain K8s objects, supports imagePullSecrets)
 │   │   ├── metacontroller.libsonnet # Metacontroller CRDs
 │   │   ├── rbac.libsonnet       # RBAC helpers (plain K8s objects)
 │   │   ├── config.libsonnet     # Configuration templates
-│   │   └── gen4.libsonnet       # Gen 4 deployment addon
+│   │   └── gen4.libsonnet       # Gen 4 deployment addon (supports imagePullSecrets)
 │   ├── jsonnetfile.json         # Package metadata
 │   ├── environments/default/
 │   │   └── examples/            # Deployment pattern examples
+│   ├── CONTAINER-ARGS.md        # Container args and imagePullSecrets documentation
 │   └── README.md                # Library documentation
 ├── lib/                         # Node.js/JavaScript webhook server
 │   ├── routes/                  # Express routes
