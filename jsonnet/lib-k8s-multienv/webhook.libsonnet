@@ -1,18 +1,24 @@
 // webhook.libsonnet - Webhook deployment helpers for Nightscout platform
 //
 // Provides parameterized functions for deploying webhook services with
-// support for runtime modes (webhook, provisioner, healthcheck), blue/green
+// support for runtime modes via start_container.sh args, blue/green
 // deployments, and different scaling configurations.
+//
+// Runtime Modes (mapped to start_container.sh args):
+//   'all' or 'webhook' -> args: ["multienv-metactl-webhooks"]
+//   'provisioner' -> args: ["deployment-controller"]
+//   'healthcheck' -> args: ["tenant-pod-healthcheck"]
 //
 // Usage:
 //   local webhook = import 'webhook.libsonnet';
 //   
-//   // Single deployment (all runtime modes)
+//   // Single deployment (all-in-one webhook server)
 //   webhook.deployment('webhook-service', 'myregistry/webhook:v1.0')
 //
-//   // Blue/green with separate components
-//   webhook.deployment('webhook-blue', 'myregistry/webhook:v1.0', runtimeMode='webhook') +
-//   webhook.deployment('healthcheck-blue', 'myregistry/webhook:v1.0', runtimeMode='healthcheck', replicas=10)
+//   // Multi-component with separate deployments
+//   webhook.deployment('webhook', 'myregistry/webhook:v1.0', runtimeMode='webhook') +
+//   webhook.deployment('provisioner', 'myregistry/webhook:v1.0', runtimeMode='provisioner') +
+//   webhook.deployment('healthcheck', 'myregistry/webhook:v1.0', runtimeMode='healthcheck', replicas=10)
 
 {
   // Default configuration values
@@ -53,8 +59,15 @@
     
     local defaultEnv = [
       { name: 'PORT', value: std.toString(port) },
-      { name: 'RUNTIME_MODE', value: runtimeMode },
     ];
+    
+    // Map runtimeMode to start_container.sh args
+    local containerArgs =
+      if runtimeMode == 'all' then ['multienv-metactl-webhooks']
+      else if runtimeMode == 'webhook' then ['multienv-metactl-webhooks']
+      else if runtimeMode == 'provisioner' then ['deployment-controller']
+      else if runtimeMode == 'healthcheck' then ['tenant-pod-healthcheck']
+      else error 'Unknown runtimeMode: %s (valid: all, webhook, provisioner, healthcheck)' % runtimeMode;
     
     {
       apiVersion: 'apps/v1',
@@ -79,6 +92,8 @@
               {
                 name: 'webhook',
                 image: image,
+                command: ['./start_container.sh'],
+                args: containerArgs,
                 ports: [
                   {
                     name: 'http',
