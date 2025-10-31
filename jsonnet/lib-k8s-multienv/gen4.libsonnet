@@ -13,9 +13,9 @@
 //     }
 //   } + gen4.resources($)
 
-local webhook = import '../../../lib/webhook.libsonnet';
-local metacontroller = import '../../../lib/metacontroller.libsonnet';
-local rbac = import '../../../lib/rbac.libsonnet';
+local webhook = import 'webhook.libsonnet';
+local metacontroller = import 'metacontroller.libsonnet';
+local rbac = import 'rbac.libsonnet';
 
 {
   // Generate webhook service URL for Metacontroller
@@ -206,4 +206,66 @@ local rbac = import '../../../lib/rbac.libsonnet';
             pvcBackup+: { metadata+: { name: prefix + cfg.pvc_decorator_name } },
           },
       },
+
+  // Simple stack() function - batteries-included Gen 4 deployment
+  // Returns everything you need: CRDs + Webhook + Service + RBAC
+  //
+  // Usage:
+  //   local gen4 = import 'gen4.libsonnet';
+  //   gen4.stack(
+  //     webhookImage: 'registry/webhook:v1.0',
+  //     webhookReplicas: 3,
+  //   )
+  stack(
+    webhookImage='webhook:latest',
+    webhookName='gen4-webhooks',
+    webhookNamespace='default',
+    webhookReplicas=2,
+    webhookPort=3000,
+    webhookServiceAccount='webhook-metacontroller',
+    storageResyncSeconds=30,
+    computeResyncSeconds=30,
+    pvcResyncSeconds=60,
+    webhookResources={
+      requests: { cpu: '100m', memory: '128Mi' },
+      limits: { cpu: '500m', memory: '512Mi' },
+    },
+  )::
+    local webhookUrl = 'http://%s.%s.svc.cluster.local:%d' % [
+      webhookName,
+      webhookNamespace,
+      webhookPort,
+    ];
+    
+    {
+      // ServiceAccount and RBAC for webhook
+      serviceAccount: rbac.serviceAccount(webhookServiceAccount, webhookNamespace),
+      clusterRole: rbac.fullOrchestrationRole(webhookServiceAccount),
+      clusterRoleBinding: rbac.clusterRoleBinding(
+        webhookServiceAccount,
+        serviceAccountName=webhookServiceAccount,
+        serviceAccountNamespace=webhookNamespace,
+        roleName=webhookServiceAccount
+      ),
+      
+      // Webhook Deployment and Service
+      webhook: webhook.stack(
+        name=webhookName,
+        image=webhookImage,
+        namespace=webhookNamespace,
+        replicas=webhookReplicas,
+        port=webhookPort,
+        runtimeMode='all',
+        serviceAccountName=webhookServiceAccount,
+        resources=webhookResources,
+      ),
+      
+      // Metacontroller CRDs (CompositeControllers + DecoratorController)
+      metacontroller: metacontroller.controllers(
+        webhookServiceUrl=webhookUrl,
+        storageResyncSeconds=storageResyncSeconds,
+        computeResyncSeconds=computeResyncSeconds,
+        pvcResyncSeconds=pvcResyncSeconds,
+      ),
+    },
 }
