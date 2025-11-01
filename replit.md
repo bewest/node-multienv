@@ -63,3 +63,70 @@ The platform employs a **CRD-based two-composite architecture** (Storage and Com
 - **Metacontroller v4.x+**: Kubernetes add-on for custom controller development and orchestration.
 - **Consul**: Utilized for service discovery and health checking within the resolver interface.
 - **jsonnet-bundler (jb)**: Dependency manager for Jsonnet libraries.
+## Recent Changes
+
+### 2025-11-01: CRD-Based Provisioner API (Gen 4)
+- **Provisioner API Migration**: Refactored `/accounts/*` REST API handlers to use CRDs instead of Secret/ConfigMap
+- Created `lib/templates/storage-account.js` - template function for generating StorageAccount CRD manifests
+- Created `lib/templates/compute-instance.js` - template function for generating ComputeInstance CRD manifests
+- Created `lib/routes/storage-accounts.js` - CRUD handlers for StorageAccount using CustomObjectsApi
+- Created `lib/routes/compute-instances.js` - CRUD handlers for ComputeInstance using CustomObjectsApi
+- Updated `k8s-deployment-controller.js` to route `/accounts` endpoints to new CRD-based handlers
+- Fixed resourceVersion handling to ensure idempotent updates work without 409 conflicts
+- Fixed label selector parameter position for proper account-scoped ComputeInstance filtering
+- Backward compatibility: Legacy endpoints moved to `/accounts-legacy/*` for Gen 3 migration support
+- New API creates CRDs directly, triggering Metacontroller webhooks for resource provisioning
+
+## Provisioner API
+
+The platform provides a REST API facade in `k8s-deployment-controller.js` for external systems to provision accounts and sites. The API now uses CRD-based resources (Gen 4).
+
+### Gen 4 CRD-Based Endpoints
+
+**StorageAccount Management:**
+- `POST /accounts` - Create new storage account with auto-generated ID
+- `POST /accounts/:account` - Create or update specific storage account
+- `GET /accounts/:account` - Get storage account details
+- `GET /accounts` - List all storage accounts
+- `DELETE /accounts/:account` - Delete storage account
+
+**ComputeInstance Management:**
+- `POST /accounts/:account/sites/:name` - Create or update site/tenant
+- `POST /accounts/:account/sites` - Create site (name from body.internal_name)
+- `GET /accounts/:account/sites/:name` - Get site details
+- `GET /accounts/:account/sites` - List sites for account
+- `DELETE /accounts/:account/sites/:name` - Delete site
+
+**Example Request:**
+```bash
+# Create StorageAccount
+curl -X POST http://localhost:2828/accounts/my-account \
+  -H "Content-Type: application/json" \
+  -d '{
+    "tier": "premium",
+    "mongodbVersion": "7.0",
+    "replicas": 3,
+    "storageSize": "20Gi"
+  }'
+
+# Create ComputeInstance
+curl -X POST http://localhost:2828/accounts/my-account/sites/my-site \
+  -H "Content-Type: application/json" \
+  -d '{
+    "tier": "premium",
+    "nightscoutImage": "nightscout/cgm-remote-monitor:latest",
+    "replicas": 2,
+    "env": [
+      {"name": "ENABLE", "value": "careportal basal"}
+    ]
+  }'
+```
+
+### Legacy Gen 3 Endpoints
+For backward compatibility during migration:
+- `/accounts-legacy/*` - Secret/ConfigMap-based provisioning (deprecated)
+
+### Implementation
+- Template functions: `lib/templates/storage-account.js`, `lib/templates/compute-instance.js`
+- Route handlers: `lib/routes/storage-accounts.js`, `lib/routes/compute-instances.js`
+- Main controller: `k8s-deployment-controller.js`
