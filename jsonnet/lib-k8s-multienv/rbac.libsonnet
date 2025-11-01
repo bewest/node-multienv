@@ -66,6 +66,18 @@
         resources: ['jobs'],
         verbs: ['get', 'list', 'watch', 'create', 'update', 'patch'],
       },
+      // Nightscout CRDs (Gen 4) - parent resources
+      {
+        apiGroups: ['nightscout.io'],
+        resources: ['storageaccounts', 'computeinstances'],
+        verbs: ['get', 'list', 'watch', 'create', 'update', 'patch'],
+      },
+      // Nightscout CRDs - status subresources
+      {
+        apiGroups: ['nightscout.io'],
+        resources: ['storageaccounts/status', 'computeinstances/status'],
+        verbs: ['update', 'patch'],
+      },
     ],
   },
 
@@ -77,16 +89,22 @@
       name: name,
     },
     rules: [
-      // ConfigMaps: full CRUD (includes delete for tenant removal)
+      // ConfigMaps: full CRUD (includes delete for tenant removal - Gen 3 legacy)
       {
         apiGroups: [''],
         resources: ['configmaps'],
         verbs: ['get', 'list', 'watch', 'create', 'update', 'patch', 'delete'],
       },
-      // Secrets: full CRUD (includes delete for account removal)
+      // Secrets: full CRUD (includes delete for account removal - Gen 3 legacy)
       {
         apiGroups: [''],
         resources: ['secrets'],
+        verbs: ['get', 'list', 'watch', 'create', 'update', 'patch', 'delete'],
+      },
+      // Nightscout CRDs (Gen 4): full CRUD for provisioner API
+      {
+        apiGroups: ['nightscout.io'],
+        resources: ['storageaccounts', 'computeinstances'],
         verbs: ['get', 'list', 'watch', 'create', 'update', 'patch', 'delete'],
       },
       // Read-only for status queries
