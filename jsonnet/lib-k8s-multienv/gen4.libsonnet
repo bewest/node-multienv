@@ -103,9 +103,11 @@ local crds = import 'crds.libsonnet';
       else
         // Single deployment (all-in-one webhook server)
         // Uses deploymentControllerRBAC for combined webhook + provisioner permissions
+        local deploymentRbac = rbac.deploymentControllerRBAC(cfg.webhook_metacontroller_sa, cfg.webhook_namespace);
         {
-          gen4_deployment_rbac:
-            rbac.deploymentControllerRBAC(cfg.webhook_metacontroller_sa, cfg.webhook_namespace),
+          gen4_serviceaccount: deploymentRbac.serviceAccount,
+          gen4_clusterrole: deploymentRbac.clusterRole,
+          gen4_clusterrolebinding: deploymentRbac.clusterRoleBinding,
           
           gen4_deployment: webhook.stack(
             name=cfg.webhook_name,
