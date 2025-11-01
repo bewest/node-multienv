@@ -241,18 +241,24 @@ local crds = import 'crds.libsonnet';
       webhookNamespace,
       webhookPort,
     ];
-    local deploymentRbac = rbac.deploymentControllerRBAC(webhookServiceAccount, webhookNamespace);
+    local deploymentRbac = rbac.deploymentControllerRBAC(webhookServiceAccount, webhookNamespace, imagePullSecrets);
+    local migrationRbac = rbac.migrationJobServiceAccount('migration-job', webhookNamespace, imagePullSecrets);
     
     {
       // Custom Resource Definitions (StorageAccount and ComputeInstance)
       crds: crds.all(crdGroup, crdVersion),
       
       // ServiceAccount and RBAC for k8s-deployment-controller
-      // Uses deploymentControllerRBAC() which combines webhook + provisioner permissions
-      // Includes delete permissions for ConfigMaps/Secrets/CRDs (provisioner API tenant removal)
-      serviceAccount: deploymentRbac.serviceAccount,
-      clusterRole: deploymentRbac.clusterRole,
-      clusterRoleBinding: deploymentRbac.clusterRoleBinding,
+      // Runs webhook + provisioner API (full orchestration + delete permissions)
+      deployment_controller_serviceAccount: deploymentRbac.serviceAccount,
+      deployment_controller_clusterRole: deploymentRbac.clusterRole,
+      deployment_controller_clusterRoleBinding: deploymentRbac.clusterRoleBinding,
+      
+      // ServiceAccount and RBAC for migration jobs
+      // Minimal permissions: read Secrets for MongoDB credentials
+      migration_job_serviceAccount: migrationRbac.serviceAccount,
+      migration_job_clusterRole: migrationRbac.clusterRole,
+      migration_job_clusterRoleBinding: migrationRbac.clusterRoleBinding,
       
       // Webhook Deployment and Service
       webhook: webhook.stack(
