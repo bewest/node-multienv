@@ -211,23 +211,31 @@ local crds = import 'crds.libsonnet';
   // Simple stack() function - batteries-included Gen 4 deployment
   // Returns everything you need: CRDs + Webhook + Service + RBAC
   //
+  // Three service accounts with different permission levels:
+  //   1. Webhook SA (webhookName) - No K8s permissions (just HTTP responder)
+  //   2. Deployment-controller SA - Namespace-scoped provisioner API + CRD permissions
+  //   3. Migration-job SA - Read-only Secrets for database migrations
+  //
   // Usage:
   //   local gen4 = import 'gen4.libsonnet';
   //   gen4.stack(
   //     webhookImage: 'registry/webhook:v1.0',
   //     webhookReplicas: 3,
+  //     targetNamespace: 'hosted-tenants',
   //     imagePullSecrets: [{name: 'registry-credentials'}],
   //   )
   stack(
     webhookImage='webhook:latest',
     webhookName='gen4-webhooks',
     webhookNamespace='default',
+    targetNamespace='hosted-tenants',
     webhookReplicas=2,
     webhookPort=3000,
     imagePullSecrets=[],
     crdGroup='nightscout.io',
     crdVersion='v1alpha1',
-    deploymentServiceAccount='multienv-metactl-deployment-sa',
+    deploymentControllerName='deployment-controller',
+    migrationJobName='migration-job',
     storageResyncSeconds=30,
     computeResyncSeconds=30,
     pvcResyncSeconds=60,
@@ -236,27 +244,35 @@ local crds = import 'crds.libsonnet';
       limits: { cpu: '500m', memory: '512Mi' },
     },
   )::
-    local webhookServiceAccount='%s' % [ webhookName ];
     local webhookUrl = 'http://%s.%s.svc.cluster.local:%d' % [
       webhookName,
       webhookNamespace,
       webhookPort,
     ];
-    local deploymentRbac = rbac.deploymentControllerRBAC(deploymentServiceAccount, webhookNamespace, imagePullSecrets);
-    local migrationRbac = rbac.migrationJobServiceAccount('migration-job', webhookNamespace, imagePullSecrets);
+    local deploymentRbac = rbac.deploymentControllerRBAC(
+      deploymentControllerName,
+      webhookNamespace,
+      targetNamespace,
+      imagePullSecrets
+    );
+    local migrationRbac = rbac.migrationJobServiceAccount(
+      migrationJobName,
+      webhookNamespace,
+      imagePullSecrets
+    );
     
     {
       // Custom Resource Definitions (StorageAccount and ComputeInstance)
       crds: crds.all(crdGroup, crdVersion),
       
-      gen4_webhook_rbac:
-        rbac.serviceAccount(webhookServiceAccount, webhookNamespace) +
-        rbac.fullOrchestrationRole(webhookServiceAccount) +
-        rbac.clusterRoleBinding(webhookServiceAccount,
-                                serviceAccountNamespace=webhookNamespace),
-      // ServiceAccount and RBAC for k8s-deployment-controller
-      // Runs webhook + provisioner API (full orchestration + delete permissions)
+      // Webhook ServiceAccount (no special K8s permissions - just HTTP responder)
+      webhook_serviceAccount: rbac.serviceAccount(webhookName, webhookNamespace, imagePullSecrets),
+      
+      // ServiceAccount and RBAC for k8s-deployment-controller (provisioner API)
+      // Uses dual binding: namespace-scoped Role for Secrets/ConfigMaps + ClusterRole for CRDs
       deployment_controller_serviceAccount: deploymentRbac.serviceAccount,
+      deployment_controller_role: deploymentRbac.role,
+      deployment_controller_roleBinding: deploymentRbac.roleBinding,
       deployment_controller_clusterRole: deploymentRbac.clusterRole,
       deployment_controller_clusterRoleBinding: deploymentRbac.clusterRoleBinding,
       
@@ -274,7 +290,7 @@ local crds = import 'crds.libsonnet';
         replicas=webhookReplicas,
         port=webhookPort,
         runtimeMode='all',
-        serviceAccountName=webhookServiceAccount,
+        serviceAccountName=webhookName,
         imagePullSecrets=imagePullSecrets,
         resources=webhookResources,
       ),

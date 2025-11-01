@@ -575,14 +575,48 @@ rules:
 - Webhooks update status, users update spec
 - Kubernetes convention for CRDs
 
-### Deployment Controller Combined RBAC (Gen 4)
+### Three-Service-Account Architecture (Gen 4)
 
-**Scenario:** `k8s-deployment-controller.js` handles both webhook operations AND provisioner API, requiring combined permissions.
+**Gen 4 uses three separate service accounts with different permission levels:**
 
-The `deploymentControllerRBAC()` function in `rbac.libsonnet` provides an ergonomic export that bundles:
-- Webhook orchestration permissions (fullOrchestrationRole)
-- Provisioner API permissions (provisionerRole with delete verb)
-- Gen 3 (ConfigMap/Secret) and Gen 4 (CRD) support
+1. **Webhook SA** - No Kubernetes API permissions (HTTP responder only)
+2. **Deployment-controller SA** - Namespace-scoped provisioner API + CRD permissions
+3. **Migration-job SA** - Read-only Secrets for database migrations
+
+This separation follows the **principle of least privilege** and provides defense-in-depth security.
+
+#### 1. Webhook Service Account
+
+**Purpose:** Responds to Metacontroller HTTP webhook requests
+
+**Permissions:** None (just default ServiceAccount)
+
+**Rationale:**
+- Metacontroller webhooks are HTTP responders that return JSON
+- They don't make any Kubernetes API calls
+- No special RBAC permissions needed
+
+```jsonnet
+local rbac = import 'lib-k8s-multienv/rbac.libsonnet';
+
+{
+  // Plain ServiceAccount with no bindings
+  webhook_sa: rbac.serviceAccount('gen4-webhooks', 'default', imagePullSecrets),
+}
+```
+
+#### 2. Deployment-Controller Service Account (Dual Binding Pattern)
+
+**Purpose:** Provisioner REST API for creating/deleting tenants
+
+**Permissions:** Uses **dual binding** pattern:
+- **Role** (namespace-scoped to `hosted-tenants`): Full CRUD on Secrets/ConfigMaps
+- **ClusterRole**: Full CRUD on nightscout.io CRDs only
+
+**Rationale:**
+- Limits blast radius: Can only manipulate Secrets/ConfigMaps in `hosted-tenants` namespace
+- Still allows CRD management (CRDs are cluster-scoped resources by design)
+- Provisioner API can't accidentally delete resources in other namespaces
 
 **Usage in Jsonnet:**
 
@@ -590,107 +624,156 @@ The `deploymentControllerRBAC()` function in `rbac.libsonnet` provides an ergono
 local rbac = import 'lib-k8s-multienv/rbac.libsonnet';
 
 {
-  // Single function call creates ServiceAccount + ClusterRole + ClusterRoleBinding
-  deployment_controller_rbac: rbac.deploymentControllerRBAC('deployment-controller', 'default'),
+  // Single function call creates ServiceAccount + Role + RoleBinding + ClusterRole + ClusterRoleBinding
+  deployment_controller_rbac: rbac.deploymentControllerRBAC(
+    'deployment-controller',  // ServiceAccount name
+    'default',                // ServiceAccount namespace
+    'hosted-tenants',         // Target namespace for Secrets/ConfigMaps
+    imagePullSecrets
+  ),
 }
 ```
 
 **Generated resources:**
 1. **ServiceAccount**: `deployment-controller` (namespace: default)
-2. **ClusterRole**: Combined permissions including:
-   - ConfigMaps/Secrets: full CRUD (Gen 3 legacy + provisioner delete)
-   - StorageAccount/ComputeInstance CRDs: full CRUD (Gen 4)
-   - CRD status subresources: update/patch (webhook status reporting)
-   - Child resources: Deployments, StatefulSets, Services, Jobs, etc.
-3. **ClusterRoleBinding**: Links ServiceAccount to ClusterRole
+2. **Role**: Secrets/ConfigMaps full CRUD (namespace: hosted-tenants)
+3. **RoleBinding**: Binds Role to ServiceAccount (namespace: hosted-tenants)
+4. **ClusterRole**: nightscout.io CRDs full CRUD (cluster-wide)
+5. **ClusterRoleBinding**: Binds ClusterRole to ServiceAccount (cluster-wide)
 
-**Permission highlights:**
-- `delete` verb on ConfigMaps/Secrets/CRDs: Provisioner API tenant removal
-- Status subresource access: Kubernetes-standard status reporting
-- No `delete` on child resources: Owner references handle cleanup
+**Dual Binding Pattern Details:**
 
-**Cross-Namespace Example (Default → Hosted-Tenants):**
+```yaml
+---
+# Namespace-scoped Role (only in hosted-tenants namespace)
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: deployment-controller
+  namespace: hosted-tenants
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps", "secrets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
 
-This is the typical deployment pattern: k8s-deployment-controller runs in `default` namespace, but manages tenant resources in `hosted-tenants` namespace.
+---
+# RoleBinding links SA in default namespace to Role in hosted-tenants namespace
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: deployment-controller
+  namespace: hosted-tenants
+subjects:
+  - kind: ServiceAccount
+    name: deployment-controller
+    namespace: default  # ← Cross-namespace binding
+roleRef:
+  kind: Role
+  name: deployment-controller
 
-```jsonnet
-// deployment-controller.jsonnet
-local rbac = import 'lib-k8s-multienv/rbac.libsonnet';
+---
+# ClusterRole for CRDs only (no Secrets/ConfigMaps here)
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: deployment-controller-crds
+rules:
+  - apiGroups: ["nightscout.io"]
+    resources: ["storageaccounts", "computeinstances"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
 
-{
-  // RBAC: ServiceAccount in 'default' namespace with cluster-wide permissions
-  deployment_controller_rbac: rbac.deploymentControllerRBAC('deployment-controller', 'default'),
-
-  // Deployment: k8s-deployment-controller pod runs in 'default' namespace
-  deployment: {
-    apiVersion: 'apps/v1',
-    kind: 'Deployment',
-    metadata: {
-      name: 'deployment-controller',
-      namespace: 'default',
-    },
-    spec: {
-      replicas: 1,
-      selector: { matchLabels: { app: 'deployment-controller' } },
-      template: {
-        metadata: { labels: { app: 'deployment-controller' } },
-        spec: {
-          serviceAccountName: 'deployment-controller',  // ← Uses created ServiceAccount
-          containers: [{
-            name: 'controller',
-            image: 'nightscout/deployment-controller:latest',
-            env: [
-              { name: 'TENANT_NAMESPACE', value: 'hosted-tenants' },  // ← Target namespace
-            ],
-            ports: [
-              { name: 'webhook', containerPort: 3000 },      // Metacontroller webhooks
-              { name: 'provisioner', containerPort: 2828 },  // Provisioner API
-            ],
-          }],
-        },
-      },
-    },
-  },
-}
+---
+# ClusterRoleBinding links SA to ClusterRole
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: deployment-controller-crds
+subjects:
+  - kind: ServiceAccount
+    name: deployment-controller
+    namespace: default
+roleRef:
+  kind: ClusterRole
+  name: deployment-controller-crds
 ```
 
 **How it works:**
 
-1. **ServiceAccount**: Created in `default` namespace
-2. **ClusterRole**: Grants cluster-wide permissions for all namespaces
-3. **ClusterRoleBinding**: Binds ServiceAccount to ClusterRole (cluster-wide scope)
-4. **k8s-deployment-controller pod**:
-   - Runs in `default` namespace with `serviceAccountName: deployment-controller`
-   - Uses Kubernetes client to manage resources in `hosted-tenants` namespace:
-     ```javascript
-     // In k8s-deployment-controller.js
-     const namespace = 'hosted-tenants';
-     
-     // Create StorageAccount CRD in hosted-tenants
-     await customObjectsApi.createNamespacedCustomObject(
-       'nightscout.io', 'v1alpha1', namespace, 'storageaccounts', storageAccountCRD
-     );
-     
-     // Delete Secret in hosted-tenants
-     await coreApi.deleteNamespacedSecret(secretName, namespace);
-     ```
+1. **ServiceAccount** `deployment-controller` runs in `default` namespace
+2. **Role + RoleBinding** grants Secrets/ConfigMaps permissions ONLY in `hosted-tenants` namespace
+3. **ClusterRole + ClusterRoleBinding** grants CRD permissions cluster-wide
+4. **k8s-deployment-controller.js** can:
+   - ✅ Create/delete Secrets in `hosted-tenants` namespace
+   - ✅ Create/delete ConfigMaps in `hosted-tenants` namespace
+   - ✅ Create/delete StorageAccount CRDs anywhere
+   - ✅ Create/delete ComputeInstance CRDs anywhere
+   - ❌ Cannot touch Secrets/ConfigMaps in `default` or any other namespace
 
-**Why ClusterRole instead of Role?**
-- ClusterRole allows cross-namespace operations (default → hosted-tenants)
-- Single RBAC setup for all tenant namespaces
-- CRDs are cluster-scoped resources requiring ClusterRole permissions
+**Security benefits:**
+- Limits blast radius to single target namespace for sensitive resources
+- CRDs are already cluster-scoped, so ClusterRole is appropriate
+- Follows Kubernetes best practices for cross-namespace RBAC
 
-**Alternative approaches:**
+#### 3. Migration-Job Service Account
 
-If you need separate webhook and provisioner services:
+**Purpose:** Database migration jobs created by storage composite controller
+
+**Permissions:** ClusterRole with read-only Secret access
+
+**Rationale:**
+- Migration jobs only need MongoDB credentials from Secrets
+- No write access to any Kubernetes resources
+- Minimal attack surface
 
 ```jsonnet
-// Separate webhook service (no delete permissions)
-webhook_rbac: rbac.webhookServiceAccount('webhook-service'),
+local rbac = import 'lib-k8s-multienv/rbac.libsonnet';
 
-// Separate provisioner service (with delete permissions)
-provisioner_rbac: rbac.provisionerServiceAccount('provisioner-api'),
+{
+  migration_job_rbac: rbac.migrationJobServiceAccount('migration-job', 'default', imagePullSecrets),
+}
 ```
+
+**Generated resources:**
+1. **ServiceAccount**: `migration-job` (namespace: default)
+2. **ClusterRole**: Read-only Secrets
+3. **ClusterRoleBinding**: Binds ClusterRole to ServiceAccount
+
+```yaml
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: migration-job
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list"]
+```
+
+#### Complete Gen 4 Stack Example
+
+```jsonnet
+local gen4 = import 'lib-k8s-multienv/gen4.libsonnet';
+
+{
+  simple_deployment: gen4.stack(
+    webhookImage='registry.example.com/webhook:v1.0',
+    webhookName='gen4-webhooks',
+    webhookNamespace='default',
+    targetNamespace='hosted-tenants',  // ← Limits provisioner API to this namespace
+    webhookReplicas=3,
+    imagePullSecrets=[{name: 'registry-credentials'}],
+  ),
+}
+```
+
+**This creates:**
+- ✅ 1 Webhook ServiceAccount (no permissions)
+- ✅ 1 Deployment-controller ServiceAccount (dual binding: Role + ClusterRole)
+- ✅ 1 Migration-job ServiceAccount (read-only Secrets)
+- ✅ CRDs (StorageAccount, ComputeInstance)
+- ✅ Metacontroller resources (CompositeControllers, DecoratorController)
+- ✅ Webhook Deployment and Service
 
 This allows finer-grained RBAC if you split the deployment-controller into microservices.
 

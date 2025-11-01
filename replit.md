@@ -77,21 +77,24 @@ The platform employs a **CRD-based two-composite architecture** (Storage and Com
 - Backward compatibility: Legacy endpoints moved to `/accounts-legacy/*` for Gen 3 migration support
 - New API creates CRDs directly, triggering Metacontroller webhooks for resource provisioning
 
-### 2025-11-01: Gen 4 RBAC Implementation
-- **RBAC Updates for CRD Support**: Added nightscout.io API group permissions to support Gen 4 CRD-based architecture
-- Updated `fullOrchestrationRole()` in `rbac.libsonnet`: Added nightscout.io/storageaccounts and nightscout.io/computeinstances permissions with separate status subresource rule
-- Updated `provisionerRole()` in `rbac.libsonnet`: Added full CRUD (including delete) for CRDs to support provisioner API tenant lifecycle
-- Created `deploymentControllerRole()` in `rbac.libsonnet`: Combined role merging webhook and provisioner permissions for k8s-deployment-controller
-- Created `deploymentControllerRBAC()` in `rbac.libsonnet`: Ergonomic export (ServiceAccount + ClusterRole + ClusterRoleBinding) for easy deployment integration
-- Created `migrationJobRole()` in `rbac.libsonnet`: Minimal permissions role for database migration jobs (read Secrets only)
-- Created `migrationJobServiceAccount()` convenience function for easy migration job RBAC setup
-- Updated `gen4.stack()` in `gen4.libsonnet`: Now creates both deployment-controller and migration-job service accounts with imagePullSecrets
-- Updated default ServiceAccount name: Changed from `multienv-metactl-webhook` to `deployment-controller` to reflect actual purpose
-- Added `imagePullSecrets` parameter to all RBAC convenience functions for private registry support
-- Updated `docs/RBAC-DESIGN.md`: Documented CRD permissions, status subresource pattern, cross-namespace example (default → hosted-tenants), and Gen 3/Gen 4 compatibility
-- Updated `jsonnet/environments/gen4-test/README.md`: Documented new RBAC permissions and cross-namespace capabilities
+### 2025-11-01: Gen 4 Three-Service-Account Architecture
+- **Three-SA Architecture**: Refactored RBAC to use three separate service accounts following principle of least privilege
+  1. **Webhook SA** (`gen4-webhooks`): No K8s permissions - just HTTP responder for Metacontroller
+  2. **Deployment-controller SA** (`deployment-controller`): Namespace-scoped provisioner API with dual binding pattern
+  3. **Migration-job SA** (`migration-job`): Read-only Secrets for database migration jobs
+- **Namespace-Scoped Provisioner**: Deployment-controller now uses dual binding pattern:
+  - **Role + RoleBinding** (namespace-scoped to `hosted-tenants`): Full CRUD on Secrets/ConfigMaps only in target namespace
+  - **ClusterRole + ClusterRoleBinding**: Full CRUD on nightscout.io CRDs (cluster-wide)
+  - Limits blast radius - provisioner API can't accidentally delete resources in other namespaces
+- Created `provisionerRoleNamespaced()` in `rbac.libsonnet`: Namespace-scoped Role for Secrets/ConfigMaps
+- Created `provisionerClusterRoleForCRDs()` in `rbac.libsonnet`: ClusterRole limited to nightscout.io CRDs only
+- Created `roleBinding()` helper in `rbac.libsonnet`: Namespace-scoped RoleBinding for cross-namespace permissions
+- Updated `deploymentControllerRBAC()` in `rbac.libsonnet`: Now accepts `targetNamespace` parameter and returns both Role+RoleBinding and ClusterRole+ClusterRoleBinding (5 resources total)
+- Updated `gen4.stack()` in `gen4.libsonnet`: Now accepts `targetNamespace` parameter and creates three separate service accounts
+- Updated `gen4-test/main.jsonnet`: Added `targetNamespace='hosted-tenants'` parameter
+- Updated `docs/RBAC-DESIGN.md`: Documented three-SA architecture, dual binding pattern, and namespace-scoped security benefits
+- Security benefits: Webhook has no K8s API access, provisioner limited to single namespace for sensitive resources, migration jobs read-only
 - Maintained backward compatibility: Gen 3 ConfigMap/Secret permissions preserved alongside Gen 4 CRD permissions
-- **Bug fix**: Fixed RBAC convenience functions to return object with separate fields instead of merging resources with `+` operator (was causing "unknown field: rules" warnings)
 
 ## Provisioner API
 

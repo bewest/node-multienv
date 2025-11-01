@@ -185,6 +185,83 @@
     },
   },
 
+  // RoleBinding (namespace-scoped)
+  roleBinding(name, namespace, serviceAccountName=name, serviceAccountNamespace=namespace, roleName=name):: {
+    apiVersion: 'rbac.authorization.k8s.io/v1',
+    kind: 'RoleBinding',
+    metadata: {
+      name: name,
+      namespace: namespace,
+    },
+    subjects: [
+      {
+        kind: 'ServiceAccount',
+        name: serviceAccountName,
+        namespace: serviceAccountNamespace,
+      },
+    ],
+    roleRef: {
+      apiGroup: 'rbac.authorization.k8s.io',
+      kind: 'Role',
+      name: roleName,
+    },
+  },
+
+  // Namespace-scoped Role for provisioner API (Secrets/ConfigMaps only)
+  // This ensures deployment-controller can only manipulate Secrets/ConfigMaps
+  // in the target namespace (e.g., hosted-tenants)
+  provisionerRoleNamespaced(name, namespace):: {
+    apiVersion: 'rbac.authorization.k8s.io/v1',
+    kind: 'Role',
+    metadata: {
+      name: name,
+      namespace: namespace,
+    },
+    rules: [
+      // ConfigMaps: full CRUD (includes delete for tenant removal - Gen 3 legacy)
+      {
+        apiGroups: [''],
+        resources: ['configmaps'],
+        verbs: ['get', 'list', 'watch', 'create', 'update', 'patch', 'delete'],
+      },
+      // Secrets: full CRUD (includes delete for account removal - Gen 3 legacy)
+      {
+        apiGroups: [''],
+        resources: ['secrets'],
+        verbs: ['get', 'list', 'watch', 'create', 'update', 'patch', 'delete'],
+      },
+    ],
+  },
+
+  // ClusterRole for CRD-only permissions (no Secrets/ConfigMaps)
+  // Used by deployment-controller for Gen 4 CRD provisioning API
+  provisionerClusterRoleForCRDs(name):: {
+    apiVersion: 'rbac.authorization.k8s.io/v1',
+    kind: 'ClusterRole',
+    metadata: {
+      name: name + '-crds',
+    },
+    rules: [
+      // Nightscout CRDs (Gen 4): full CRUD for provisioner API
+      {
+        apiGroups: ['nightscout.io'],
+        resources: ['storageaccounts', 'computeinstances'],
+        verbs: ['get', 'list', 'watch', 'create', 'update', 'patch', 'delete'],
+      },
+      // Read-only for status queries
+      {
+        apiGroups: [''],
+        resources: ['services', 'pods'],
+        verbs: ['get', 'list', 'watch'],
+      },
+      {
+        apiGroups: ['apps'],
+        resources: ['deployments', 'statefulsets'],
+        verbs: ['get', 'list', 'watch'],
+      },
+    ],
+  },
+
   // Convenience: Full RBAC set for webhook service
   webhookServiceAccount(name, namespace='default', imagePullSecrets=[]):: {
     serviceAccount: $.serviceAccount(name, namespace, imagePullSecrets),
@@ -306,18 +383,43 @@
     ],
   },
 
-  // Convenience: Full RBAC set for deployment-controller
-  // Ergonomic export - use this for k8s-deployment-controller deployments
+  // Convenience: Full RBAC set for deployment-controller (dual binding pattern)
+  // Uses BOTH namespace-scoped Role+RoleBinding AND ClusterRole+ClusterRoleBinding
+  // This ensures deployment-controller can only manipulate Secrets/ConfigMaps in targetNamespace
+  // while still managing CRDs cluster-wide
+  //
   // Example usage in Jsonnet:
-  //   rbac.deploymentControllerRBAC('deployment-controller')
-  deploymentControllerRBAC(name, namespace='default', imagePullSecrets=[]):: {
+  //   rbac.deploymentControllerRBAC('deployment-controller', 'default', 'hosted-tenants')
+  //
+  // Arguments:
+  //   name: ServiceAccount name
+  //   namespace: Namespace where ServiceAccount lives (e.g., 'default')
+  //   targetNamespace: Namespace where provisioner API can manipulate Secrets/ConfigMaps (e.g., 'hosted-tenants')
+  //   imagePullSecrets: Optional image pull secrets for private registries
+  deploymentControllerRBAC(name, namespace='default', targetNamespace='hosted-tenants', imagePullSecrets=[]):: {
     serviceAccount: $.serviceAccount(name, namespace, imagePullSecrets),
-    clusterRole: $.deploymentControllerRole(name),
-    clusterRoleBinding: $.clusterRoleBinding(
+    
+    // Namespace-scoped Role for Secrets/ConfigMaps (limited to targetNamespace)
+    role: $.provisionerRoleNamespaced(name, targetNamespace),
+    
+    // Namespace-scoped RoleBinding
+    roleBinding: $.roleBinding(
       name,
+      targetNamespace,
       serviceAccountName=name,
       serviceAccountNamespace=namespace,
       roleName=name
+    ),
+    
+    // ClusterRole for CRDs only (no Secrets/ConfigMaps)
+    clusterRole: $.provisionerClusterRoleForCRDs(name),
+    
+    // ClusterRoleBinding
+    clusterRoleBinding: $.clusterRoleBinding(
+      name + '-crds',
+      serviceAccountName=name,
+      serviceAccountNamespace=namespace,
+      roleName=name + '-crds'
     ),
   },
 }

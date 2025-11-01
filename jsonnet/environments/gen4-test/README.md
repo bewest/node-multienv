@@ -16,32 +16,43 @@ tk eval jsonnet/environments/gen4-test
 
 The `simple_deployment` section shows the **batteries-included** approach - one function call generates:
 
-1. **ServiceAccount** (`deployment-controller`) - For webhook/provisioner deployment
-2. **ClusterRole** (`deployment-controller`) - Combined webhook + provisioner permissions (includes delete)
-3. **ClusterRoleBinding** (`deployment-controller`)
-4. **ServiceAccount** (`migration-job`) - For database migration jobs
-5. **ClusterRole** (`migration-job`) - Minimal permissions (read Secrets only)
-6. **ClusterRoleBinding** (`migration-job`)
-7. **Webhook Deployment** (all-in-one: webhook + provisioner + healthcheck)
-8. **Webhook Service** (ClusterIP)
-9. **Storage CompositeController** CRD
-10. **Compute CompositeController** CRD
-11. **PVC Backup DecoratorController** CRD
+1. **ServiceAccount** (`gen4-webhooks`) - For webhook deployment (no K8s permissions)
+2. **ServiceAccount** (`deployment-controller`) - For provisioner API
+3. **Role** (`deployment-controller`) - Namespace-scoped to `hosted-tenants` for Secrets/ConfigMaps
+4. **RoleBinding** (`deployment-controller`) - Binds Role to ServiceAccount
+5. **ClusterRole** (`deployment-controller-crds`) - CRDs only (no Secrets/ConfigMaps)
+6. **ClusterRoleBinding** (`deployment-controller-crds`) - Binds ClusterRole to ServiceAccount
+7. **ServiceAccount** (`migration-job`) - For database migration jobs
+8. **ClusterRole** (`migration-job`) - Read-only Secrets
+9. **ClusterRoleBinding** (`migration-job`) - Binds ClusterRole to ServiceAccount
+10. **Webhook Deployment** (all-in-one: webhook + provisioner + healthcheck)
+11. **Webhook Service** (ClusterIP)
+12. **Storage CompositeController** CRD
+13. **Compute CompositeController** CRD
+14. **PVC Backup DecoratorController** CRD
 
-**Total: 11 Kubernetes resources** from a single function call.
+**Total: 14 Kubernetes resources** from a single function call.
 
-**RBAC Permissions:**
-- **deployment-controller**: Runs in `default` namespace with cluster-wide permissions
-  - Full webhook orchestration (create/update child resources)
-  - Full provisioner API (create/update/delete ConfigMaps, Secrets, CRDs)
-  - Can manage resources in `hosted-tenants` namespace
-- **migration-job**: Minimal permissions for database migration jobs
-  - Read-only access to Secrets (for MongoDB credentials)
-  - No Kubernetes API write access
+**Three-Service-Account Architecture:**
+
+1. **gen4-webhooks SA**: No K8s permissions
+   - Just responds to Metacontroller HTTP requests
+   - Returns JSON with desired child resources
+   - No Kubernetes API calls
+
+2. **deployment-controller SA**: Dual binding pattern (namespace-scoped + cluster-wide)
+   - **Role** (namespace-scoped to `hosted-tenants`): Full CRUD on Secrets/ConfigMaps
+   - **ClusterRole**: Full CRUD on nightscout.io CRDs only
+   - Limits blast radius - can't touch Secrets/ConfigMaps in other namespaces
+   - Still manages CRDs cluster-wide (CRDs are cluster-scoped resources)
+
+3. **migration-job SA**: Minimal permissions
+   - Read-only access to Secrets (for MongoDB credentials)
+   - No Kubernetes API write access
 
 **imagePullSecrets:**
-- Both service accounts automatically include the `imagePullSecrets` provided to gen4.stack()
-- Ensures migration jobs can pull from the same private registry as the webhook deployment
+- All three service accounts automatically include the `imagePullSecrets` provided to gen4.stack()
+- Ensures all components can pull from the same private registry
 
 ### Advanced Deployment
 

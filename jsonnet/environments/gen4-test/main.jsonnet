@@ -29,6 +29,7 @@ local rbac = import '../../lib-k8s-multienv/rbac.libsonnet';
     webhookImage='registry.digitalocean.com/staget1pal0/multienv:latest',
     webhookName='gen4-webhooks',
     webhookNamespace='default',
+    targetNamespace='hosted-tenants',  // Provisioner API can only manipulate Secrets/ConfigMaps here
     webhookReplicas=3,
     imagePullSecrets=[{name: 'registry-staget1pal0'}],  // DigitalOcean registry credentials
     storageResyncSeconds=60,
