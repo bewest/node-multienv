@@ -180,4 +180,86 @@
     $.serviceAccount(name, namespace) +
     $.readOnlyRole(name) +
     $.clusterRoleBinding(name),
+
+  // ClusterRole for deployment-controller (webhook + provisioner combined)
+  // Since k8s-deployment-controller.js handles both webhook operations and provisioner API,
+  // it needs combined permissions from both fullOrchestrationRole and provisionerRole
+  deploymentControllerRole(name):: {
+    apiVersion: 'rbac.authorization.k8s.io/v1',
+    kind: 'ClusterRole',
+    metadata: {
+      name: name,
+    },
+    rules: [
+      // Core API group - full permissions for ConfigMaps, Secrets (Gen 3 + provisioner)
+      {
+        apiGroups: [''],
+        resources: ['configmaps', 'secrets'],
+        verbs: ['get', 'list', 'watch', 'create', 'update', 'patch', 'delete'],
+      },
+      // Core API group - Services, PVCs (webhook orchestration)
+      {
+        apiGroups: [''],
+        resources: ['services', 'persistentvolumeclaims'],
+        verbs: ['get', 'list', 'watch', 'create', 'update', 'patch'],
+      },
+      // Core API group - Pods (read-only for status queries)
+      {
+        apiGroups: [''],
+        resources: ['pods'],
+        verbs: ['get', 'list', 'watch'],
+      },
+      // Apps API group - full orchestration
+      {
+        apiGroups: ['apps'],
+        resources: ['deployments', 'statefulsets'],
+        verbs: ['get', 'list', 'watch', 'create', 'update', 'patch'],
+      },
+      // Policy API group
+      {
+        apiGroups: ['policy'],
+        resources: ['poddisruptionbudgets'],
+        verbs: ['get', 'list', 'watch', 'create', 'update', 'patch'],
+      },
+      // Kafka (Strimzi) API group
+      {
+        apiGroups: ['kafka.strimzi.io'],
+        resources: ['kafkatopics', 'kafkaconnectors'],
+        verbs: ['get', 'list', 'watch', 'create', 'update', 'patch'],
+      },
+      // Snapshot API group
+      {
+        apiGroups: ['snapshot.storage.k8s.io'],
+        resources: ['volumesnapshots'],
+        verbs: ['get', 'list', 'watch', 'create', 'update', 'patch'],
+      },
+      // Batch API group (for migration Jobs)
+      {
+        apiGroups: ['batch'],
+        resources: ['jobs'],
+        verbs: ['get', 'list', 'watch', 'create', 'update', 'patch'],
+      },
+      // Nightscout CRDs (Gen 4) - full CRUD for provisioner API
+      {
+        apiGroups: ['nightscout.io'],
+        resources: ['storageaccounts', 'computeinstances'],
+        verbs: ['get', 'list', 'watch', 'create', 'update', 'patch', 'delete'],
+      },
+      // Nightscout CRDs - status subresources (for webhook status updates)
+      {
+        apiGroups: ['nightscout.io'],
+        resources: ['storageaccounts/status', 'computeinstances/status'],
+        verbs: ['update', 'patch'],
+      },
+    ],
+  },
+
+  // Convenience: Full RBAC set for deployment-controller
+  // Ergonomic export - use this for k8s-deployment-controller deployments
+  // Example usage in Jsonnet:
+  //   rbac.deploymentControllerRBAC('deployment-controller')
+  deploymentControllerRBAC(name, namespace='default')::
+    $.serviceAccount(name, namespace) +
+    $.deploymentControllerRole(name) +
+    $.clusterRoleBinding(name),
 }
