@@ -692,6 +692,8 @@ function configure (opts) {
   const createConfigMapRoutes = require('./lib/routes/configmaps');
   const createHealthRoutes = require('./lib/routes/health');
   const createInstanceRoutes = require('./lib/routes/instances');
+  const createStorageAccountRoutes = require('./lib/routes/storage-accounts');
+  const createComputeInstanceRoutes = require('./lib/routes/compute-instances');
 
   const storageDecorator = require('./lib/webhook/storage-decorator-handler.js')(opts);
   const metacontrollerRoutes = createMetacontrollerRoutes(opts);
@@ -699,6 +701,8 @@ function configure (opts) {
   const configMapRoutes = createConfigMapRoutes(k8s, selected_namespace, opts);
   const healthRoutes = createHealthRoutes(k8s, selected_namespace);
   const instanceRoutes = createInstanceRoutes(opts.kc, selected_namespace);
+  const storageAccountRoutes = createStorageAccountRoutes(opts.kc, selected_namespace);
+  const computeInstanceRoutes = createComputeInstanceRoutes(opts.kc, selected_namespace);
 
   // Deployment routes
   // server.get('/deployments/:name', deploymentRoutes.fetchDeployment, format_result);
@@ -991,13 +995,29 @@ function configure (opts) {
       .catch(next);
   }
 
-  // Account and site provisioning endpoints
-  server.post('/accounts', handle_new_provisioner_account_webhook);
-  server.post('/accounts/:account', handle_new_provisioner_account_webhook);
-  server.post('/accounts/:account/sites/:name', handle_new_site_webhook);
-  server.post('/accounts/:account/sites', handle_new_site_webhook);
+  // Legacy Gen 3 Account and site provisioning endpoints (Secret/ConfigMap based)
+  // Kept for backward compatibility during migration
+  server.post('/accounts-legacy', handle_new_provisioner_account_webhook);
+  server.post('/accounts-legacy/:account', handle_new_provisioner_account_webhook);
+  server.post('/accounts-legacy/:account/sites/:name', handle_new_site_webhook);
+  server.post('/accounts-legacy/:account/sites', handle_new_site_webhook);
 
-  // New instances endpoints
+  // Gen 4 Account and site provisioning endpoints (CRD based)
+  // StorageAccount CRD endpoints
+  server.post('/accounts', storageAccountRoutes.createOrUpdateStorageAccount, format_result);
+  server.post('/accounts/:account', storageAccountRoutes.createOrUpdateStorageAccount, format_result);
+  server.get('/accounts/:account', storageAccountRoutes.getStorageAccount, format_result);
+  server.get('/accounts', storageAccountRoutes.listStorageAccounts, format_result);
+  server.del('/accounts/:account', storageAccountRoutes.deleteStorageAccount);
+
+  // ComputeInstance CRD endpoints
+  server.post('/accounts/:account/sites/:name', computeInstanceRoutes.createOrUpdateComputeInstance, format_result);
+  server.post('/accounts/:account/sites', computeInstanceRoutes.createOrUpdateComputeInstance, format_result);
+  server.get('/accounts/:account/sites/:name', computeInstanceRoutes.getComputeInstance, format_result);
+  server.get('/accounts/:account/sites', computeInstanceRoutes.listComputeInstances, format_result);
+  server.del('/accounts/:account/sites/:name', computeInstanceRoutes.deleteComputeInstance);
+
+  // Old instances endpoints (nightscout.k8s/v1alpha1 - deprecated)
   server.get('/instances/:name', instanceRoutes.fetchInstance, format_result);
   server.post('/instances/:name', instanceRoutes.createOrUpdateInstance, format_result);
   server.del('/instances/:name', instanceRoutes.deleteInstance);
