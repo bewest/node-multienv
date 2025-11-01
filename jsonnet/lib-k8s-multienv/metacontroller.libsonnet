@@ -17,9 +17,10 @@
   // CompositeController constructor
   compositeController(
     name,
-    webhookUrl,
+    syncUrl,
     parentResource,  // { apiVersion, resource }
     childResources=[],  // Array of { apiVersion, resource }
+    customizeUrl=null,  // Optional customize hook URL
     generateSelector=true,
     resyncPeriodSeconds=30,
   ):: {
@@ -33,14 +34,14 @@
       parentResource: parentResource,
       childResources: childResources,
       hooks: {
-        customize: {
+        [if customizeUrl != null then 'customize']: {
           webhook: {
-            url: webhookUrl,
+            url: customizeUrl,
           },
         },
         sync: {
           webhook: {
-            url: webhookUrl,
+            url: syncUrl,
           },
         },
       },
@@ -75,12 +76,13 @@
 
   // Storage Composite Controller (Secret → MongoDB + Migration)
   storageComposite(
-    webhookUrl='http://webhook-service:3000/composite/storage/sync',
+    webhookServiceUrl='http://webhook-service:3000',
     resyncPeriodSeconds=30,
   )::
     $.compositeController(
       name='storage-composite',
-      webhookUrl=webhookUrl,
+      syncUrl=webhookServiceUrl + '/composite/storage/sync',
+      customizeUrl=webhookServiceUrl + '/composite/storage/customize',
       parentResource={
         apiVersion: 'v1',
         resource: 'secrets',
@@ -105,12 +107,13 @@
 
   // Compute Composite Controller (ConfigMap → Nightscout + CDC)
   computeComposite(
-    webhookUrl='http://webhook-service:3000/composite/compute/sync',
+    webhookServiceUrl='http://webhook-service:3000',
     resyncPeriodSeconds=30,
   )::
     $.compositeController(
       name='compute-composite',
-      webhookUrl=webhookUrl,
+      syncUrl=webhookServiceUrl + '/composite/compute/sync',
+      customizeUrl=webhookServiceUrl + '/composite/compute/customize',
       parentResource={
         apiVersion: 'v1',
         resource: 'configmaps',
@@ -126,8 +129,8 @@
       childResources=[
         { apiVersion: 'apps/v1', resource: 'deployments' },
         { apiVersion: 'v1', resource: 'services' },
-        // { apiVersion: 'kafka.strimzi.io/v1beta2', resource: 'kafkatopics' },
-        // { apiVersion: 'kafka.strimzi.io/v1beta2', resource: 'kafkaconnectors' },
+        { apiVersion: 'kafka.strimzi.io/v1beta2', resource: 'kafkatopics' },
+        { apiVersion: 'kafka.strimzi.io/v1beta2', resource: 'kafkaconnectors' },
         { apiVersion: 'policy/v1', resource: 'poddisruptionbudgets' },
       ],
       resyncPeriodSeconds=resyncPeriodSeconds,
@@ -163,11 +166,11 @@
     pvcResyncSeconds=60,
   ):: {
     storage: $.storageComposite(
-      webhookUrl=webhookServiceUrl + '/composite/storage/sync',
+      webhookServiceUrl=webhookServiceUrl,
       resyncPeriodSeconds=storageResyncSeconds,
     ),
     compute: $.computeComposite(
-      webhookUrl=webhookServiceUrl + '/composite/compute/sync',
+      webhookServiceUrl=webhookServiceUrl,
       resyncPeriodSeconds=computeResyncSeconds,
     ),
     pvcBackup: $.pvcBackupDecorator(
