@@ -164,22 +164,40 @@
   },
 
   // Convenience: Full RBAC set for webhook service
-  webhookServiceAccount(name, namespace='default')::
-    $.serviceAccount(name, namespace) +
-    $.fullOrchestrationRole(name) +
-    $.clusterRoleBinding(name),
+  webhookServiceAccount(name, namespace='default'):: {
+    serviceAccount: $.serviceAccount(name, namespace),
+    clusterRole: $.fullOrchestrationRole(name),
+    clusterRoleBinding: $.clusterRoleBinding(
+      name,
+      serviceAccountName=name,
+      serviceAccountNamespace=namespace,
+      roleName=name
+    ),
+  },
 
   // Convenience: Full RBAC set for provisioner service
-  provisionerServiceAccount(name, namespace='default')::
-    $.serviceAccount(name, namespace) +
-    $.provisionerRole(name) +
-    $.clusterRoleBinding(name),
+  provisionerServiceAccount(name, namespace='default'):: {
+    serviceAccount: $.serviceAccount(name, namespace),
+    clusterRole: $.provisionerRole(name),
+    clusterRoleBinding: $.clusterRoleBinding(
+      name,
+      serviceAccountName=name,
+      serviceAccountNamespace=namespace,
+      roleName=name
+    ),
+  },
 
   // Convenience: Full RBAC set for read-only service (Consul, monitoring)
-  readOnlyServiceAccount(name, namespace='default')::
-    $.serviceAccount(name, namespace) +
-    $.readOnlyRole(name) +
-    $.clusterRoleBinding(name),
+  readOnlyServiceAccount(name, namespace='default'):: {
+    serviceAccount: $.serviceAccount(name, namespace),
+    clusterRole: $.readOnlyRole(name),
+    clusterRoleBinding: $.clusterRoleBinding(
+      name,
+      serviceAccountName=name,
+      serviceAccountNamespace=namespace,
+      roleName=name
+    ),
+  },
 
   // ClusterRole for deployment-controller (webhook + provisioner combined)
   // Since k8s-deployment-controller.js handles both webhook operations and provisioner API,
@@ -258,8 +276,14 @@
   // Ergonomic export - use this for k8s-deployment-controller deployments
   // Example usage in Jsonnet:
   //   rbac.deploymentControllerRBAC('deployment-controller')
-  deploymentControllerRBAC(name, namespace='default')::
-    $.serviceAccount(name, namespace) +
-    $.deploymentControllerRole(name) +
-    $.clusterRoleBinding(name),
+  deploymentControllerRBAC(name, namespace='default'):: {
+    serviceAccount: $.serviceAccount(name, namespace),
+    clusterRole: $.deploymentControllerRole(name),
+    clusterRoleBinding: $.clusterRoleBinding(
+      name,
+      serviceAccountName=name,
+      serviceAccountNamespace=namespace,
+      roleName=name
+    ),
+  },
 }
