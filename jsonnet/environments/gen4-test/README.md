@@ -16,21 +16,32 @@ tk eval jsonnet/environments/gen4-test
 
 The `simple_deployment` section shows the **batteries-included** approach - one function call generates:
 
-1. **ServiceAccount** (`deployment-controller`)
-2. **ClusterRole** with combined webhook + provisioner permissions (includes delete for tenant removal)
-3. **ClusterRoleBinding** 
-4. **Webhook Deployment** (all-in-one: webhook + provisioner + healthcheck)
-5. **Webhook Service** (ClusterIP)
-6. **Storage CompositeController** CRD
-7. **Compute CompositeController** CRD
-8. **PVC Backup DecoratorController** CRD
+1. **ServiceAccount** (`deployment-controller`) - For webhook/provisioner deployment
+2. **ClusterRole** (`deployment-controller`) - Combined webhook + provisioner permissions (includes delete)
+3. **ClusterRoleBinding** (`deployment-controller`)
+4. **ServiceAccount** (`migration-job`) - For database migration jobs
+5. **ClusterRole** (`migration-job`) - Minimal permissions (read Secrets only)
+6. **ClusterRoleBinding** (`migration-job`)
+7. **Webhook Deployment** (all-in-one: webhook + provisioner + healthcheck)
+8. **Webhook Service** (ClusterIP)
+9. **Storage CompositeController** CRD
+10. **Compute CompositeController** CRD
+11. **PVC Backup DecoratorController** CRD
 
-**Total: 8 Kubernetes resources** from a single function call.
+**Total: 11 Kubernetes resources** from a single function call.
 
 **RBAC Permissions:**
-- The deployment-controller runs in `default` namespace with cluster-wide permissions
-- Can manage ConfigMaps, Secrets, StorageAccounts, ComputeInstances in `hosted-tenants` namespace
-- Includes `delete` verb for provisioner API tenant removal operations
+- **deployment-controller**: Runs in `default` namespace with cluster-wide permissions
+  - Full webhook orchestration (create/update child resources)
+  - Full provisioner API (create/update/delete ConfigMaps, Secrets, CRDs)
+  - Can manage resources in `hosted-tenants` namespace
+- **migration-job**: Minimal permissions for database migration jobs
+  - Read-only access to Secrets (for MongoDB credentials)
+  - No Kubernetes API write access
+
+**imagePullSecrets:**
+- Both service accounts automatically include the `imagePullSecrets` provided to gen4.stack()
+- Ensures migration jobs can pull from the same private registry as the webhook deployment
 
 ### Advanced Deployment
 

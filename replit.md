@@ -83,8 +83,11 @@ The platform employs a **CRD-based two-composite architecture** (Storage and Com
 - Updated `provisionerRole()` in `rbac.libsonnet`: Added full CRUD (including delete) for CRDs to support provisioner API tenant lifecycle
 - Created `deploymentControllerRole()` in `rbac.libsonnet`: Combined role merging webhook and provisioner permissions for k8s-deployment-controller
 - Created `deploymentControllerRBAC()` in `rbac.libsonnet`: Ergonomic export (ServiceAccount + ClusterRole + ClusterRoleBinding) for easy deployment integration
-- Updated `gen4.stack()` in `gen4.libsonnet`: Now uses `deploymentControllerRBAC()` by default for combined webhook + provisioner permissions
+- Created `migrationJobRole()` in `rbac.libsonnet`: Minimal permissions role for database migration jobs (read Secrets only)
+- Created `migrationJobServiceAccount()` convenience function for easy migration job RBAC setup
+- Updated `gen4.stack()` in `gen4.libsonnet`: Now creates both deployment-controller and migration-job service accounts with imagePullSecrets
 - Updated default ServiceAccount name: Changed from `multienv-metactl-webhook` to `deployment-controller` to reflect actual purpose
+- Added `imagePullSecrets` parameter to all RBAC convenience functions for private registry support
 - Updated `docs/RBAC-DESIGN.md`: Documented CRD permissions, status subresource pattern, cross-namespace example (default → hosted-tenants), and Gen 3/Gen 4 compatibility
 - Updated `jsonnet/environments/gen4-test/README.md`: Documented new RBAC permissions and cross-namespace capabilities
 - Maintained backward compatibility: Gen 3 ConfigMap/Secret permissions preserved alongside Gen 4 CRD permissions
