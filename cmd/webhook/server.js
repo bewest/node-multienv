@@ -4,13 +4,17 @@ const config = require('./config');
 
 // Import handler factories
 const createStorageCompositeSync = require('./handlers/storage-composite-sync');
+const createStorageCompositeCustomize = require('./handlers/storage-composite-customize');
 const createComputeCompositeSync = require('./handlers/compute-composite-sync');
+const createComputeCompositeCustomize = require('./handlers/compute-composite-customize');
 const createDecoratorSync = require('./handlers/decorator-sync');
 const createDecoratorFinalize = require('./handlers/decorator-finalize');
 
 // Create handlers with config
 const storageCompositeSync = createStorageCompositeSync(config);
+const storageCompositeCustomize = createStorageCompositeCustomize(config);
 const computeCompositeSync = createComputeCompositeSync(config);
+const computeCompositeCustomize = createComputeCompositeCustomize(config);
 const decoratorSync = createDecoratorSync(config);
 const decoratorFinalize = createDecoratorFinalize(config);
 
@@ -38,9 +42,11 @@ server.use((req, res, next) => {
 
 // Gen 4: Two-Composite Architecture
 // Storage composite: Secret → MongoDB StatefulSet + Migration Jobs
+server.post('/composite/storage/customize', storageCompositeCustomize);
 server.post('/composite/storage/sync', storageCompositeSync);
 
 // Compute composite: ConfigMap → Nightscout Deployment + CDC resources
+server.post('/composite/compute/customize', computeCompositeCustomize);
 server.post('/composite/compute/sync', computeCompositeSync);
 
 // Decorator: PVC backup policy enforcement
@@ -56,7 +62,9 @@ server.listen(port, '0.0.0.0', () => {
   console.log(`Metacontroller webhook server listening on port ${port}`);
   console.log(`Gen 4: Two-Composite Architecture`);
   console.log(`Endpoints:`);
+  console.log(`  POST /composite/storage/customize - Storage: Related resource discovery`);
   console.log(`  POST /composite/storage/sync - Storage: Secret → MongoDB + Migration`);
+  console.log(`  POST /composite/compute/customize - Compute: Related resource discovery`);
   console.log(`  POST /composite/compute/sync - Compute: ConfigMap → Nightscout + CDC`);
   console.log(`  POST /decorator/sync - PVC backup policy`);
   console.log(`  POST /decorator/finalize - PVC cleanup`);
