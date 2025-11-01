@@ -609,6 +609,77 @@ local rbac = import 'lib-k8s-multienv/rbac.libsonnet';
 - Status subresource access: Kubernetes-standard status reporting
 - No `delete` on child resources: Owner references handle cleanup
 
+**Cross-Namespace Example (Default → Hosted-Tenants):**
+
+This is the typical deployment pattern: k8s-deployment-controller runs in `default` namespace, but manages tenant resources in `hosted-tenants` namespace.
+
+```jsonnet
+// deployment-controller.jsonnet
+local rbac = import 'lib-k8s-multienv/rbac.libsonnet';
+
+{
+  // RBAC: ServiceAccount in 'default' namespace with cluster-wide permissions
+  deployment_controller_rbac: rbac.deploymentControllerRBAC('deployment-controller', 'default'),
+
+  // Deployment: k8s-deployment-controller pod runs in 'default' namespace
+  deployment: {
+    apiVersion: 'apps/v1',
+    kind: 'Deployment',
+    metadata: {
+      name: 'deployment-controller',
+      namespace: 'default',
+    },
+    spec: {
+      replicas: 1,
+      selector: { matchLabels: { app: 'deployment-controller' } },
+      template: {
+        metadata: { labels: { app: 'deployment-controller' } },
+        spec: {
+          serviceAccountName: 'deployment-controller',  // ← Uses created ServiceAccount
+          containers: [{
+            name: 'controller',
+            image: 'nightscout/deployment-controller:latest',
+            env: [
+              { name: 'TENANT_NAMESPACE', value: 'hosted-tenants' },  // ← Target namespace
+            ],
+            ports: [
+              { name: 'webhook', containerPort: 3000 },      // Metacontroller webhooks
+              { name: 'provisioner', containerPort: 2828 },  // Provisioner API
+            ],
+          }],
+        },
+      },
+    },
+  },
+}
+```
+
+**How it works:**
+
+1. **ServiceAccount**: Created in `default` namespace
+2. **ClusterRole**: Grants cluster-wide permissions for all namespaces
+3. **ClusterRoleBinding**: Binds ServiceAccount to ClusterRole (cluster-wide scope)
+4. **k8s-deployment-controller pod**:
+   - Runs in `default` namespace with `serviceAccountName: deployment-controller`
+   - Uses Kubernetes client to manage resources in `hosted-tenants` namespace:
+     ```javascript
+     // In k8s-deployment-controller.js
+     const namespace = 'hosted-tenants';
+     
+     // Create StorageAccount CRD in hosted-tenants
+     await customObjectsApi.createNamespacedCustomObject(
+       'nightscout.io', 'v1alpha1', namespace, 'storageaccounts', storageAccountCRD
+     );
+     
+     // Delete Secret in hosted-tenants
+     await coreApi.deleteNamespacedSecret(secretName, namespace);
+     ```
+
+**Why ClusterRole instead of Role?**
+- ClusterRole allows cross-namespace operations (default → hosted-tenants)
+- Single RBAC setup for all tenant namespaces
+- CRDs are cluster-scoped resources requiring ClusterRole permissions
+
 **Alternative approaches:**
 
 If you need separate webhook and provisioner services:
