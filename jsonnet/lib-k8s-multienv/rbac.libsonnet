@@ -13,14 +13,19 @@
 
 {
   // ServiceAccount constructor
-  serviceAccount(name, namespace='default'):: {
+  serviceAccount(name, namespace='default', imagePullSecrets=[]):: {
     apiVersion: 'v1',
     kind: 'ServiceAccount',
     metadata: {
       name: name,
       namespace: namespace,
     },
-  },
+  } + (
+    if std.length(imagePullSecrets) > 0 then
+      { imagePullSecrets: imagePullSecrets }
+    else
+      {}
+  ),
 
   // ClusterRole with full orchestration permissions (for Metacontroller webhooks)
   fullOrchestrationRole(name):: {
@@ -142,6 +147,23 @@
     ],
   },
 
+  // ClusterRole for migration jobs (minimal permissions)
+  // Migration jobs only need to read Secrets to get MongoDB credentials
+  migrationJobRole(name):: {
+    apiVersion: 'rbac.authorization.k8s.io/v1',
+    kind: 'ClusterRole',
+    metadata: {
+      name: name,
+    },
+    rules: [
+      {
+        apiGroups: [''],
+        resources: ['secrets'],
+        verbs: ['get', 'list'],
+      },
+    ],
+  },
+
   // ClusterRoleBinding
   clusterRoleBinding(name, serviceAccountName=name, serviceAccountNamespace='default', roleName=name):: {
     apiVersion: 'rbac.authorization.k8s.io/v1',
@@ -164,8 +186,8 @@
   },
 
   // Convenience: Full RBAC set for webhook service
-  webhookServiceAccount(name, namespace='default'):: {
-    serviceAccount: $.serviceAccount(name, namespace),
+  webhookServiceAccount(name, namespace='default', imagePullSecrets=[]):: {
+    serviceAccount: $.serviceAccount(name, namespace, imagePullSecrets),
     clusterRole: $.fullOrchestrationRole(name),
     clusterRoleBinding: $.clusterRoleBinding(
       name,
@@ -176,8 +198,8 @@
   },
 
   // Convenience: Full RBAC set for provisioner service
-  provisionerServiceAccount(name, namespace='default'):: {
-    serviceAccount: $.serviceAccount(name, namespace),
+  provisionerServiceAccount(name, namespace='default', imagePullSecrets=[]):: {
+    serviceAccount: $.serviceAccount(name, namespace, imagePullSecrets),
     clusterRole: $.provisionerRole(name),
     clusterRoleBinding: $.clusterRoleBinding(
       name,
@@ -188,9 +210,21 @@
   },
 
   // Convenience: Full RBAC set for read-only service (Consul, monitoring)
-  readOnlyServiceAccount(name, namespace='default'):: {
-    serviceAccount: $.serviceAccount(name, namespace),
+  readOnlyServiceAccount(name, namespace='default', imagePullSecrets=[]):: {
+    serviceAccount: $.serviceAccount(name, namespace, imagePullSecrets),
     clusterRole: $.readOnlyRole(name),
+    clusterRoleBinding: $.clusterRoleBinding(
+      name,
+      serviceAccountName=name,
+      serviceAccountNamespace=namespace,
+      roleName=name
+    ),
+  },
+
+  // Convenience: Full RBAC set for migration jobs
+  migrationJobServiceAccount(name, namespace='default', imagePullSecrets=[]):: {
+    serviceAccount: $.serviceAccount(name, namespace, imagePullSecrets),
+    clusterRole: $.migrationJobRole(name),
     clusterRoleBinding: $.clusterRoleBinding(
       name,
       serviceAccountName=name,
@@ -276,8 +310,8 @@
   // Ergonomic export - use this for k8s-deployment-controller deployments
   // Example usage in Jsonnet:
   //   rbac.deploymentControllerRBAC('deployment-controller')
-  deploymentControllerRBAC(name, namespace='default'):: {
-    serviceAccount: $.serviceAccount(name, namespace),
+  deploymentControllerRBAC(name, namespace='default', imagePullSecrets=[]):: {
+    serviceAccount: $.serviceAccount(name, namespace, imagePullSecrets),
     clusterRole: $.deploymentControllerRole(name),
     clusterRoleBinding: $.clusterRoleBinding(
       name,
