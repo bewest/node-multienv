@@ -86,10 +86,17 @@ The platform employs a **two-composite architecture** (Storage and Compute) to s
 
 ## Recent Changes
 
+### 2025-11-01: CompositeController Customize Hook Implementation
+- Separated customize and sync hooks for proper Metacontroller protocol compliance
+- Created dedicated customize handlers: `/composite/storage/customize` and `/composite/compute/customize`
+- Removed incorrect `relatedResourceRules` from sync responses (DecoratorController only)
+- Updated Jsonnet library to generate correct customize and sync hook URLs
+- Fixes Metacontroller v4.x protocol violations
+
 ### 2025-10-31: Metacontroller v4.x Compatibility
 - Added required `revisionHistory` field to CompositeController CRDs for Metacontroller v4.x+
 - Storage and Compute composites now include `revisionHistory.fieldPaths: ['data']`
-- Fixes `"configmaps." not found"` error in Metacontroller v4.12.0
+- Fixes `"configmaps." not found"` and `"secrets." not found"` errors in Metacontroller v4.12.0
 - Updated documentation to specify minimum version requirement (v4.0+)
 
 ### 2025-10-31: imagePullSecrets Support
