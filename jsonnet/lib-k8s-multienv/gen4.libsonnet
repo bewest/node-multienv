@@ -239,6 +239,7 @@ local crds = import 'crds.libsonnet';
       webhookNamespace,
       webhookPort,
     ];
+    local deploymentRbac = rbac.deploymentControllerRBAC(webhookServiceAccount, webhookNamespace);
     
     {
       // Custom Resource Definitions (StorageAccount and ComputeInstance)
@@ -247,7 +248,9 @@ local crds = import 'crds.libsonnet';
       // ServiceAccount and RBAC for k8s-deployment-controller
       // Uses deploymentControllerRBAC() which combines webhook + provisioner permissions
       // Includes delete permissions for ConfigMaps/Secrets/CRDs (provisioner API tenant removal)
-      rbac: rbac.deploymentControllerRBAC(webhookServiceAccount, webhookNamespace),
+      serviceAccount: deploymentRbac.serviceAccount,
+      clusterRole: deploymentRbac.clusterRole,
+      clusterRoleBinding: deploymentRbac.clusterRoleBinding,
       
       // Webhook Deployment and Service
       webhook: webhook.stack(
