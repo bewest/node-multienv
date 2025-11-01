@@ -3,7 +3,7 @@
  * 
  * Tells Metacontroller which related resources to fetch for compute composite sync.
  * 
- * Returns relatedResources list based on parent ConfigMap metadata.
+ * Returns relatedResources list based on parent ComputeInstance CRD metadata.
  */
 
 function createComputeCompositeCustomize(config) {
@@ -11,23 +11,19 @@ function createComputeCompositeCustomize(config) {
     const { parent } = req.body;
     
     const tenantId = parent.metadata.name;
+    const storageAccountName = parent.spec?.storageAccountRef?.name;
     const storageAccountLabel = parent.metadata.labels?.['storage.nightscout.org/account'];
     
-    console.log('Compute composite customize for tenant:', tenantId, 'storage account:', storageAccountLabel);
+    console.log('Compute composite customize for tenant:', tenantId, 'storage account:', storageAccountName);
     
     try {
       const response = {
         relatedResources: [
           {
-            // Discover storage Secret (for storage type metadata)
-            apiVersion: 'v1',
-            resource: 'secrets',
-            labelSelector: {
-              matchLabels: {
-                'storage.nightscout.org/account': storageAccountLabel,
-                'ns.mdn.io/composite': 'storage'
-              }
-            }
+            // Discover StorageAccount CRD (for storage metadata)
+            apiVersion: 'nightscout.io/v1alpha1',
+            resource: 'storageaccounts',
+            names: storageAccountName ? [storageAccountName] : []
           },
           {
             // Discover app-credentials Secret (provides MongoDB credentials for Nightscout)

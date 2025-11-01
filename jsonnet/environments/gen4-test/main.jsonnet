@@ -103,4 +103,158 @@ local rbac = import '../../lib-k8s-multienv/rbac.libsonnet';
       },
     ),
   },
+  
+  // ============================================================================
+  // EXAMPLE TENANT RESOURCES - StorageAccount and ComputeInstance CRDs
+  // ============================================================================
+  
+  // Example StorageAccount - Manages MongoDB infrastructure for a tenant
+  example_storage_basic: {
+    apiVersion: 'nightscout.io/v1alpha1',
+    kind: 'StorageAccount',
+    metadata: {
+      name: 'tenant-abc-storage',
+      namespace: 'hosted-tenants',
+    },
+    spec: {
+      mongodbVersion: '7.0',
+      replicas: 3,
+      tier: 'basic',
+      storageSize: '10Gi',
+      resources: {
+        requests: {
+          cpu: '100m',
+          memory: '256Mi',
+        },
+        limits: {
+          cpu: '500m',
+          memory: '512Mi',
+        },
+      },
+      backup: {
+        enabled: true,
+        retentionPolicy: 'Retain',
+      },
+    },
+  },
+  
+  // Example StorageAccount - Premium tier with migration
+  example_storage_premium: {
+    apiVersion: 'nightscout.io/v1alpha1',
+    kind: 'StorageAccount',
+    metadata: {
+      name: 'tenant-xyz-storage',
+      namespace: 'hosted-tenants',
+    },
+    spec: {
+      mongodbVersion: '7.0',
+      replicas: 5,
+      tier: 'premium',
+      storageSize: '100Gi',
+      storageClass: 'fast-ssd',
+      resources: {
+        requests: {
+          cpu: '500m',
+          memory: '1Gi',
+        },
+        limits: {
+          cpu: '2000m',
+          memory: '4Gi',
+        },
+      },
+      backup: {
+        enabled: true,
+        retentionPolicy: 'Retain',
+      },
+      migration: {
+        enabled: true,
+        sourceType: 'shared',
+        sourceConnectionSecret: 'legacy-mongodb-credentials',
+      },
+    },
+  },
+  
+  // Example ComputeInstance - Basic Nightscout deployment
+  example_compute_basic: {
+    apiVersion: 'nightscout.io/v1alpha1',
+    kind: 'ComputeInstance',
+    metadata: {
+      name: 'tenant-abc-app',
+      namespace: 'hosted-tenants',
+      labels: {
+        'storage.nightscout.org/account': 'tenant-abc-storage',
+      },
+    },
+    spec: {
+      storageAccountRef: {
+        name: 'tenant-abc-storage',
+      },
+      nightscoutImage: 'nightscout/cgm-remote-monitor:latest',
+      replicas: 2,
+      tier: 'basic',
+      resources: {
+        requests: {
+          cpu: '100m',
+          memory: '128Mi',
+        },
+        limits: {
+          cpu: '500m',
+          memory: '512Mi',
+        },
+      },
+      env: [
+        {
+          name: 'ENABLE',
+          value: 'careportal basal',
+        },
+        {
+          name: 'TIME_FORMAT',
+          value: '12',
+        },
+      ],
+      healthcheck: {
+        enabled: true,
+      },
+    },
+  },
+  
+  // Example ComputeInstance - Premium with CDC
+  example_compute_premium: {
+    apiVersion: 'nightscout.io/v1alpha1',
+    kind: 'ComputeInstance',
+    metadata: {
+      name: 'tenant-xyz-app',
+      namespace: 'hosted-tenants',
+      labels: {
+        'storage.nightscout.org/account': 'tenant-xyz-storage',
+      },
+    },
+    spec: {
+      storageAccountRef: {
+        name: 'tenant-xyz-storage',
+      },
+      nightscoutImage: 'nightscout/cgm-remote-monitor:15.0.0',
+      replicas: 4,
+      tier: 'premium',
+      resources: {
+        requests: {
+          cpu: '200m',
+          memory: '256Mi',
+        },
+        limits: {
+          cpu: '1000m',
+          memory: '1Gi',
+        },
+      },
+      cdc: {
+        enabled: true,
+        kafkaCluster: 'main-kafka',
+        kafkaConnectCluster: 'connect-cluster',
+      },
+      healthcheck: {
+        enabled: true,
+        image: 'custom-healthcheck:latest',
+      },
+    },
+  },
 }

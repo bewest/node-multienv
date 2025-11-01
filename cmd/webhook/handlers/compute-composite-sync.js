@@ -1,18 +1,24 @@
 /**
  * Compute Composite Controller
  * 
- * Manages Nightscout Deployment + Service from ConfigMap parent
+ * Manages Nightscout Deployment + Service from ComputeInstance CRD parent
  * 
- * Parent: ConfigMap (labeled ns.mdn.io/composite=compute)
+ * Parent: ComputeInstance CRD (nightscout.io/v1alpha1)
  * Children:
  *   - Nightscout Deployment
  *   - Nightscout Service
  *   - PodDisruptionBudget (optional)
- *   - KafkaTopic (if CDC_ENABLED)
- *   - KafkaConnector (if CDC_ENABLED)
+ *   - KafkaTopic (if spec.cdc.enabled)
+ *   - KafkaConnector (if spec.cdc.enabled)
  * Related (not owned):
- *   - Storage Secret (discovered via storage.nightscout.org/account label)
+ *   - StorageAccount CRD (referenced via spec.storageAccountRef.name)
  *   - MongoDB StatefulSet (blast radius protection)
+ * 
+ * Spec fields:
+ *   - spec.storageAccountRef.name: Name of StorageAccount CRD providing MongoDB
+ *   - spec.nightscoutImage: Nightscout container image
+ *   - spec.replicas: Number of Nightscout replicas (default: 2)
+ *   - spec.cdc.enabled: Enable CDC with Kafka
  * 
  * Note: Migration is a storage-layer concern handled by storage composite.
  *       This controller never renders migration Jobs.
@@ -25,9 +31,11 @@ function createComputeCompositeSync(config) {
   const { parent, children, related } = req.body;
   
   const tenantId = parent.metadata.name;
+  const spec = parent.spec || {};
+  const storageAccountName = spec.storageAccountRef?.name;
   const storageAccountLabel = parent.metadata.labels?.['storage.nightscout.org/account'];
   
-  console.log('Compute composite sync for tenant:', tenantId, 'storage account:', storageAccountLabel);
+  console.log('Compute composite sync for tenant:', tenantId, 'storage account:', storageAccountName);
   
   try {
     const response = {
@@ -35,18 +43,36 @@ function createComputeCompositeSync(config) {
       children: []
     };
 
-    // Find storage Secret from related resources (for metadata)
-    const storageSecret = findStorageSecret(related, storageAccountLabel);
-    
-    if (!storageSecret) {
-      console.warn(`Storage Secret not found for account: ${storageAccountLabel}`);
+    if (!storageAccountName) {
+      console.warn(`Storage account reference missing in ComputeInstance spec`);
       response.status = {
+        phase: 'Failed',
         observedGeneration: parent.metadata?.generation,
         conditions: [{
           type: 'Ready',
           status: 'False',
-          reason: 'StorageSecretNotFound',
-          message: `Storage Secret with label storage.nightscout.org/account=${storageAccountLabel} not found`,
+          reason: 'StorageAccountRefMissing',
+          message: `spec.storageAccountRef.name is required`,
+          lastTransitionTime: new Date().toISOString()
+        }]
+      };
+      res.send(response);
+      return;
+    }
+
+    // Find StorageAccount CRD from related resources
+    const storageAccount = findStorageAccount(related, storageAccountName);
+    
+    if (!storageAccount) {
+      console.warn(`StorageAccount CRD not found: ${storageAccountName}`);
+      response.status = {
+        phase: 'Pending',
+        observedGeneration: parent.metadata?.generation,
+        conditions: [{
+          type: 'Ready',
+          status: 'False',
+          reason: 'StorageAccountNotFound',
+          message: `StorageAccount ${storageAccountName} not found`,
           lastTransitionTime: new Date().toISOString()
         }]
       };
@@ -60,12 +86,13 @@ function createComputeCompositeSync(config) {
     if (!appCredentialsSecret) {
       console.warn(`App credentials Secret not found for account: ${storageAccountLabel}`);
       response.status = {
+        phase: 'Pending',
         observedGeneration: parent.metadata?.generation,
         conditions: [{
           type: 'Ready',
           status: 'False',
           reason: 'AppCredentialsNotFound',
-          message: `App credentials Secret not found for account ${storageAccountLabel}. Ensure storage Secret is initialized.`,
+          message: `App credentials Secret not found for account ${storageAccountLabel}. Ensure StorageAccount is ready.`,
           lastTransitionTime: new Date().toISOString()
         }]
       };
@@ -73,17 +100,18 @@ function createComputeCompositeSync(config) {
       return;
     }
 
-    // Check MongoDB readiness from related StatefulSet
-    const mongoReadiness = checkMongoReadinessFromRelated(related, storageAccountLabel);
+    // Check MongoDB readiness from related StatefulSet or StorageAccount status
+    const mongoReadiness = checkMongoReadinessFromRelated(related, storageAccountLabel, storageAccount);
     
     // Enhance parent with storage information
-    const enrichedParent = enrichWithStorageInfo(parent, storageSecret, appCredentialsSecret, storageAccountLabel);
+    const enrichedParent = enrichWithStorageInfo(parent, storageAccount, appCredentialsSecret, storageAccountLabel);
     
     // Render Nightscout resources
     response.children.push(...renderNightscout(enrichedParent, config));
 
     // Optional: CDC resources if enabled
-    const cdcEnabled = parent.data?.CDC_ENABLED === 'true';
+    const cdcConfig = spec.cdc || {};
+    const cdcEnabled = cdcConfig.enabled === true;
     if (cdcEnabled && mongoReadiness.ready) {
       response.children.push(...renderKafkaTopics(enrichedParent, config));
       response.children.push(renderKafkaConnector(enrichedParent, config));
@@ -105,21 +133,18 @@ function createComputeCompositeSync(config) {
 }
 
 /**
- * Find storage Secret from related resources
+ * Find StorageAccount CRD from related resources
  */
-function findStorageSecret(related, storageAccountLabel) {
-  if (!related || !related['Secret.v1']) {
+function findStorageAccount(related, storageAccountName) {
+  if (!related || !related['StorageAccount.nightscout.io/v1alpha1']) {
     return null;
   }
   
-  const secrets = related['Secret.v1'];
-  for (const [name, secret] of Object.entries(secrets)) {
-    const accountLabel = secret.metadata?.labels?.['storage.nightscout.org/account'];
-    const compositeLabel = secret.metadata?.labels?.['ns.mdn.io/composite'];
-    
-    if (accountLabel === storageAccountLabel && compositeLabel === 'storage') {
-      console.log(`Found storage Secret: ${name} for account: ${storageAccountLabel}`);
-      return secret;
+  const storageAccounts = related['StorageAccount.nightscout.io/v1alpha1'];
+  for (const [name, sa] of Object.entries(storageAccounts)) {
+    if (name === storageAccountName) {
+      console.log(`Found StorageAccount CRD: ${name}`);
+      return sa;
     }
   }
   
@@ -149,32 +174,31 @@ function findAppCredentialsSecret(related, storageAccountLabel) {
 }
 
 /**
- * Check MongoDB readiness from related StatefulSet
- * Note: Shared storage (no StatefulSet) is considered ready
+ * Check MongoDB readiness from StorageAccount status or related StatefulSet
  */
-function checkMongoReadinessFromRelated(related, storageAccountLabel) {
-  // Check if using shared storage (no StatefulSet expected)
-  const storageSecrets = related?.['Secret.v1'] || {};
-  for (const [name, secret] of Object.entries(storageSecrets)) {
-    const accountLabel = secret.metadata?.labels?.['storage.nightscout.org/account'];
-    const storageType = secret.metadata?.annotations?.['ns.mdn.io/storage-type'];
+function checkMongoReadinessFromRelated(related, storageAccountLabel, storageAccount) {
+  // Check StorageAccount status first
+  if (storageAccount?.status) {
+    const phase = storageAccount.status.phase;
+    const ready = phase === 'Ready';
     
-    if (accountLabel === storageAccountLabel && storageType === 'shared') {
-      console.log(`  Shared storage detected - MongoDB assumed ready (no StatefulSet check)`);
-      return {
-        ready: true,
-        condition: {
-          type: 'MongoDBReady',
-          status: 'True',
-          reason: 'SharedMongoDB',
-          message: 'Using shared MongoDB cluster (no dedicated StatefulSet)',
-          lastTransitionTime: new Date().toISOString()
-        }
-      };
-    }
+    console.log(`  StorageAccount phase: ${phase}`);
+    
+    return {
+      ready,
+      condition: {
+        type: 'MongoDBReady',
+        status: ready ? 'True' : 'False',
+        reason: ready ? 'StorageAccountReady' : `StorageAccountPhase${phase}`,
+        message: ready 
+          ? `StorageAccount is ready`
+          : `Waiting for StorageAccount to become ready (current phase: ${phase})`,
+        lastTransitionTime: new Date().toISOString()
+      }
+    };
   }
   
-  // Dedicated storage - check StatefulSet readiness
+  // Fallback: check StatefulSet readiness directly
   if (!related || !related['StatefulSet.apps/v1']) {
     return {
       ready: false,
@@ -182,7 +206,7 @@ function checkMongoReadinessFromRelated(related, storageAccountLabel) {
         type: 'MongoDBReady',
         status: 'False',
         reason: 'StatefulSetNotFound',
-        message: 'MongoDB StatefulSet not found in related resources (dedicated storage expected)',
+        message: 'MongoDB StatefulSet not found in related resources',
         lastTransitionTime: new Date().toISOString()
       }
     };
@@ -227,12 +251,11 @@ function checkMongoReadinessFromRelated(related, storageAccountLabel) {
 }
 
 /**
- * Enrich parent ConfigMap with storage information
- * Uses app-credentials Secret for MongoDB connection (not storage Secret)
+ * Enrich parent ComputeInstance with storage information
+ * Uses app-credentials Secret for MongoDB connection
  */
-function enrichWithStorageInfo(parent, storageSecret, appCredentialsSecret, storageAccountLabel) {
-  // Get storage type from storage Secret metadata
-  const storageType = storageSecret.metadata?.annotations?.['ns.mdn.io/storage-type'] || 'dedicated';
+function enrichWithStorageInfo(parent, storageAccount, appCredentialsSecret, storageAccountLabel) {
+  const spec = parent.spec || {};
   
   // Decode app credentials to get MONGO_HOST (for reference)
   const appCredentials = {};
@@ -245,19 +268,20 @@ function enrichWithStorageInfo(parent, storageSecret, appCredentialsSecret, stor
   return {
     ...parent,
     data: {
-      ...parent.data,
       TENANT_ID: parent.metadata.name,
-      // App credentials Secret will be projected into Nightscout containers
+      NS_IMAGE: spec.nightscoutImage || 'nightscout/cgm-remote-monitor:latest',
+      NS_REPLICAS: String(spec.replicas || 2),
       APP_CREDENTIALS_SECRET: appCredentialsSecret.metadata.name,
       MONGO_HOST: appCredentials.MONGO_HOST || `${storageAccountLabel}-mongo`,
       STORAGE_ACCOUNT: storageAccountLabel,
-      STORAGE_TYPE: storageType
+      CDC_ENABLED: spec.cdc?.enabled ? 'true' : 'false',
+      CDC_COLLECTIONS: spec.cdc?.collections?.join(',') || 'entries,treatments'
     }
   };
 }
 
 /**
- * Build Kubernetes-idiomatic status
+ * Build Kubernetes-idiomatic status with phase
  */
 function buildStatus(parent, state) {
   const { mongoReadiness, cdcEnabled, storageAccount } = state;
@@ -280,7 +304,11 @@ function buildStatus(parent, state) {
     lastTransitionTime: new Date().toISOString()
   });
   
+  // Determine phase
+  const phase = allReady ? 'Ready' : 'Pending';
+  
   return {
+    phase,
     observedGeneration: parent.metadata?.generation,
     conditions,
     storage: {

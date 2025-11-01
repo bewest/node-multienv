@@ -1,21 +1,25 @@
 /**
  * Storage Composite Controller
  * 
- * Manages MongoDB StatefulSet + Service from Secret parent
+ * Manages MongoDB StatefulSet + Service from StorageAccount CRD parent
  * 
- * Parent: Secret (labeled ns.mdn.io/composite=storage)
+ * Parent: StorageAccount CRD (nightscout.io/v1alpha1)
  * Children:
- *   - MongoDB StatefulSet (if storage-type=dedicated)
+ *   - MongoDB StatefulSet
  *   - MongoDB Service (headless)
- *   - Migration Job (if ns.mdn.io/migration-needed annotation present)
+ *   - Migration Job (if spec.migration.enabled is true)
+ *   - App Credentials Secret (MongoDB credentials for Nightscout)
  * Related (not owned):
  *   - PersistentVolumeClaim (created by StatefulSet, protected from deletion)
+ *   - ComputeInstances (tenants using this storage)
  * 
- * Annotations:
- *   - ns.mdn.io/storage-type: "shared" | "dedicated" (controls StatefulSet creation)
- *   - ns.mdn.io/migration-needed: "true" (triggers migration Job)
- *   - ns.mdn.io/migration-source-uri: mongodb://... (source for migration)
- *   - ns.mdn.io/migration-complete: "true" (prevents re-running migration)
+ * Spec fields:
+ *   - spec.mongodbVersion: MongoDB version (e.g., "7.0")
+ *   - spec.replicas: Number of MongoDB replicas (default: 3)
+ *   - spec.storageSize: Storage size per replica (default: "10Gi")
+ *   - spec.tier: Service tier (free, basic, premium, enterprise)
+ *   - spec.migration.enabled: Trigger migration from external MongoDB
+ *   - spec.migration.sourceConnectionSecret: Secret containing source MongoDB URI
  */
 
 const { renderMongoDB } = require('./resources');
@@ -34,143 +38,77 @@ function createStorageCompositeSync(config) {
       children: []
     };
 
-    // Extract configuration from Secret
+    // Extract configuration from StorageAccount CRD spec
     const storageConfig = extractStorageConfig(parent);
-    const storageType = parent.metadata.annotations?.['ns.mdn.io/storage-type'] || 'dedicated';
+    const spec = parent.spec || {};
     
-    // Generate NS user credentials if missing
-    const updatedSecret = ensureNSUserCredentials(parent, storageAccount);
-    if (updatedSecret) {
-      response.children.push(updatedSecret);
+    // Generate NS user credentials (stored in internal child Secret)
+    const nsuserUsername = generateUsername(storageAccount);
+    const nsuserPassword = generateSecurePassword(32);
+    const mongoHost = `${storageAccount}-mongo`;
+    const mongoPort = '27017';
+    const databaseName = generateDatabaseName(storageAccount);
+    
+    // Generate app-credentials Secret (contains MongoDB connection info for Nightscout)
+    const appCredentials = generateAppCredentials(
+      storageAccount,
+      mongoHost,
+      mongoPort,
+      databaseName,
+      nsuserUsername,
+      nsuserPassword
+    );
+    
+    const appCredentialsSecret = renderAppCredentialsSecret(
+      storageAccount,
+      parent.metadata.namespace,
+      appCredentials,
+      parent.metadata.labels
+    );
+    
+    response.children.push(appCredentialsSecret);
+    
+    // Render MongoDB resources
+    console.log(`  Creating MongoDB StatefulSet`);
+    const mongoResources = renderMongoDB(storageConfig, config);
+    response.children.push(...mongoResources);
+    
+    // Check MongoDB readiness
+    const mongoReadiness = checkMongoReadiness(children, storageAccount);
+    
+    // Check if migration is needed (spec-driven)
+    const migrationConfig = spec.migration || {};
+    const migrationEnabled = migrationConfig.enabled === true;
+    const migrationSourceSecret = migrationConfig.sourceConnectionSecret;
+    
+    if (migrationEnabled && migrationSourceSecret && mongoReadiness.ready) {
+      console.log(`  Migration enabled - rendering migration Job`);
+      const migrationJob = renderMigrationJobFromCRD(parent, storageAccount, migrationSourceSecret, config);
+      response.children.push(migrationJob);
     }
     
-    // Decode Secret data for app credentials generation
-    const secretData = {};
-    if (parent.data) {
-      Object.keys(parent.data).forEach(key => {
-        secretData[key] = Buffer.from(parent.data[key], 'base64').toString('utf-8');
-      });
-    }
+    // Check if NS user creation is needed
+    const hasCredentials = nsuserUsername && nsuserPassword;
     
-    // Generate app-credentials Secret if nsuser credentials exist
-    const nsuserUsername = secretData['nsuser-username'];
-    const nsuserPassword = secretData['nsuser-password'];
-    
-    if (nsuserUsername && nsuserPassword) {
-      const mongoHost = storageType === 'shared'
-        ? (secretData.mongoHost || 'shared-mongodb')
-        : `${storageAccount}-mongo`;
-      const mongoPort = secretData.mongoPort || '27017';
-      const databaseName = generateDatabaseName(storageAccount);
-      
-      const appCredentials = generateAppCredentials(
-        storageAccount,
-        mongoHost,
-        mongoPort,
-        databaseName,
-        nsuserUsername,
-        nsuserPassword
-      );
-      
-      const appCredentialsSecret = renderAppCredentialsSecret(
-        storageAccount,
-        parent.metadata.namespace,
-        appCredentials,
-        parent.metadata.labels
-      );
-      
-      response.children.push(appCredentialsSecret);
-    }
-    
-    // Render MongoDB resources ONLY for dedicated storage
-    // Shared storage uses external MongoDB cluster (no StatefulSet created)
-    let mongoReadiness;
-    if (storageType === 'shared') {
-      console.log(`  Storage type: shared - skipping MongoDB StatefulSet creation`);
-      mongoReadiness = {
-        ready: true, // Shared MongoDB assumed ready (external cluster)
-        replicas: 'N/A (shared)',
-        condition: {
-          type: 'Ready',
-          status: 'True',
-          reason: 'SharedMongoDB',
-          message: 'Using shared MongoDB cluster (no dedicated StatefulSet)',
-          lastTransitionTime: new Date().toISOString()
-        }
-      };
-    } else {
-      console.log(`  Storage type: dedicated - creating MongoDB StatefulSet`);
-      const mongoResources = renderMongoDB(storageConfig, config);
-      response.children.push(...mongoResources);
-      
-      // Check MongoDB readiness
-      mongoReadiness = checkMongoReadiness(children, storageAccount);
-      
-      // Check if migration is needed (annotation-driven)
-      const migrationNeeded = parent.metadata.annotations?.['ns.mdn.io/migration-needed'] === 'true';
-      const migrationSourceUri = parent.metadata.annotations?.['ns.mdn.io/migration-source-uri'];
-      const migrationComplete = parent.metadata.annotations?.['ns.mdn.io/migration-complete'] === 'true';
-      
-      if (migrationNeeded && migrationSourceUri && !migrationComplete && mongoReadiness.ready) {
-        console.log(`  Migration needed - rendering migration Job`);
-        const migrationJob = renderMigrationJob(parent, storageAccount, migrationSourceUri, config);
-        response.children.push(migrationJob);
-      }
-      
-      // Check if NS user creation is needed
-      const nsuserInitialized = parent.metadata.annotations?.['ns.mdn.io/nsuser-initialized'] === 'true';
-      const rotateCredentials = parent.metadata.annotations?.['ns.mdn.io/rotate-credentials'] === 'true';
-      const hasCredentials = parent.data?.['nsuser-username'] && parent.data?.['nsuser-password'];
-      
-      if (hasCredentials && (!nsuserInitialized || rotateCredentials) && mongoReadiness.ready) {
+    if (hasCredentials && mongoReadiness.ready) {
+      const userInitialized = parent.status?.conditions?.find(c => c.type === 'UserInitialized' && c.status === 'True');
+      if (!userInitialized) {
         console.log(`  NS user creation needed - rendering create-user Job`);
-        const createUserJob = renderCreateUserJob(parent, storageAccount, rotateCredentials, config);
+        const createUserJob = renderCreateUserJobFromCRD(parent, storageAccount, nsuserUsername, nsuserPassword, config);
         response.children.push(createUserJob);
       }
     }
     
     // Check migration state
-    const migrationState = checkMigrationState(children, parent);
+    const migrationState = checkMigrationStateFromCRD(children, migrationEnabled);
     
     // Check user initialization state
     const userInitState = checkUserInitializationState(children, parent);
     
-    // Update Secret annotations if user initialization completed
-    if (userInitState.completed && !userInitState.alreadyMarked) {
-      console.log(`  User initialization completed - updating Secret annotations`);
-      const updatedSecretAnnotations = {
-        apiVersion: 'v1',
-        kind: 'Secret',
-        metadata: {
-          name: parent.metadata.name,
-          namespace: parent.metadata.namespace,
-          labels: parent.metadata.labels,
-          annotations: {
-            ...parent.metadata.annotations,
-            'ns.mdn.io/nsuser-initialized': 'true',
-            'ns.mdn.io/nsuser-initialized-at': new Date().toISOString()
-          }
-        },
-        type: parent.type,
-        data: parent.data
-      };
-      
-      // Remove rotation annotation if present
-      if (updatedSecretAnnotations.metadata.annotations['ns.mdn.io/rotate-credentials']) {
-        delete updatedSecretAnnotations.metadata.annotations['ns.mdn.io/rotate-credentials'];
-      }
-      
-      response.children.push(updatedSecretAnnotations);
-    }
-    
-    // Count tenants using this storage account (from related ConfigMaps)
+    // Count tenants using this storage account (from related ComputeInstances)
     const tenantUsage = countTenantUsage(related, storageAccountLabel);
     
-    // Build status
-    const mongoHost = storageType === 'shared' 
-      ? (Buffer.from(parent.data?.mongoHost || '', 'base64').toString('utf-8') || 'shared-mongodb')
-      : `${storageAccount}-mongo`;
-    
+    // Build status with phase
     const conditions = [mongoReadiness.condition];
     if (migrationState.condition) {
       conditions.push(migrationState.condition);
@@ -179,26 +117,22 @@ function createStorageCompositeSync(config) {
       conditions.push(userInitState.condition);
     }
     
+    // Determine overall phase
+    let phase = 'Pending';
+    if (migrationEnabled && !migrationState.complete) {
+      phase = 'Migrating';
+    } else if (mongoReadiness.ready && (!migrationEnabled || migrationState.complete)) {
+      phase = 'Ready';
+    } else if (migrationState.failed) {
+      phase = 'Failed';
+    }
+    
     response.status = {
+      phase,
       observedGeneration: parent.metadata?.generation,
       conditions,
-      storage: {
-        type: storageType,
-        host: mongoHost,
-        ready: mongoReadiness.ready,
-        replicas: mongoReadiness.replicas
-      },
-      tenantUsage: {
-        count: tenantUsage.count,
-        tenants: tenantUsage.tenantIds
-      },
-      migration: migrationState.enabled ? {
-        enabled: true,
-        phase: migrationState.phase,
-        complete: migrationState.complete
-      } : {
-        enabled: false
-      }
+      connectionSecret: appCredentialsSecret.metadata.name,
+      databaseName: databaseName
     };
 
     res.send(response);
@@ -321,40 +255,41 @@ function ensureNSUserCredentials(secret, storageAccount) {
 }
 
 /**
- * Extract storage configuration from Secret
+ * Extract storage configuration from StorageAccount CRD spec
  */
-function extractStorageConfig(secret) {
-  const storageAccount = secret.metadata.labels?.['storage.nightscout.org/account'] || secret.metadata.name;
-  const namespace = secret.metadata.namespace;
+function extractStorageConfig(parent) {
+  const storageAccount = parent.metadata.labels?.['storage.nightscout.org/account'] || parent.metadata.name;
+  const namespace = parent.metadata.namespace;
+  const spec = parent.spec || {};
   
-  // Decode Secret data
-  const data = {};
-  if (secret.data) {
-    Object.keys(secret.data).forEach(key => {
-      data[key] = Buffer.from(secret.data[key], 'base64').toString('utf-8');
-    });
-  }
+  const mongodbVersion = spec.mongodbVersion || '7.0';
+  const replicas = spec.replicas || 3;
+  const storageSize = spec.storageSize || '10Gi';
+  const tier = spec.tier || 'basic';
+  const resources = spec.resources || {};
   
-  // Map to format expected by renderMongoDB
+  const storageSizeGi = storageSize.replace('Gi', '');
+  
   return {
     metadata: {
       namespace: namespace,
       labels: {
         'storage.nightscout.org/account': storageAccount,
-        'ns.mdn.io/composite': 'storage'
+        'ns.mdn.io/composite': 'storage',
+        'ns.mdn.io/tier': tier
       }
     },
     data: {
       STORAGE: storageAccount,
-      MONGO_REPLICAS: data.replicas || '1',
-      MONGO_STORAGE_GI: data.storageGi || '2',
-      MONGO_IMAGE: data.mongoImage || 'mongo:6',
-      MONGO_IMAGE_PULL_POLICY: data.imagePullPolicy || 'IfNotPresent',
-      MONGO_CPU_REQUEST: data.cpuRequest || '100m',
-      MONGO_CPU_LIMIT: data.cpuLimit || '500m',
-      MONGO_MEM_REQUEST: data.memRequest || '256Mi',
-      MONGO_MEM_LIMIT: data.memLimit || '512Mi',
-      IMAGE_PULL_SECRET: data.imagePullSecret || undefined
+      MONGO_REPLICAS: String(replicas),
+      MONGO_STORAGE_GI: storageSizeGi,
+      MONGO_IMAGE: `mongo:${mongodbVersion}`,
+      MONGO_IMAGE_PULL_POLICY: 'IfNotPresent',
+      MONGO_CPU_REQUEST: resources.requests?.cpu || '100m',
+      MONGO_CPU_LIMIT: resources.limits?.cpu || '500m',
+      MONGO_MEM_REQUEST: resources.requests?.memory || '256Mi',
+      MONGO_MEM_LIMIT: resources.limits?.memory || '512Mi',
+      MONGO_SC: spec.storageClass || undefined
     }
   };
 }
@@ -438,7 +373,87 @@ function renderAppCredentialsSecret(storageAccount, namespace, appCredentials, s
 }
 
 /**
- * Render migration Job based on Secret annotations
+ * Render migration Job based on StorageAccount CRD spec
+ * Uses ns-utility image and scripts for better status reporting
+ */
+function renderMigrationJobFromCRD(parent, storageAccount, sourceConnectionSecretName, config) {
+  const namespace = parent.metadata.namespace;
+  const jobName = `${storageAccount}-migration`;
+  const spec = parent.spec || {};
+  
+  const targetHost = `${storageAccount}-mongo`;
+  const targetDb = generateDatabaseName(storageAccount);
+  const migrationMethod = 'mongodump-restore';
+  
+  return {
+    apiVersion: 'batch/v1',
+    kind: 'Job',
+    metadata: {
+      name: jobName,
+      namespace: namespace,
+      labels: {
+        'storage.nightscout.org/account': storageAccount,
+        'app.kubernetes.io/component': 'migration',
+        'ns.mdn.io/composite': 'storage'
+      },
+      annotations: {
+        'ns.mdn.io/created-at': new Date().toISOString(),
+        'ns.mdn.io/migration-method': migrationMethod,
+        'ns.mdn.io/migration-target-db': targetDb,
+        'ns.mdn.io/source-secret': sourceConnectionSecretName
+      }
+    },
+    spec: {
+      ttlSecondsAfterFinished: 86400,
+      backoffLimit: 3,
+      template: {
+        metadata: {
+          labels: {
+            'storage.nightscout.org/account': storageAccount,
+            'app.kubernetes.io/component': 'migration'
+          }
+        },
+        spec: {
+          restartPolicy: 'OnFailure',
+          containers: [{
+            name: 'migration',
+            image: config.images.nsUtility,
+            imagePullPolicy: config.images.nsUtilityPullPolicy,
+            env: [
+              {
+                name: 'MIGRATION_SOURCE_URI',
+                valueFrom: {
+                  secretKeyRef: {
+                    name: sourceConnectionSecretName,
+                    key: 'uri'
+                  }
+                }
+              },
+              { name: 'MIGRATION_TARGET_HOST', value: targetHost },
+              { name: 'MIGRATION_TARGET_DB', value: targetDb },
+              { name: 'MIGRATION_METHOD', value: migrationMethod },
+              { name: 'STORAGE_ACCOUNT', value: storageAccount }
+            ],
+            command: ['migrate-database.sh'],
+            resources: {
+              requests: {
+                cpu: config.resources.nsUtility.cpuRequest,
+                memory: config.resources.nsUtility.memRequest
+              },
+              limits: {
+                cpu: config.resources.nsUtility.cpuLimit,
+                memory: config.resources.nsUtility.memLimit
+              }
+            }
+          }]
+        }
+      }
+    }
+  };
+}
+
+/**
+ * Render migration Job based on Secret annotations (LEGACY)
  * Uses ns-utility image and scripts for better status reporting
  */
 function renderMigrationJob(secret, storageAccount, sourceUri, config) {
@@ -527,7 +542,77 @@ function renderMigrationJob(secret, storageAccount, sourceUri, config) {
 }
 
 /**
- * Render create-user Job to create MongoDB user with NS app credentials
+ * Render create-user Job for StorageAccount CRD
+ * Creates MongoDB user with NS app credentials
+ */
+function renderCreateUserJobFromCRD(parent, storageAccount, nsuserUsername, nsuserPassword, config) {
+  const namespace = parent.metadata.namespace;
+  const jobName = `${storageAccount}-create-user`;
+  
+  const targetHost = `${storageAccount}-mongo`;
+  const targetDb = generateDatabaseName(storageAccount);
+  
+  return {
+    apiVersion: 'batch/v1',
+    kind: 'Job',
+    metadata: {
+      name: jobName,
+      namespace: namespace,
+      labels: {
+        'storage.nightscout.org/account': storageAccount,
+        'app.kubernetes.io/component': 'user-initialization',
+        'ns.mdn.io/composite': 'storage'
+      },
+      annotations: {
+        'ns.mdn.io/created-at': new Date().toISOString(),
+        'ns.mdn.io/target-user': nsuserUsername,
+        'ns.mdn.io/target-db': targetDb
+      }
+    },
+    spec: {
+      ttlSecondsAfterFinished: 3600,
+      backoffLimit: 3,
+      template: {
+        metadata: {
+          labels: {
+            'storage.nightscout.org/account': storageAccount,
+            'app.kubernetes.io/component': 'user-initialization'
+          }
+        },
+        spec: {
+          restartPolicy: 'OnFailure',
+          containers: [{
+            name: 'create-user',
+            image: config.images.nsUtility,
+            imagePullPolicy: config.images.nsUtilityPullPolicy,
+            env: [
+              { name: 'MONGO_HOST', value: targetHost },
+              { name: 'MONGO_PORT', value: '27017' },
+              { name: 'NSUSER_USERNAME', value: nsuserUsername },
+              { name: 'NSUSER_PASSWORD', value: nsuserPassword },
+              { name: 'NSUSER_DATABASE', value: targetDb },
+              { name: 'STORAGE_ACCOUNT', value: storageAccount }
+            ],
+            command: ['create-mongodb-user.sh'],
+            resources: {
+              requests: {
+                cpu: config.resources.nsUtility.cpuRequest,
+                memory: config.resources.nsUtility.memRequest
+              },
+              limits: {
+                cpu: config.resources.nsUtility.cpuLimit,
+                memory: config.resources.nsUtility.memLimit
+              }
+            }
+          }]
+        }
+      }
+    }
+  };
+}
+
+/**
+ * Render create-user Job to create MongoDB user with NS app credentials (LEGACY)
  */
 function renderCreateUserJob(secret, storageAccount, forceCreate, config) {
   const namespace = secret.metadata.namespace;
@@ -690,7 +775,91 @@ function checkUserInitializationState(children, parent) {
 }
 
 /**
- * Check migration state from Job children
+ * Check migration state from Job children (for CRD-based migrations)
+ */
+function checkMigrationStateFromCRD(children, migrationEnabled) {
+  if (!migrationEnabled) {
+    return { enabled: false, complete: true, failed: false };
+  }
+  
+  const jobs = children['Job.batch/v1'] || {};
+  
+  for (const [name, job] of Object.entries(jobs)) {
+    if (name.endsWith('-migration')) {
+      const conditions = job.status?.conditions || [];
+      const succeeded = job.status?.succeeded || 0;
+      const failed = job.status?.failed || 0;
+      const active = job.status?.active || 0;
+      
+      const completeCondition = conditions.find(c => c.type === 'Complete' && c.status === 'True');
+      const failedCondition = conditions.find(c => c.type === 'Failed' && c.status === 'True');
+      
+      if (completeCondition || succeeded > 0) {
+        return {
+          enabled: true,
+          complete: true,
+          failed: false,
+          condition: {
+            type: 'MigrationComplete',
+            status: 'True',
+            reason: 'JobSucceeded',
+            message: 'Database migration completed successfully',
+            lastTransitionTime: completeCondition?.lastTransitionTime || new Date().toISOString()
+          }
+        };
+      } else if (failedCondition) {
+        return {
+          enabled: true,
+          complete: false,
+          failed: true,
+          condition: {
+            type: 'MigrationComplete',
+            status: 'False',
+            reason: 'JobFailed',
+            message: `Migration job failed (${failed} failures). Check logs and delete job to retry.`,
+            lastTransitionTime: failedCondition?.lastTransitionTime || new Date().toISOString()
+          }
+        };
+      } else if (active > 0) {
+        return {
+          enabled: true,
+          complete: false,
+          failed: false,
+          condition: {
+            type: 'MigrationComplete',
+            status: 'Unknown',
+            reason: 'JobRunning',
+            message: 'Database migration in progress',
+            lastTransitionTime: new Date().toISOString()
+          }
+        };
+      } else {
+        return {
+          enabled: true,
+          complete: false,
+          failed: false,
+          condition: {
+            type: 'MigrationComplete',
+            status: 'Unknown',
+            reason: 'JobPending',
+            message: 'Migration job created but not yet started',
+            lastTransitionTime: new Date().toISOString()
+          }
+        };
+      }
+    }
+  }
+  
+  return {
+    enabled: true,
+    complete: false,
+    failed: false,
+    condition: null
+  };
+}
+
+/**
+ * Check migration state from Job children (LEGACY - for annotation-based migrations)
  */
 function checkMigrationState(children, parent) {
   const migrationNeeded = parent.metadata.annotations?.['ns.mdn.io/migration-needed'] === 'true';
@@ -777,26 +946,26 @@ function checkMigrationState(children, parent) {
 }
 
 /**
- * Count tenant usage from related ConfigMaps
+ * Count tenant usage from related ComputeInstances
  * Reports how many tenants are using this storage account
  */
 function countTenantUsage(related, storageAccountLabel) {
-  if (!related || !related['ConfigMap.v1']) {
+  if (!related || !related['ComputeInstance.nightscout.io/v1alpha1']) {
     return {
       count: 0,
       tenantIds: []
     };
   }
   
-  const configMaps = related['ConfigMap.v1'];
+  const computeInstances = related['ComputeInstance.nightscout.io/v1alpha1'];
   const tenants = [];
   
-  for (const [name, cm] of Object.entries(configMaps)) {
-    const cmStorageAccount = cm.metadata?.labels?.['storage.nightscout.org/account'];
-    const tenantId = cm.metadata?.labels?.['ns.mdn.io/tenant'] || name;
+  for (const [name, ci] of Object.entries(computeInstances)) {
+    const ciStorageAccount = ci.metadata?.labels?.['storage.nightscout.org/account'];
+    const tenantId = name;
     
-    // Only count ConfigMaps that match this storage account
-    if (cmStorageAccount === storageAccountLabel) {
+    // Only count ComputeInstances that match this storage account
+    if (ciStorageAccount === storageAccountLabel) {
       tenants.push(tenantId);
     }
   }

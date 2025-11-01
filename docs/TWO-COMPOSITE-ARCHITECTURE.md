@@ -14,17 +14,18 @@ The two-composite architecture separates storage (MongoDB) from compute (Nightsc
 
 ## Gen 4 Component Architecture
 
-Gen 4 introduces Metacontroller-based webhooks for orchestration while preserving critical Gen 1-3 components for specific purposes:
+Gen 4 introduces Metacontroller-based webhooks with Custom Resource Definitions (CRDs) for orchestration while preserving critical Gen 1-3 components for specific purposes:
 
 ### Active Components in Gen 4
 
-**New: Metacontroller Webhooks**
-- **multienv-metactl-webhooks**: Replaces Gen 3 `dispatcher` for ConfigMap/Secret orchestration
-  - Handles Storage composite (Secret → MongoDB StatefulSet + Migration)
-  - Handles Compute composite (ConfigMap → Nightscout Deployment + CDC)
+**New: Metacontroller Webhooks with CRDs**
+- **multienv-metactl-webhooks**: Provides declarative API via Kubernetes CRDs
+  - Handles Storage composite (StorageAccount CRD → MongoDB StatefulSet + Migration)
+  - Handles Compute composite (ComputeInstance CRD → Nightscout Deployment + CDC)
   - Handles PVC decorator (backup policy enforcement)
   - Entry point: `cmd/webhook/server.js`
   - Port: 3000
+  - **CRDs**: `StorageAccount` and `ComputeInstance` in `nightscout.io` API group
 
 **Preserved: Frontend API**
 - **deployment-controller**: Provides `/environs/` REST API for frontend dashboard
@@ -65,51 +66,56 @@ Gen 4 introduces Metacontroller-based webhooks for orchestration while preservin
 ### Architecture Diagram
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                      Gen 4 Architecture                      │
-├─────────────────────────────────────────────────────────────┤
-│                                                              │
-│  ConfigMap/Secret Changes                                   │
-│         │                                                    │
-│         ▼                                                    │
-│  ┌──────────────────┐                                       │
-│  │ Metacontroller   │  Watches resources with               │
-│  │  (External)      │  ns.mdn.io/composite label            │
-│  └────────┬─────────┘                                       │
-│           │                                                  │
-│           │ HTTP POST                                        │
-│           ▼                                                  │
-│  ┌────────────────────────────┐                             │
-│  │ multienv-metactl-webhooks  │  Gen 4 Orchestration        │
-│  │  /composite/storage/sync   │  - Generate StatefulSets    │
-│  │  /composite/compute/sync   │  - Generate Deployments     │
-│  │  /decorator/sync           │  - Inject backup policies   │
-│  └────────────────────────────┘                             │
-│                                                              │
-│  ┌────────────────────────────┐                             │
-│  │  deployment-controller     │  Preserved for:             │
-│  │  /environs/ API            │  - Frontend dashboard       │
-│  │  /accounts/ API            │  - User configuration       │
-│  └────────────────────────────┘                             │
-│                                                              │
-│  ┌────────────────────────────┐                             │
-│  │  deployment-operator       │  Preserved for:             │
-│  │  Pod → Consul sync         │  - Service discovery        │
-│  └────────────────────────────┘                             │
-│                                                              │
-│  ┌────────────────────────────┐                             │
-│  │  resolver                  │  Preserved for:             │
-│  │  redirector-server.js      │  - Traffic routing          │
-│  └────────────────────────────┘                             │
-│                                                              │
-└─────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────┐
+│                      Gen 4 Architecture                          │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  kubectl apply -f storageaccount.yaml                           │
+│  kubectl apply -f computeinstance.yaml                          │
+│         │                                                        │
+│         ▼                                                        │
+│  ┌──────────────────┐                                           │
+│  │ Metacontroller   │  Watches CRDs:                            │
+│  │  (External)      │  - storageaccounts.nightscout.io          │
+│  │                  │  - computeinstances.nightscout.io         │
+│  └────────┬─────────┘                                           │
+│           │                                                      │
+│           │ HTTP POST (customize + sync hooks)                  │
+│           ▼                                                      │
+│  ┌──────────────────────────────────┐                           │
+│  │ multienv-metactl-webhooks        │  Gen 4 Orchestration      │
+│  │  /composite/storage/customize    │  - Discover related       │
+│  │  /composite/storage/sync         │  - Generate StatefulSets  │
+│  │  /composite/compute/customize    │  - Generate Deployments   │
+│  │  /composite/compute/sync         │  - Update CRD status      │
+│  │  /decorator/sync                 │  - Inject backup policies │
+│  └──────────────────────────────────┘                           │
+│                                                                  │
+│  ┌────────────────────────────┐                                 │
+│  │  deployment-controller     │  Preserved for:                 │
+│  │  /environs/ API            │  - Frontend dashboard           │
+│  │  /accounts/ API            │  - User configuration           │
+│  └────────────────────────────┘                                 │
+│                                                                  │
+│  ┌────────────────────────────┐                                 │
+│  │  deployment-operator       │  Preserved for:                 │
+│  │  Pod → Consul sync         │  - Service discovery            │
+│  └────────────────────────────┘                                 │
+│                                                                  │
+│  ┌────────────────────────────┐                                 │
+│  │  resolver                  │  Preserved for:                 │
+│  │  redirector-server.js      │  - Traffic routing              │
+│  └────────────────────────────┘                                 │
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
 ### Migration Summary
 
 | Component | Gen 3 | Gen 4 | Notes |
 |-----------|-------|-------|-------|
-| ConfigMap Orchestration | dispatcher | multienv-metactl-webhooks | Metacontroller replaces custom watcher |
+| Tenant Resources | ConfigMap + Secret | StorageAccount + ComputeInstance CRDs | Declarative Kubernetes-native API |
+| Orchestration | dispatcher | multienv-metactl-webhooks + Metacontroller | CRD-based CompositeController pattern |
 | Resource Generation | deployment-controller | multienv-metactl-webhooks | Webhooks handle resource templates |
 | Frontend API | deployment-controller | deployment-controller | **Kept** - dashboard dependency |
 | Consul Sync | deployment-operator | deployment-operator | **Kept** - service discovery |
@@ -118,9 +124,79 @@ Gen 4 introduces Metacontroller-based webhooks for orchestration while preservin
 
 ## Architecture
 
+### Custom Resource Definitions (CRDs)
+
+Gen 4 introduces two custom resources that provide a declarative, Kubernetes-native API for multi-tenant deployments:
+
+#### StorageAccount CRD
+- **API Group**: `nightscout.io/v1alpha1`
+- **Kind**: `StorageAccount`
+- **Purpose**: Declares MongoDB storage infrastructure requirements for a tenant
+- **Spec Fields**:
+  - `mongodbVersion`: MongoDB version (e.g., "7.0")
+  - `replicas`: Number of MongoDB replica set members (1-7)
+  - `tier`: Service tier (free, basic, premium, enterprise)
+  - `resources`: CPU/memory requests and limits
+  - `storageSize`: PVC size per replica
+  - `storageClass`: StorageClass for PVCs
+  - `backup`: Backup configuration (enabled, retentionPolicy)
+  - `migration`: Migration from external MongoDB (enabled, sourceType, sourceConnectionSecret)
+- **Status Fields**:
+  - `phase`: Pending, Migrating, Ready, Failed
+  - `conditions`: Kubernetes-standard conditions array
+  - `connectionSecret`: Name of Secret with MongoDB credentials
+  - `databaseName`: MongoDB database name
+
+#### ComputeInstance CRD
+- **API Group**: `nightscout.io/v1alpha1`
+- **Kind**: `ComputeInstance`
+- **Purpose**: Declares Nightscout application deployment requirements for a tenant
+- **Spec Fields**:
+  - `storageAccountRef`: Reference to StorageAccount (same namespace)
+  - `nightscoutImage`: Container image for Nightscout
+  - `replicas`: Number of Nightscout replicas (1-10)
+  - `tier`: Service tier (free, basic, premium, enterprise)
+  - `resources`: CPU/memory requests and limits
+  - `env`: Additional environment variables
+  - `cdc`: Change Data Capture config (enabled, kafkaCluster, kafkaConnectCluster)
+  - `healthcheck`: Health check sidecar config (enabled, image)
+- **Status Fields**:
+  - `phase`: Pending, Ready, Failed
+  - `conditions`: Kubernetes-standard conditions array
+  - `endpoints`: Service endpoints for the application
+
+**Example Usage:**
+
+```yaml
+apiVersion: nightscout.io/v1alpha1
+kind: StorageAccount
+metadata:
+  name: tenant-abc-storage
+  namespace: hosted-tenants
+spec:
+  mongodbVersion: "7.0"
+  replicas: 3
+  tier: basic
+  storageSize: "10Gi"
+---
+apiVersion: nightscout.io/v1alpha1
+kind: ComputeInstance
+metadata:
+  name: tenant-abc-app
+  namespace: hosted-tenants
+  labels:
+    # REQUIRED: StorageAccount reference for related resource discovery
+    storage.nightscout.org/account: tenant-abc-storage
+spec:
+  storageAccountRef:
+    name: tenant-abc-storage
+  nightscoutImage: "nightscout/cgm-remote-monitor:latest"
+  replicas: 2
+```
+
 ### Storage Composite
 
-**Parent**: Secret (labeled `ns.mdn.io/composite=storage`)
+**Parent**: StorageAccount CRD (`nightscout.io/v1alpha1`)
 
 **Children** (owned, deleted with parent):
 - MongoDB StatefulSet (if `storage-type=dedicated`)

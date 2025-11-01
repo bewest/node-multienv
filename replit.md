@@ -1,7 +1,7 @@
 # Nightscout Multi-Tenant Kubernetes Platform
 
 ## Overview
-This project delivers a production-grade, multi-tenant Nightscout platform orchestrated on Kubernetes. It utilizes Metacontroller for tenant deployment, integrating MongoDB, Change Data Capture (CDC) via Strimzi Kafka, and automated backup solutions. The platform is designed for scalability and isolation, with all tenants residing in a dedicated `hosted-tenants` namespace. Key capabilities include declarative resource management, automated database migration, and a robust system for serving Nightscout traffic across various tenant configurations. The architecture has evolved through multiple generations, culminating in a fully declarative, Kubernetes-native system capable of hosting an unlimited number of tenants.
+This project delivers a production-grade, multi-tenant Nightscout platform orchestrated on Kubernetes. It utilizes Custom Resource Definitions (CRDs) and Metacontroller to provide a declarative, Kubernetes-native API for seamless tenant provisioning and management. The platform integrates MongoDB, Change Data Capture (CDC) via Strimzi Kafka, and automated backup solutions. Designed for scalability and isolation, all tenants reside in a dedicated `hosted-tenants` namespace. Key capabilities include declarative resource management, automated database migration, and robust status reporting through CRD status subresources. The system supports serving Nightscout traffic across various tenant configurations and is built to host an unlimited number of tenants.
 
 ## User Preferences
 - Prefer Node.js/JavaScript for webhook implementation
@@ -15,172 +15,51 @@ This project delivers a production-grade, multi-tenant Nightscout platform orche
 ## System Architecture
 
 ### Multi-Tenant Design
-All tenants are deployed within a single `hosted-tenants` namespace. Resources are uniquely identified and isolated using a tenant ID prefix and standard Kubernetes labels.
+All tenants are deployed within a single `hosted-tenants` namespace, with resources uniquely identified and isolated using a tenant ID prefix and standard Kubernetes labels.
+
+### Custom Resource Definitions (CRDs)
+Two custom resources provide a declarative API for multi-tenant management:
+- **StorageAccount CRD** (`nightscout.io/v1alpha1`): Declares MongoDB storage infrastructure requirements (version, replicas, tier, storage size, resources, backup, migration). Its status includes phase, conditions, connectionSecret, and databaseName.
+- **ComputeInstance CRD** (`nightscout.io/v1alpha1`): Declares Nightscout application deployment requirements (storageAccountRef, image, replicas, tier, resources, cdc, healthcheck). Its status includes phase, conditions, and endpoints.
 
 ### Controllers (Metacontroller)
-- **CompositeController (Tenant Orchestration)**: Manages tenant-specific resources (Nightscout deployments, MongoDB StatefulSets, and optionally per-tenant Kafka topics/connectors) based on Kubernetes ConfigMaps.
-- **DecoratorController (PVC Backup Policy)**: Enforces backup policies for MongoDB PVCs by injecting annotations, finalizers, and triggering VolumeSnapshot creation upon PVC deletion.
-
-**Note:** Kafka/CDC integration orchestrates **per-tenant resources** (KafkaTopic, KafkaConnector) while external infrastructure provides the shared Kafka platform. See [Kafka CDC Integration Contract](./docs/KAFKA-CDC-INTEGRATION.md).
+- **Storage CompositeController**: Manages MongoDB StatefulSets, Services, Secrets, and Migration Jobs based on StorageAccount CRDs.
+- **Compute CompositeController**: Manages Nightscout Deployments, Services, and optionally per-tenant Kafka topics/connectors based on ComputeInstance CRDs.
+- **DecoratorController (PVC Backup Policy)**: Enforces backup policies for MongoDB PVCs through annotations, finalizers, and VolumeSnapshot creation.
 
 ### Key Technologies
 - **Orchestration**: Kubernetes, Metacontroller.
 - **Messaging**: Strimzi Kafka for CDC.
 - **Database**: MongoDB (per-tenant replica sets).
-- **Webhook Implementation**: Node.js with Restify and `@kubernetes/client-node` (code in `lib/` directory).
-- **Deployment**: Jsonnet library in `jsonnet/lib/`, installable via jsonnet-bundler.
+- **Webhook Implementation**: Node.js with Restify and `@kubernetes/client-node`.
+- **Deployment**: Jsonnet library for generating Kubernetes manifests.
 - **Traffic Serving**: Resolver + Consul coordination.
 
 ### Feature Specifications
 - **Kubernetes-Idiomatic Status**: Webhooks report status using standard Kubernetes conditions.
 - **Child Preservation**: Protects external resources from accidental deletion.
-- **Automated Database Migration**: Secure, automated migration system with credential handling.
-- **Comprehensive Labeling & Annotations**: Extensive metadata for audit, recovery, compliance, and filtering.
-- **Configurable Tenants**: Tenant configurations via ConfigMaps allow for parameterized resource sizing and multi-tier offerings.
-- **Facade Pattern**: The architecture evolved through multiple generations, maintaining a consistent "tenant configuration" abstraction for progressive migration and interface stability.
-- **Cloud-Native Startup**: A single multi-mode container image allows running different architectural components from the same image.
-- **Two-Interface Design**: Separate administration interface (managing configurations) and resolver interface (serving Nightscout traffic).
+- **Automated Database Migration**: Secure and automated migration system.
+- **Comprehensive Labeling & Annotations**: Extensive metadata for various operational needs.
+- **Configurable Tenants**: Tenant configurations via ConfigMaps for parameterized resource sizing and multi-tier offerings.
+- **Facade Pattern**: Consistent "tenant configuration" abstraction for progressive migration.
+- **Cloud-Native Startup**: Single multi-mode container image for different architectural components.
+- **Two-Interface Design**: Separate administration and resolver interfaces.
 
 ### System Design Choices
-The platform employs a **two-composite architecture** (Storage and Compute) to separate concerns:
-- **Storage Composite**: Manages MongoDB StatefulSets, Services, Secrets, and Migration Jobs, with annotation-driven behavior for storage type and migration.
-- **Compute Composite**: Manages Nightscout Deployments, Services, and CDC resources, linking to storage via labels without direct credential access.
-- **PVC Decorator**: Adds backup policies to MongoDB PVCs.
-- **Annotation-Driven Migration**: A robust pattern for orchestrating migrations, particularly from shared to dedicated MongoDB instances.
-- **Provisioner API Facade**: A REST API provides external systems with endpoints for account and site provisioning, abstracting the underlying two-composite architecture.
-- **Resolver Interface**: Routes Nightscout traffic using Consul for service discovery, ensuring efficient and scalable traffic serving on worker nodes.
-- **Pod Health Check Sidecar**: Lightweight sidecar container injected into Nightscout pods to provide localhost-based health validation for Consul, eliminating DNS queries and API calls to central controllers. This design removes critical bottlenecks at scale and enables linear scaling to 10,000+ tenants.
-- **Two-Secret Architecture**: Gen 4 implements credential separation for enhanced security:
-  - **Storage Secret** (parent): Contains root/admin MongoDB credentials used only by webhook and orchestration Jobs (migration, user initialization). Never projected into application containers.
-  - **App-Credentials Secret** (`<storage-account>-app-credentials`): Contains only the credentials Nightscout needs (MONGODB_URI, MONGO_DATABASE, connection details). Projected into Nightscout containers via `envFrom`. Generated automatically by the storage composite webhook.
-  - **Security Benefits**: Principle of least privilege (apps never see root credentials), separation of concerns (orchestration vs application access), flexible RBAC (different permissions per Secret type).
-  - **Database Naming**: Each dedicated MongoDB instance uses a short, deterministic database name (e.g., `ns-a3f7`) generated from the storage account hash, ensuring consistency across migration, initialization, and application access.
-
-## Documentation
-
-### Core Architecture
-- **[Two-Composite Architecture](./docs/TWO-COMPOSITE-ARCHITECTURE.md)**: Storage and Compute separation, Gen 4 design, REST API provisioner
-- **[Architecture Evolution](./docs/ARCHITECTURE-EVOLUTION.md)**: Historical progression through Gen 1-4
-- **[Metacontroller Integration](./docs/METACONTROLLER-INTEGRATION.md)**: Webhook protocol, CompositeController and DecoratorController patterns
-- **[Webhook Architecture](./docs/WEBHOOK-ARCHITECTURE.md)**: Node.js webhook implementation details
-
-### Security & RBAC
-- **[RBAC Design](./docs/RBAC-DESIGN.md)**: Permission breakdown, security rationale, blue/green deployment RBAC, troubleshooting
-
-### Operations
-- **[Quick Start](./docs/QUICK-START.md)**: Get up and running in 5 minutes
-- **[Tanka Deployment](./docs/TANKA-DEPLOYMENT.md)**: Jsonnet/Tanka deployment patterns, blue/green, multi-component scaling
-- **[Migration Playbook](./docs/MIGRATION-PLAYBOOK.md)**: Gen 3b → Gen 4 migration procedures
-- **[Migration from Legacy](./docs/MIGRATION-FROM-LEGACY.md)**: Legacy system migration patterns
-- **[Validation Checklist](./docs/VALIDATION-CHECKLIST.md)**: Pre-deployment validation steps
-
-### Integration & Dependencies
-- **[Kafka CDC Integration](./docs/KAFKA-CDC-INTEGRATION.md)**: Contract between node-multienv and external Kafka infrastructure, scope boundaries, prerequisites
-
-### Reference
-- **[Labels and Annotations](./docs/LABELS-AND-ANNOTATIONS.md)**: Comprehensive label/annotation catalog
-- **[Component Relationships](./docs/COMPONENT-RELATIONSHIPS.md)**: How system components interact
-- **[Container Parameters](./docs/CONTAINER-PARAMETERS.md)**: Environment variables and configuration
-- **[Pod Health Check](./docs/POD-HEALTHCHECK.md)**: Sidecar-based health validation for Consul, scaling improvements, multi-cluster support
-- **[Testing Guide](./docs/testing-guide.md)**: Testing strategies and patterns
-
-## Recent Changes
-
-### 2025-11-01: CompositeController Customize Hook Implementation
-- Separated customize and sync hooks for proper Metacontroller protocol compliance
-- Created dedicated customize handlers: `/composite/storage/customize` and `/composite/compute/customize`
-- Removed incorrect `relatedResourceRules` from sync responses (DecoratorController only)
-- Updated Jsonnet library to generate correct customize and sync hook URLs
-- Fixes Metacontroller v4.x protocol violations
-
-### 2025-10-31: Metacontroller v4.x Compatibility
-- Added required `revisionHistory` field to CompositeController CRDs for Metacontroller v4.x+
-- Storage and Compute composites now include `revisionHistory.fieldPaths: ['data']`
-- Fixes `"configmaps." not found"` and `"secrets." not found"` errors in Metacontroller v4.12.0
-- Updated documentation to specify minimum version requirement (v4.0+)
-
-### 2025-10-31: imagePullSecrets Support
-- Added `imagePullSecrets` parameter to all Jsonnet webhook deployment functions
-- Supports private container registries (DigitalOcean, ECR, GCR, etc.)
-- Parameter threads through: `webhook.deployment()` → `webhook.stack()` → `gen4.stack()`
-- Updated gen4-test environment to demonstrate DigitalOcean registry usage
-- Documentation updated in `jsonnet/CONTAINER-ARGS.md`
-
-### 2025-10-31: Container Entry Points
-- Standardized container args mapping: `runtimeMode` → `start_container.sh` args
-- Added `multienv-metactl-webhooks` entry point for Gen 4 webhook server
-- All Jsonnet deployments now use `command: ["./start_container.sh"]` + `args`
-- Replaced legacy RUNTIME_MODE env var with explicit command-line args
-
-## Project Structure
-
-```
-.
-├── jsonnet/                      # Jsonnet library (jb installable)
-│   ├── lib/                     # Reusable Jsonnet modules
-│   │   ├── main.libsonnet       # Entry point
-│   │   ├── webhook.libsonnet    # Webhook deployments (plain K8s objects, supports imagePullSecrets)
-│   │   ├── metacontroller.libsonnet # Metacontroller CRDs
-│   │   ├── rbac.libsonnet       # RBAC helpers (plain K8s objects)
-│   │   ├── config.libsonnet     # Configuration templates
-│   │   └── gen4.libsonnet       # Gen 4 deployment addon (supports imagePullSecrets)
-│   ├── jsonnetfile.json         # Package metadata
-│   ├── environments/default/
-│   │   └── examples/            # Deployment pattern examples
-│   ├── CONTAINER-ARGS.md        # Container args and imagePullSecrets documentation
-│   └── README.md                # Library documentation
-├── lib/                         # Node.js/JavaScript webhook server
-│   ├── routes/                  # Express routes
-│   ├── templates/               # K8s template generators
-│   └── webhook/                 # Webhook handlers
-├── cmd/webhook/                 # Webhook server entry point
-├── docs/                        # Documentation
-│   ├── TWO-COMPOSITE-ARCHITECTURE.md
-│   ├── TANKA-DEPLOYMENT.md
-│   ├── RBAC-DESIGN.md
-│   └── ...
-└── package.json                 # Node.js dependencies
-```
-
-## Jsonnet Library Usage
-
-The platform includes a batteries-included Jsonnet library for easy deployment:
-
-### Simple Gen 4 Deployment
-
-```jsonnet
-local gen4 = import 'lib-k8s-multienv/gen4.libsonnet';
-
-{
-  gen4: gen4.stack(
-    webhookImage: 'registry/webhook:v1.0',
-    webhookReplicas: 3,
-  ),
-}
-```
-
-This single function call generates:
-- ServiceAccount with full orchestration permissions
-- ClusterRole and ClusterRoleBinding
-- Webhook Deployment (all-in-one) + Service
-- Storage, Compute, and PVC Backup Metacontroller CRDs
-
-### Test Without Cluster
-
-```bash
-tk eval jsonnet/environments/gen4-test
-```
-
-See `jsonnet/environments/gen4-test/` for complete examples.
+The platform employs a **CRD-based two-composite architecture** (Storage and Compute) for clear separation of concerns.
+- **Kubernetes-Native API**: CRDs offer `kubectl` integration, OpenAPI v3 schema validation, and status subresources.
+- **Status Reporting**: CRD status includes phase, conditions, connectionSecret, and endpoints.
+- **Provisioner API Facade**: A REST API for external systems to provision accounts and sites.
+- **Resolver Interface**: Routes Nightscout traffic using Consul for service discovery.
+- **Pod Health Check Sidecar**: Lightweight sidecar for localhost-based health validation, eliminating bottlenecks at scale.
+- **Two-Secret Architecture**: Separates root MongoDB credentials (Storage Secret) from application credentials (App-Credentials Secret) for enhanced security and least privilege. Each MongoDB instance uses a deterministic database name generated from the storage account hash.
 
 ## External Dependencies
-- **Strimzi Kafka Operator**: Manages Kafka clusters and KafkaConnect for CDC (infrastructure-provided, not deployed by this repo).
-- **Kafka Cluster**: Brokers, Zookeeper/KRaft, storage (infrastructure-provided, not deployed by this repo).
-- **KafkaConnect Cluster**: Workers with MongoDB connector plugin (infrastructure-provided, not deployed by this repo).
+- **Strimzi Kafka Operator**: Manages Kafka clusters and KafkaConnect for CDC.
+- **Kafka Cluster**: Brokers, Zookeeper/KRaft, storage.
+- **KafkaConnect Cluster**: Workers with MongoDB connector plugin.
 - **MongoDB**: Primary database, deployed as per-tenant StatefulSets.
-- **CSI Driver with Snapshot Support**: Used for creating VolumeSnapshots for PVC backups.
-- **Metacontroller v4.x+**: Kubernetes add-on for custom controller development and orchestration. Requires v4.0+ for `revisionHistory` support in CompositeController CRDs (tested with v4.12.0).
+- **CSI Driver with Snapshot Support**: Used for creating VolumeSnapshots.
+- **Metacontroller v4.x+**: Kubernetes add-on for custom controller development and orchestration.
 - **Consul**: Utilized for service discovery and health checking within the resolver interface.
-- **jsonnet-bundler (jb)**: Dependency manager for Jsonnet libraries (optional - library has zero dependencies).
-
-**Kafka/CDC Scope:** This repository orchestrates per-tenant CDC resources (KafkaTopic, KafkaConnector) but does NOT deploy Kafka infrastructure. See [Kafka CDC Integration Contract](./docs/KAFKA-CDC-INTEGRATION.md) for the complete boundary definition.
+- **jsonnet-bundler (jb)**: Dependency manager for Jsonnet libraries.

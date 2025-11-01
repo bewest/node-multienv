@@ -16,6 +16,7 @@
 local webhook = import 'webhook.libsonnet';
 local metacontroller = import 'metacontroller.libsonnet';
 local rbac = import 'rbac.libsonnet';
+local crds = import 'crds.libsonnet';
 
 {
   // Generate webhook service URL for Metacontroller
@@ -225,6 +226,8 @@ local rbac = import 'rbac.libsonnet';
     webhookPort=3000,
     webhookServiceAccount='multienv-metactl-webhook',
     imagePullSecrets=[],
+    crdGroup='nightscout.io',
+    crdVersion='v1alpha1',
     storageResyncSeconds=30,
     computeResyncSeconds=30,
     pvcResyncSeconds=60,
@@ -240,6 +243,9 @@ local rbac = import 'rbac.libsonnet';
     ];
     
     {
+      // Custom Resource Definitions (StorageAccount and ComputeInstance)
+      crds: crds.all(crdGroup, crdVersion),
+      
       // ServiceAccount and RBAC for webhook
       serviceAccount: rbac.serviceAccount(webhookServiceAccount, webhookNamespace),
       clusterRole: rbac.fullOrchestrationRole(webhookServiceAccount),
@@ -266,6 +272,8 @@ local rbac = import 'rbac.libsonnet';
       // Metacontroller CRDs (CompositeControllers + DecoratorController)
       metacontroller: metacontroller.controllers(
         webhookServiceUrl=webhookUrl,
+        crdGroup=crdGroup,
+        crdVersion=crdVersion,
         storageResyncSeconds=storageResyncSeconds,
         computeResyncSeconds=computeResyncSeconds,
         pvcResyncSeconds=pvcResyncSeconds,

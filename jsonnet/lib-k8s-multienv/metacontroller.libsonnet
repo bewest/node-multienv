@@ -74,9 +74,11 @@
     },
   },
 
-  // Storage Composite Controller (Secret → MongoDB + Migration)
+  // Storage Composite Controller (StorageAccount CRD → MongoDB + Migration)
   storageComposite(
     webhookServiceUrl='http://webhook-service:3000',
+    crdGroup='nightscout.io',
+    crdVersion='v1alpha1',
     resyncPeriodSeconds=30,
   )::
     $.compositeController(
@@ -84,15 +86,10 @@
       syncUrl=webhookServiceUrl + '/composite/storage/sync',
       customizeUrl=webhookServiceUrl + '/composite/storage/customize',
       parentResource={
-        apiVersion: 'v1',
-        resource: 'secrets',
-        labelSelector: {
-          matchLabels: {
-            'ns.mdn.io/composite': 'storage'
-          }
-        },
+        apiVersion: crdGroup + '/' + crdVersion,
+        resource: 'storageaccounts',
         revisionHistory: {
-          fieldPaths: ['data']
+          fieldPaths: ['spec']
         }
       },
       childResources=[
@@ -105,9 +102,11 @@
       resyncPeriodSeconds=resyncPeriodSeconds,
     ),
 
-  // Compute Composite Controller (ConfigMap → Nightscout + CDC)
+  // Compute Composite Controller (ComputeInstance CRD → Nightscout + CDC)
   computeComposite(
     webhookServiceUrl='http://webhook-service:3000',
+    crdGroup='nightscout.io',
+    crdVersion='v1alpha1',
     resyncPeriodSeconds=30,
   )::
     $.compositeController(
@@ -115,15 +114,10 @@
       syncUrl=webhookServiceUrl + '/composite/compute/sync',
       customizeUrl=webhookServiceUrl + '/composite/compute/customize',
       parentResource={
-        apiVersion: 'v1',
-        resource: 'configmaps',
-        labelSelector: {
-          matchLabels: {
-            'ns.mdn.io/composite': 'compute'
-          }
-        },
+        apiVersion: crdGroup + '/' + crdVersion,
+        resource: 'computeinstances',
         revisionHistory: {
-          fieldPaths: ['data']
+          fieldPaths: ['spec']
         }
       },
       childResources=[
@@ -161,16 +155,22 @@
   // Complete controller set
   controllers(
     webhookServiceUrl='http://webhook-service:3000',
+    crdGroup='nightscout.io',
+    crdVersion='v1alpha1',
     storageResyncSeconds=30,
     computeResyncSeconds=30,
     pvcResyncSeconds=60,
   ):: {
     storage: $.storageComposite(
       webhookServiceUrl=webhookServiceUrl,
+      crdGroup=crdGroup,
+      crdVersion=crdVersion,
       resyncPeriodSeconds=storageResyncSeconds,
     ),
     compute: $.computeComposite(
       webhookServiceUrl=webhookServiceUrl,
+      crdGroup=crdGroup,
+      crdVersion=crdVersion,
       resyncPeriodSeconds=computeResyncSeconds,
     ),
     pvcBackup: $.pvcBackupDecorator(

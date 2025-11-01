@@ -3,7 +3,7 @@
  * 
  * Tells Metacontroller which related resources to fetch for storage composite sync.
  * 
- * Returns relatedResources list based on parent Secret metadata.
+ * Returns relatedResources list based on parent StorageAccount CRD metadata.
  */
 
 function createStorageCompositeCustomize(config) {
@@ -24,26 +24,19 @@ function createStorageCompositeCustomize(config) {
             resource: 'persistentvolumeclaims',
             labelSelector: {
               matchLabels: {
-                'storage.nightscout.org/account': storageAccountLabel
+                'storage.nightscout.org/account': storageAccount
               }
             }
           },
           {
-            // Discover tenant ConfigMaps using this storage (for auditing)
-            apiVersion: 'v1',
-            resource: 'configmaps',
+            // Discover tenant ComputeInstances using this storage (for auditing)
+            // ComputeInstances must be labeled with storage.nightscout.org/account: <storageaccount-name>
+            apiVersion: 'nightscout.io/v1alpha1',
+            resource: 'computeinstances',
             labelSelector: {
-              matchExpressions: [
-                {
-                  key: 'storage.nightscout.org/account',
-                  operator: 'Exists'
-                },
-                {
-                  key: 'ns.mdn.io/composite',
-                  operator: 'In',
-                  values: ['compute']
-                }
-              ]
+              matchLabels: {
+                'storage.nightscout.org/account': storageAccount
+              }
             }
           }
         ]
