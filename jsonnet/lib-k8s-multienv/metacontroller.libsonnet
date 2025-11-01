@@ -33,6 +33,11 @@
       parentResource: parentResource,
       childResources: childResources,
       hooks: {
+        customize: {
+          webhook: {
+            url: webhookUrl,
+          },
+        },
         sync: {
           webhook: {
             url: webhookUrl,
@@ -121,8 +126,8 @@
       childResources=[
         { apiVersion: 'apps/v1', resource: 'deployments' },
         { apiVersion: 'v1', resource: 'services' },
-        { apiVersion: 'kafka.strimzi.io/v1beta2', resource: 'kafkatopics' },
-        { apiVersion: 'kafka.strimzi.io/v1beta2', resource: 'kafkaconnectors' },
+        // { apiVersion: 'kafka.strimzi.io/v1beta2', resource: 'kafkatopics' },
+        // { apiVersion: 'kafka.strimzi.io/v1beta2', resource: 'kafkaconnectors' },
         { apiVersion: 'policy/v1', resource: 'poddisruptionbudgets' },
       ],
       resyncPeriodSeconds=resyncPeriodSeconds,
