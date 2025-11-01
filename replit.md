@@ -88,6 +88,7 @@ The platform employs a **CRD-based two-composite architecture** (Storage and Com
 - Updated `docs/RBAC-DESIGN.md`: Documented CRD permissions, status subresource pattern, cross-namespace example (default → hosted-tenants), and Gen 3/Gen 4 compatibility
 - Updated `jsonnet/environments/gen4-test/README.md`: Documented new RBAC permissions and cross-namespace capabilities
 - Maintained backward compatibility: Gen 3 ConfigMap/Secret permissions preserved alongside Gen 4 CRD permissions
+- **Bug fix**: Fixed RBAC convenience functions to return object with separate fields instead of merging resources with `+` operator (was causing "unknown field: rules" warnings)
 
 ## Provisioner API
 
