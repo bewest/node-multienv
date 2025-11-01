@@ -77,6 +77,15 @@ The platform employs a **CRD-based two-composite architecture** (Storage and Com
 - Backward compatibility: Legacy endpoints moved to `/accounts-legacy/*` for Gen 3 migration support
 - New API creates CRDs directly, triggering Metacontroller webhooks for resource provisioning
 
+### 2025-11-01: Gen 4 RBAC Implementation
+- **RBAC Updates for CRD Support**: Added nightscout.io API group permissions to support Gen 4 CRD-based architecture
+- Updated `fullOrchestrationRole()` in `rbac.libsonnet`: Added nightscout.io/storageaccounts and nightscout.io/computeinstances permissions with separate status subresource rule
+- Updated `provisionerRole()` in `rbac.libsonnet`: Added full CRUD (including delete) for CRDs to support provisioner API tenant lifecycle
+- Created `deploymentControllerRole()` in `rbac.libsonnet`: Combined role merging webhook and provisioner permissions for k8s-deployment-controller
+- Created `deploymentControllerRBAC()` in `rbac.libsonnet`: Ergonomic export (ServiceAccount + ClusterRole + ClusterRoleBinding) for easy deployment integration
+- Updated `docs/RBAC-DESIGN.md`: Documented CRD permissions, status subresource pattern, deployment controller RBAC usage, and Gen 3/Gen 4 compatibility
+- Maintained backward compatibility: Gen 3 ConfigMap/Secret permissions preserved alongside Gen 4 CRD permissions
+
 ## Provisioner API
 
 The platform provides a REST API facade in `k8s-deployment-controller.js` for external systems to provision accounts and sites. The API now uses CRD-based resources (Gen 4).
