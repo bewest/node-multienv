@@ -168,6 +168,44 @@ verbs: ["get", "list", "watch", "create", "update", "patch"]
 3. Job runs to completion, sets `ns.mdn.io/migration-complete: true` on Secret
 4. Compute composite waits for `migration-complete` before creating Deployment
 
+### Nightscout CRD API Group (`apiGroups: ["nightscout.io"]`) - Gen 4
+
+```yaml
+# CRD parent resources
+resources: ["storageaccounts", "computeinstances"]
+verbs: ["get", "list", "watch", "create", "update", "patch"]
+
+# CRD status subresources (webhook only)
+resources: ["storageaccounts/status", "computeinstances/status"]
+verbs: ["update", "patch"]
+```
+
+| Resource | Operations | Purpose |
+|----------|------------|---------|
+| **StorageAccount** | Read (get, list, watch) | Discover storage account CRDs (storage composite parent - Gen 4) |
+| | Write (create, update, patch) | Provisioner API creates/updates storage accounts |
+| | Status (update, patch) | Webhook updates `.status.phase`, `.status.conditions`, `.status.connectionSecret` |
+| **ComputeInstance** | Read (get, list, watch) | Discover compute instance CRDs (compute composite parent - Gen 4) |
+| | Write (create, update, patch) | Provisioner API creates/updates tenants |
+| | Status (update, patch) | Webhook updates `.status.phase`, `.status.conditions`, `.status.endpoints` |
+
+**Gen 4 CRD-Based Architecture:**
+- **Parent resources**: StorageAccount and ComputeInstance CRDs replace Secret/ConfigMap as Metacontroller parent resources
+- **Status subresources**: Separate RBAC rule for `.status` updates enables Kubernetes-standard status reporting
+- **Provisioner permissions**: Provisioner API needs full CRUD (including `delete`) for tenant lifecycle management
+- **Webhook permissions**: Webhooks need read/write on main resources + status updates, but no `delete` (owner references handle cleanup)
+
+**Implementation mapping:**
+- `storage-composite-sync.js` → Reads StorageAccount CRD spec, updates `.status` with phase/conditions
+- `compute-composite-sync.js` → Reads ComputeInstance CRD spec, updates `.status` with endpoints
+- `lib/routes/storage-accounts.js` → Provisioner API creates/updates/deletes StorageAccount CRDs
+- `lib/routes/compute-instances.js` → Provisioner API creates/updates/deletes ComputeInstance CRDs
+
+**Why separate status subresource permissions?**
+- Kubernetes best practice: Status updates use different API endpoints (`/status`)
+- Enables field-level RBAC: Different controllers can update spec vs status
+- Prevents accidental spec overwrites during status updates (Server-Side Apply)
+
 ---
 
 ## Security Design Rationale
@@ -536,6 +574,54 @@ rules:
 - Separates spec (desired state) from status (observed state)
 - Webhooks update status, users update spec
 - Kubernetes convention for CRDs
+
+### Deployment Controller Combined RBAC (Gen 4)
+
+**Scenario:** `k8s-deployment-controller.js` handles both webhook operations AND provisioner API, requiring combined permissions.
+
+The `deploymentControllerRBAC()` function in `rbac.libsonnet` provides an ergonomic export that bundles:
+- Webhook orchestration permissions (fullOrchestrationRole)
+- Provisioner API permissions (provisionerRole with delete verb)
+- Gen 3 (ConfigMap/Secret) and Gen 4 (CRD) support
+
+**Usage in Jsonnet:**
+
+```jsonnet
+local rbac = import 'lib-k8s-multienv/rbac.libsonnet';
+
+{
+  // Single function call creates ServiceAccount + ClusterRole + ClusterRoleBinding
+  deployment_controller_rbac: rbac.deploymentControllerRBAC('deployment-controller', 'default'),
+}
+```
+
+**Generated resources:**
+1. **ServiceAccount**: `deployment-controller` (namespace: default)
+2. **ClusterRole**: Combined permissions including:
+   - ConfigMaps/Secrets: full CRUD (Gen 3 legacy + provisioner delete)
+   - StorageAccount/ComputeInstance CRDs: full CRUD (Gen 4)
+   - CRD status subresources: update/patch (webhook status reporting)
+   - Child resources: Deployments, StatefulSets, Services, Jobs, etc.
+3. **ClusterRoleBinding**: Links ServiceAccount to ClusterRole
+
+**Permission highlights:**
+- `delete` verb on ConfigMaps/Secrets/CRDs: Provisioner API tenant removal
+- Status subresource access: Kubernetes-standard status reporting
+- No `delete` on child resources: Owner references handle cleanup
+
+**Alternative approaches:**
+
+If you need separate webhook and provisioner services:
+
+```jsonnet
+// Separate webhook service (no delete permissions)
+webhook_rbac: rbac.webhookServiceAccount('webhook-service'),
+
+// Separate provisioner service (with delete permissions)
+provisioner_rbac: rbac.provisionerServiceAccount('provisioner-api'),
+```
+
+This allows finer-grained RBAC if you split the deployment-controller into microservices.
 
 ### Multi-Namespace Expansion
 
