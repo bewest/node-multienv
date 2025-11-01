@@ -224,10 +224,10 @@ local crds = import 'crds.libsonnet';
     webhookNamespace='default',
     webhookReplicas=2,
     webhookPort=3000,
-    webhookServiceAccount='deployment-controller',
     imagePullSecrets=[],
     crdGroup='nightscout.io',
     crdVersion='v1alpha1',
+    deploymentServiceAccount='multienv-metactl-deployment-sa',
     storageResyncSeconds=30,
     computeResyncSeconds=30,
     pvcResyncSeconds=60,
@@ -236,18 +236,24 @@ local crds = import 'crds.libsonnet';
       limits: { cpu: '500m', memory: '512Mi' },
     },
   )::
+    local webhookServiceAccount='%s' % [ webhookName ];
     local webhookUrl = 'http://%s.%s.svc.cluster.local:%d' % [
       webhookName,
       webhookNamespace,
       webhookPort,
     ];
-    local deploymentRbac = rbac.deploymentControllerRBAC(webhookServiceAccount, webhookNamespace, imagePullSecrets);
+    local deploymentRbac = rbac.deploymentControllerRBAC(deploymentServiceAccount, webhookNamespace, imagePullSecrets);
     local migrationRbac = rbac.migrationJobServiceAccount('migration-job', webhookNamespace, imagePullSecrets);
     
     {
       // Custom Resource Definitions (StorageAccount and ComputeInstance)
       crds: crds.all(crdGroup, crdVersion),
       
+      gen4_webhook_rbac:
+        rbac.serviceAccount(webhookServiceAccount, webhookNamespace) +
+        rbac.fullOrchestrationRole(webhookServiceAccount) +
+        rbac.clusterRoleBinding(webhookServiceAccount,
+                                serviceAccountNamespace=webhookNamespace),
       // ServiceAccount and RBAC for k8s-deployment-controller
       // Runs webhook + provisioner API (full orchestration + delete permissions)
       deployment_controller_serviceAccount: deploymentRbac.serviceAccount,
