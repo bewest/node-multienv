@@ -31,37 +31,7 @@ function createStorageCompositeSync(config) {
   try {
     const response = {
       status: {},
-      children: [],
-      relatedResourceRules: [
-        {
-          // Discover PVCs created by StatefulSet (blast radius protection)
-          apiVersion: 'v1',
-          resource: 'persistentvolumeclaims',
-          labelSelector: {
-            matchLabels: {
-              'storage.nightscout.org/account': storageAccountLabel
-            }
-          }
-        },
-        {
-          // Discover tenant ConfigMaps using this storage (for auditing)
-          apiVersion: 'v1',
-          resource: 'configmaps',
-          labelSelector: {
-            matchExpressions: [
-              {
-                key: 'storage.nightscout.org/account',
-                operator: 'Exists'
-              },
-              {
-                key: 'ns.mdn.io/composite',
-                operator: 'In',
-                values: ['compute']
-              }
-            ]
-          }
-        }
-      ]
+      children: []
     };
 
     // Extract configuration from Secret

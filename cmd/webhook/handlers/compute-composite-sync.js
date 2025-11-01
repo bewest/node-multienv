@@ -32,42 +32,7 @@ function createComputeCompositeSync(config) {
   try {
     const response = {
       status: {},
-      children: [],
-      relatedResourceRules: [
-        {
-          // Discover storage Secret (for storage type metadata)
-          apiVersion: 'v1',
-          resource: 'secrets',
-          labelSelector: {
-            matchLabels: {
-              'storage.nightscout.org/account': storageAccountLabel,
-              'ns.mdn.io/composite': 'storage'
-            }
-          }
-        },
-        {
-          // Discover app-credentials Secret (provides MongoDB credentials for Nightscout)
-          apiVersion: 'v1',
-          resource: 'secrets',
-          labelSelector: {
-            matchLabels: {
-              'storage.nightscout.org/account': storageAccountLabel,
-              'ns.mdn.io/credential-type': 'application'
-            }
-          }
-        },
-        {
-          // Discover MongoDB StatefulSet (blast radius protection)
-          apiVersion: 'apps/v1',
-          resource: 'statefulsets',
-          labelSelector: {
-            matchLabels: {
-              'storage.nightscout.org/account': storageAccountLabel,
-              'app.kubernetes.io/name': 'mongodb'
-            }
-          }
-        }
-      ]
+      children: []
     };
 
     // Find storage Secret from related resources (for metadata)
