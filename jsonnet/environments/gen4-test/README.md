@@ -16,8 +16,8 @@ tk eval jsonnet/environments/gen4-test
 
 The `simple_deployment` section shows the **batteries-included** approach - one function call generates:
 
-1. **ServiceAccount** (`webhook-metacontroller`)
-2. **ClusterRole** with full orchestration permissions
+1. **ServiceAccount** (`deployment-controller`)
+2. **ClusterRole** with combined webhook + provisioner permissions (includes delete for tenant removal)
 3. **ClusterRoleBinding** 
 4. **Webhook Deployment** (all-in-one: webhook + provisioner + healthcheck)
 5. **Webhook Service** (ClusterIP)
@@ -26,6 +26,11 @@ The `simple_deployment` section shows the **batteries-included** approach - one 
 8. **PVC Backup DecoratorController** CRD
 
 **Total: 8 Kubernetes resources** from a single function call.
+
+**RBAC Permissions:**
+- The deployment-controller runs in `default` namespace with cluster-wide permissions
+- Can manage ConfigMaps, Secrets, StorageAccounts, ComputeInstances in `hosted-tenants` namespace
+- Includes `delete` verb for provisioner API tenant removal operations
 
 ### Advanced Deployment
 
