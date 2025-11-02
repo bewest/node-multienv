@@ -230,6 +230,11 @@
         resources: ['secrets'],
         verbs: ['get', 'list', 'watch', 'create', 'update', 'patch', 'delete'],
       },
+      {
+        apiGroups: ['apps'],
+        resources: ['deployments'],
+        verbs: ['get', 'list', 'watch', 'create', 'update', 'patch', 'delete'],
+      },
     ],
   },
 
@@ -342,7 +347,7 @@
       {
         apiGroups: ['apps'],
         resources: ['deployments', 'statefulsets'],
-        verbs: ['get', 'list', 'watch', 'create', 'update', 'patch'],
+        verbs: ['get', 'list', 'watch', 'create', 'update', 'patch', 'delete'],
       },
       // Policy API group
       {
