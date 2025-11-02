@@ -77,6 +77,22 @@ The platform employs a **CRD-based two-composite architecture** (Storage and Com
 - Backward compatibility: Legacy endpoints moved to `/accounts-legacy/*` for Gen 3 migration support
 - New API creates CRDs directly, triggering Metacontroller webhooks for resource provisioning
 
+### 2025-11-02: Storage Composite Controller Enhancements
+- **Shared Storage Support**: Added `spec.storageType` field to StorageAccount CRD with enum ['dedicated', 'shared']
+  - 'dedicated' (default): Creates new MongoDB StatefulSet and Service as before
+  - 'shared': Skips MongoDB resource creation, validates connection details via spec.sharedConnection
+  - Added `spec.sharedConnection` schema with host, port, and secretRef fields for external MongoDB clusters
+  - Webhook fails fast (Ready=False) when shared storage lacks required connection details
+  - Webhook fails fast (Ready=False/NotImplemented) until Secret reading is fully implemented
+  - Prevents creating invalid/placeholder credentials for shared storage
+- **DNS-Valid Service Naming**: Fixed MongoDB Service naming to comply with DNS-1123 requirements
+  - Changed from `{storageAccount}-mongo` (invalid - ObjectID format) to `mongo-{databaseName}`
+  - databaseName format: `ns-{6-char-sha256-hash}` (lowercase, <63 chars, deterministic)
+  - Updated `renderMongoDB()` signature to accept databaseName parameter
+  - Updated all helper jobs (migration, create-user) to use new service naming pattern
+  - Updated pod0Hostname and all MONGO_HOST references for consistency
+  - Service names now valid for Kubernetes DNS and connection strings
+
 ### 2025-11-01: Gen 4 Three-Service-Account Architecture
 - **Three-SA Architecture**: Refactored RBAC to use three separate service accounts following principle of least privilege
   1. **Webhook SA** (`gen4-webhooks`): No K8s permissions - just HTTP responder for Metacontroller
