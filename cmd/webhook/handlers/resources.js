@@ -24,7 +24,7 @@
  * This renderMongoDB function creates a legacy Secret that is NOT used in Gen 4.
  * It remains for backward compatibility during migration from Gen 3.
  */
-function renderMongoDB(parent, config) {
+function renderMongoDB(parent, databaseName, config) {
   // Storage account ID from parent labels/annotation?
   const storageAccount = parent.metadata.labels?.['storage.nightscout.org/account'];
   const namespace = parent.metadata.namespace;
@@ -50,12 +50,12 @@ function renderMongoDB(parent, config) {
   // PDB configuration
   const mongoPdbMinAvailable = parseInt(parent.data.MONGO_PDB_MIN_AVAILABLE || '1');
   
-  // Resource names with storage prefix
+  // Resource names using databaseName for DNS-valid service naming
   const secretName = `${storageAccount}-mongo-auth`;
-  const serviceName = `${storageAccount}-mongo`;
+  const serviceName = `mongo-${databaseName}`;
   const statefulSetName = `${storageAccount}-mongo`;
   const pdbName = `${storageAccount}-mongo-pdb`;
-  const pod0Hostname = `${storageAccount}-mongo-0.${storageAccount}-mongo`;
+  const pod0Hostname = `${storageAccount}-mongo-0.mongo-${databaseName}`;
 
   const resources = [];
 

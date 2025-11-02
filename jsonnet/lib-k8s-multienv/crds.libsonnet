@@ -76,6 +76,12 @@
                   type: 'object',
                   required: ['mongodbVersion'],
                   properties: {
+                    storageType: {
+                      type: 'string',
+                      description: 'Storage type (dedicated creates new MongoDB, shared uses existing)',
+                      enum: ['dedicated', 'shared'],
+                      default: 'dedicated',
+                    },
                     mongodbVersion: {
                       type: 'string',
                       description: 'MongoDB version to deploy (e.g., "7.0", "6.0")',
@@ -137,6 +143,36 @@
                           description: 'Backup retention policy',
                           enum: ['Retain', 'Delete'],
                           default: 'Retain',
+                        },
+                      },
+                    },
+                    sharedConnection: {
+                      type: 'object',
+                      description: 'Shared MongoDB connection details (required when storageType=shared)',
+                      properties: {
+                        host: {
+                          type: 'string',
+                          description: 'MongoDB host or service name',
+                        },
+                        port: {
+                          type: 'string',
+                          description: 'MongoDB port (default: 27017)',
+                          default: '27017',
+                        },
+                        secretRef: {
+                          type: 'object',
+                          description: 'Reference to Secret containing MongoDB credentials',
+                          required: ['name'],
+                          properties: {
+                            name: {
+                              type: 'string',
+                              description: 'Name of Secret containing username and password',
+                            },
+                            namespace: {
+                              type: 'string',
+                              description: 'Namespace of Secret (defaults to StorageAccount namespace)',
+                            },
+                          },
                         },
                       },
                     },

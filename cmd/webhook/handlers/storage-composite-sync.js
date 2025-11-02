@@ -41,13 +41,74 @@ function createStorageCompositeSync(config) {
     // Extract configuration from StorageAccount CRD spec
     const storageConfig = extractStorageConfig(parent);
     const spec = parent.spec || {};
+    const storageType = spec.storageType || 'dedicated';
     
-    // Generate NS user credentials (stored in internal child Secret)
+    // Generate database name (used for both dedicated and shared)
+    const databaseName = generateDatabaseName(storageAccount);
+    
+    // Check if this is a "shared" storage account
+    if (storageType === 'shared') {
+      console.log(`  Storage type is 'shared' - skipping MongoDB resource creation`);
+      
+      // Validate that sharedConnection is provided
+      const sharedConnection = spec.sharedConnection;
+      if (!sharedConnection || !sharedConnection.host || !sharedConnection.secretRef?.name) {
+        console.log(`  ERROR: Shared storage requires spec.sharedConnection with host and secretRef`);
+        
+        response.status = {
+          phase: 'Failed',
+          observedGeneration: parent.metadata?.generation,
+          conditions: [
+            {
+              type: 'Ready',
+              status: 'False',
+              lastTransitionTime: new Date().toISOString(),
+              reason: 'MissingSharedConnection',
+              message: 'Shared storage requires spec.sharedConnection with host and secretRef fields'
+            }
+          ],
+          databaseName: databaseName
+        };
+        
+        res.send(response);
+        return;
+      }
+      
+      // For shared storage, we need to read credentials from the referenced Secret
+      // TODO: Implement actual Secret reading from Kubernetes API
+      // For now, fail fast to avoid creating invalid credentials
+      const mongoHost = sharedConnection.host;
+      const mongoPort = sharedConnection.port || '27017';
+      const credentialsSecretName = sharedConnection.secretRef.name;
+      const credentialsSecretNamespace = sharedConnection.secretRef.namespace || parent.metadata.namespace;
+      
+      console.log(`  ERROR: Shared storage Secret reading not yet implemented`);
+      console.log(`  Would need to read Secret ${credentialsSecretNamespace}/${credentialsSecretName}`);
+      
+      response.status = {
+        phase: 'Failed',
+        observedGeneration: parent.metadata?.generation,
+        conditions: [
+          {
+            type: 'Ready',
+            status: 'False',
+            lastTransitionTime: new Date().toISOString(),
+            reason: 'NotImplemented',
+            message: `Shared storage Secret reading not yet implemented. Would read ${credentialsSecretNamespace}/${credentialsSecretName} for credentials.`
+          }
+        ],
+        databaseName: databaseName
+      };
+      
+      res.send(response);
+      return;
+    }
+    
+    // Dedicated storage: create MongoDB resources
     const nsuserUsername = generateUsername(storageAccount);
     const nsuserPassword = generateSecurePassword(32);
-    const mongoHost = `${storageAccount}-mongo`;
+    const mongoHost = `mongo-${databaseName}`;
     const mongoPort = '27017';
-    const databaseName = generateDatabaseName(storageAccount);
     
     // Generate app-credentials Secret (contains MongoDB connection info for Nightscout)
     const appCredentials = generateAppCredentials(
@@ -68,9 +129,9 @@ function createStorageCompositeSync(config) {
     
     response.children.push(appCredentialsSecret);
     
-    // Render MongoDB resources
-    console.log(`  Creating MongoDB StatefulSet`);
-    const mongoResources = renderMongoDB(storageConfig, config);
+    // Render MongoDB resources with databaseName for service naming
+    console.log(`  Creating MongoDB StatefulSet with service name: mongo-${databaseName}`);
+    const mongoResources = renderMongoDB(storageConfig, databaseName, config);
     response.children.push(...mongoResources);
     
     // Check MongoDB readiness
@@ -381,8 +442,8 @@ function renderMigrationJobFromCRD(parent, storageAccount, sourceConnectionSecre
   const jobName = `${storageAccount}-migration`;
   const spec = parent.spec || {};
   
-  const targetHost = `${storageAccount}-mongo`;
   const targetDb = generateDatabaseName(storageAccount);
+  const targetHost = `mongo-${targetDb}`;
   const migrationMethod = 'mongodump-restore';
   
   return {
@@ -468,10 +529,10 @@ function renderMigrationJob(secret, storageAccount, sourceUri, config) {
     });
   }
   
-  const targetHost = `${storageAccount}-mongo`;
+  const targetDb = generateDatabaseName(storageAccount);
+  const targetHost = `mongo-${targetDb}`;
   const targetUser = secretData.username || 'admin';
   const targetPassword = secretData.password || secretData['root-password'];
-  const targetDb = generateDatabaseName(storageAccount);
   const targetUri = `mongodb://${targetUser}:${targetPassword}@${targetHost}:27017/${targetDb}?replicaSet=rs0`;
   
   // Use ns-utility image from config
@@ -549,8 +610,8 @@ function renderCreateUserJobFromCRD(parent, storageAccount, nsuserUsername, nsus
   const namespace = parent.metadata.namespace;
   const jobName = `${storageAccount}-create-user`;
   
-  const targetHost = `${storageAccount}-mongo`;
   const targetDb = generateDatabaseName(storageAccount);
+  const targetHost = `mongo-${targetDb}`;
   
   return {
     apiVersion: 'batch/v1',
@@ -630,8 +691,8 @@ function renderCreateUserJob(secret, storageAccount, forceCreate, config) {
   const nsuserPassword = secretData['nsuser-password'];
   const rootUser = secretData.username || secretData['root-user'] || 'admin';
   const rootPassword = secretData.password || secretData['root-password'];
-  const targetHost = `${storageAccount}-mongo`;
   const targetDb = generateDatabaseName(storageAccount);
+  const targetHost = `mongo-${targetDb}`;
   
   return {
     apiVersion: 'batch/v1',
