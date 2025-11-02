@@ -147,34 +147,8 @@
                       },
                     },
                     sharedConnection: {
-                      type: 'object',
-                      description: 'Shared MongoDB connection details (required when storageType=shared)',
-                      properties: {
-                        host: {
-                          type: 'string',
-                          description: 'MongoDB host or service name',
-                        },
-                        port: {
-                          type: 'string',
-                          description: 'MongoDB port (default: 27017)',
-                          default: '27017',
-                        },
-                        secretRef: {
-                          type: 'object',
-                          description: 'Reference to Secret containing MongoDB credentials',
-                          required: ['name'],
-                          properties: {
-                            name: {
-                              type: 'string',
-                              description: 'Name of Secret containing username and password',
-                            },
-                            namespace: {
-                              type: 'string',
-                              description: 'Namespace of Secret (defaults to StorageAccount namespace)',
-                            },
-                          },
-                        },
-                      },
+                      type: 'string',
+                      description: 'Shared MongoDB connection uri (required when storageType=shared)',
                     },
                     migration: {
                       type: 'object',
