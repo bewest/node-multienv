@@ -701,7 +701,7 @@ function configure (opts) {
   const configMapRoutes = createConfigMapRoutes(k8s, selected_namespace, opts);
   const healthRoutes = createHealthRoutes(k8s, selected_namespace);
   const instanceRoutes = createInstanceRoutes(opts.kc, selected_namespace);
-  const storageAccountRoutes = createStorageAccountRoutes(opts.kc, selected_namespace);
+  const storageAccountRoutes = createStorageAccountRoutes(opts.kc, selected_namespace, opts);
   const computeInstanceRoutes = createComputeInstanceRoutes(opts.kc, selected_namespace);
 
   // Deployment routes
@@ -1004,7 +1004,7 @@ function configure (opts) {
 
   // Gen 4 Account and site provisioning endpoints (CRD based)
   // StorageAccount CRD endpoints
-  server.post('/accounts', storageAccountRoutes.createOrUpdateStorageAccount, format_result);
+  server.post('/accounts', storageAccountRoutes.createOrUpdateStorageAccount);
   server.post('/accounts/:account', storageAccountRoutes.createOrUpdateStorageAccount, format_result);
   server.get('/accounts/:account', storageAccountRoutes.getStorageAccount, format_result);
   server.get('/accounts', storageAccountRoutes.listStorageAccounts, format_result);
@@ -1081,6 +1081,9 @@ if (!module.parent) {
     storage_image: process.env.MULTIENV_TENANT_STORAGE_IMAGE || 'mongo'
   }
   , default: {
+    provisioner: {
+      storageType: process.env.MULTIENV_DEFAULT_PROVISIONER_STORAGE_TYPE || 'shared', // shared or dedicated
+    },
     deployment: {
       annotations: {
         'managed-by': MULTIENV_MANAGED_BY,
