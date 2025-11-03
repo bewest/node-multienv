@@ -82,16 +82,15 @@ The platform employs a **CRD-based two-composite architecture** (Storage and Com
   - Added `collectPreservedChildren()` function that preserves completed/running/failed Jobs
   - Both dedicated and shared storage paths start with preserved children before adding new resources
   - Metacontroller deletes children not returned in response - preservation prevents data loss
-- **Storage Secret** (new `renderStorageSecret()` in resources.js): Managed child resource representing storage account status
-  - Treated as a managed child by Metacontroller, same pattern as app-credentials Secret
-  - For dedicated storage: Auto-populated with databaseName, mongoHost, mongoPort
-  - For shared storage: Placeholder where staff populates sourceMongoUri field
-  - Used for both status tracking and input mechanism for migration
-  - First-cycle-only pattern: if exists in children, preserve unchanged; if missing, create on first cycle
-- **First-Cycle-Only App Credentials**: Prevents credential regeneration on every reconciliation
+- **Unified Single Secret Architecture**: Simplified from two Secrets to one unified app-credentials Secret
+  - **Dedicated storage**: Contains MongoDB connection credentials (MONGODB_URI, username, password, host, port, database)
+  - **Shared storage**: Contains placeholder fields including `sourceMongoUri` for staff to populate before migration
+  - Eliminates duplication between Storage Secret and app-credentials Secret
+  - Single Secret serves both status tracking and credential storage purposes
+- **First-Cycle-Only Credential Pattern**: Prevents credential regeneration on every reconciliation
   - Checks if app-credentials Secret exists in children before creating
-  - If exists: Preserves unchanged and extracts credentials for use in Jobs
-  - If missing: Generates new credentials and renders Secret
+  - If exists: Preserves unchanged and extracts credentials/sourceMongoUri for use in Jobs
+  - If missing: Generates new credentials (dedicated) or placeholder (shared) on first cycle only
   - Fixes issue where credentials would regenerate randomly on each sync
 - **Annotation-Triggered Migration**: Flexible migration triggering mechanism
   - Checks for both `spec.migration.enabled` and `nightscout.io/migration-requested: "true"` annotation
@@ -99,9 +98,9 @@ The platform employs a **CRD-based two-composite architecture** (Storage and Com
   - Allows staff to trigger migrations via kubectl annotate without CRD spec changes
   - Logs which trigger (spec or annotation) activated the migration
 - **Status Reflects Secret State**: Kubernetes-idiomatic status reporting
-  - For shared storage: Ready=False with reason='AwaitingSourceURI' until staff populates sourceMongoUri in Storage Secret
+  - For shared storage: Ready=False with reason='AwaitingSourceURI' until staff populates sourceMongoUri in app-credentials Secret
   - Once populated: Ready=False with reason='NotImplemented' (Secret reading TODO)
-  - Status includes storageSecret reference for operator visibility
+  - Status includes connectionSecret reference for operator visibility
   - Clear feedback loop for operators managing shared storage migrations
 
 ### 2025-11-02: Storage Composite Controller Enhancements
