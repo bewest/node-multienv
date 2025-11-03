@@ -22,7 +22,7 @@
  *   - spec.migration.sourceConnectionSecret: Secret containing source MongoDB URI
  */
 
-const { renderMongoDB } = require('./resources');
+const { renderMongoDB, renderStorageSecret } = require('./resources');
 
 function createStorageCompositeSync(config) {
   return async function storageCompositeSync(req, res) {
@@ -45,6 +45,10 @@ function createStorageCompositeSync(config) {
     
     // Generate database name (used for both dedicated and shared)
     const databaseName = generateDatabaseName(storageAccount);
+    
+    // CHILD PRESERVATION: Collect existing children to preserve
+    // We preserve: completed Jobs, PVCs (not owned), and existing Secrets (conditionally)
+    const preservedChildren = collectPreservedChildren(children, parent);
     
     // Check if this is a "shared" storage account
     if (storageType === 'shared') {
@@ -74,6 +78,59 @@ function createStorageCompositeSync(config) {
         return;
       }
       
+      // CHILD PRESERVATION: Start with preserved children
+      response.children.push(...preservedChildren);
+      
+      // Render Storage Secret for shared storage (placeholder for staff to populate)
+      const storageSecretName = `${storageAccount}-storage`;
+      const existingStorageSecret = children['Secret.v1']?.[storageSecretName];
+      
+      if (existingStorageSecret) {
+        // Preserve existing Storage Secret (staff may have populated sourceMongoUri)
+        console.log(`  Preserving existing Storage Secret: ${storageSecretName}`);
+        response.children.push(existingStorageSecret);
+      } else {
+        // First cycle - render new Storage Secret as placeholder
+        console.log(`  First cycle - rendering Storage Secret for shared storage`);
+        const storageSecret = renderStorageSecret(
+          storageAccount,
+          parent.metadata.namespace,
+          'shared',
+          { databaseName },
+          parent.metadata.labels
+        );
+        response.children.push(storageSecret);
+      }
+      
+      // Check if Storage Secret has sourceMongoUri populated
+      const sourceMongoUri = existingStorageSecret?.data?.sourceMongoUri 
+        ? Buffer.from(existingStorageSecret.data.sourceMongoUri, 'base64').toString('utf-8')
+        : '';
+      
+      if (!sourceMongoUri || sourceMongoUri === '') {
+        // Staff has not yet populated sourceMongoUri
+        console.log(`  Shared storage waiting for sourceMongoUri to be populated in Storage Secret`);
+        
+        response.status = {
+          phase: 'Pending',
+          observedGeneration: parent.metadata?.generation,
+          conditions: [
+            {
+              type: 'Ready',
+              status: 'False',
+              lastTransitionTime: new Date().toISOString(),
+              reason: 'AwaitingSourceURI',
+              message: 'Waiting for staff to populate sourceMongoUri in Storage Secret'
+            }
+          ],
+          databaseName: databaseName,
+          storageSecret: storageSecretName
+        };
+        
+        res.send(response);
+        return;
+      }
+      
       // For shared storage, we need to read credentials from the referenced Secret
       // TODO: Implement actual Secret reading from Kubernetes API
       // For now, fail fast to avoid creating invalid credentials
@@ -82,7 +139,7 @@ function createStorageCompositeSync(config) {
       const credentialsSecretName = sharedConnection.secretRef.name;
       const credentialsSecretNamespace = sharedConnection.secretRef.namespace || parent.metadata.namespace;
       
-      console.log(`  ERROR: Shared storage Secret reading not yet implemented`);
+      console.log(`  Shared storage has sourceMongoUri but Secret reading not yet implemented`);
       console.log(`  Would need to read Secret ${credentialsSecretNamespace}/${credentialsSecretName}`);
       
       response.status = {
@@ -97,7 +154,8 @@ function createStorageCompositeSync(config) {
             message: `Shared storage Secret reading not yet implemented. Would read ${credentialsSecretNamespace}/${credentialsSecretName} for credentials.`
           }
         ],
-        databaseName: databaseName
+        databaseName: databaseName,
+        storageSecret: storageSecretName
       };
       
       res.send(response);
@@ -105,29 +163,72 @@ function createStorageCompositeSync(config) {
     }
     
     // Dedicated storage: create MongoDB resources
-    const nsuserUsername = generateUsername(storageAccount);
-    const nsuserPassword = generateSecurePassword(32);
     const mongoHost = `mongo-${databaseName}`;
     const mongoPort = '27017';
     
-    // Generate app-credentials Secret (contains MongoDB connection info for Nightscout)
-    const appCredentials = generateAppCredentials(
-      storageAccount,
-      mongoHost,
-      mongoPort,
-      databaseName,
-      nsuserUsername,
-      nsuserPassword
-    );
+    // CHILD PRESERVATION: Start with preserved children
+    response.children.push(...preservedChildren);
     
-    const appCredentialsSecret = renderAppCredentialsSecret(
-      storageAccount,
-      parent.metadata.namespace,
-      appCredentials,
-      parent.metadata.labels
-    );
+    // Render Storage Secret for dedicated storage (status representation)
+    const storageSecretName = `${storageAccount}-storage`;
+    const existingStorageSecret = children['Secret.v1']?.[storageSecretName];
     
-    response.children.push(appCredentialsSecret);
+    if (existingStorageSecret) {
+      // Preserve existing Storage Secret
+      console.log(`  Preserving existing Storage Secret: ${storageSecretName}`);
+      response.children.push(existingStorageSecret);
+    } else {
+      // First cycle - render new Storage Secret with connection details
+      console.log(`  First cycle - rendering Storage Secret for dedicated storage`);
+      const storageSecret = renderStorageSecret(
+        storageAccount,
+        parent.metadata.namespace,
+        'dedicated',
+        { databaseName, mongoHost, mongoPort },
+        parent.metadata.labels
+      );
+      response.children.push(storageSecret);
+    }
+    
+    // Check if app-credentials Secret already exists (first-cycle-only pattern)
+    const appCredentialsSecretName = `${storageAccount}-app-credentials`;
+    const existingAppSecret = children['Secret.v1']?.[appCredentialsSecretName];
+    
+    let nsuserUsername, nsuserPassword;
+    
+    if (existingAppSecret) {
+      // Existing Secret found - preserve it unchanged and extract credentials
+      console.log(`  Preserving existing app-credentials Secret: ${appCredentialsSecretName}`);
+      response.children.push(existingAppSecret);
+      
+      // Extract credentials from existing Secret for use in Jobs
+      const secretData = existingAppSecret.data || {};
+      nsuserUsername = Buffer.from(secretData.MONGO_USERNAME || '', 'base64').toString('utf-8');
+      nsuserPassword = Buffer.from(secretData.MONGO_PASSWORD || '', 'base64').toString('utf-8');
+    } else {
+      // First cycle - generate new credentials and render Secret
+      console.log(`  First cycle - rendering new app-credentials Secret`);
+      nsuserUsername = generateUsername(storageAccount);
+      nsuserPassword = generateSecurePassword(32);
+      
+      const appCredentials = generateAppCredentials(
+        storageAccount,
+        mongoHost,
+        mongoPort,
+        databaseName,
+        nsuserUsername,
+        nsuserPassword
+      );
+      
+      const appCredentialsSecret = renderAppCredentialsSecret(
+        storageAccount,
+        parent.metadata.namespace,
+        appCredentials,
+        parent.metadata.labels
+      );
+      
+      response.children.push(appCredentialsSecret);
+    }
     
     // Render MongoDB resources with databaseName for service naming
     console.log(`  Creating MongoDB StatefulSet with service name: mongo-${databaseName}`);
@@ -137,15 +238,20 @@ function createStorageCompositeSync(config) {
     // Check MongoDB readiness
     const mongoReadiness = checkMongoReadiness(children, storageAccount);
     
-    // Check if migration is needed (spec-driven)
+    // Check if migration is needed (spec-driven OR annotation-driven)
     const migrationConfig = spec.migration || {};
-    const migrationEnabled = migrationConfig.enabled === true;
+    const migrationEnabledBySpec = migrationConfig.enabled === true;
+    const migrationEnabledByAnnotation = parent.metadata?.annotations?.['nightscout.io/migration-requested'] === 'true';
+    const migrationEnabled = migrationEnabledBySpec || migrationEnabledByAnnotation;
     const migrationSourceSecret = migrationConfig.sourceConnectionSecret;
     
     if (migrationEnabled && migrationSourceSecret && mongoReadiness.ready) {
-      console.log(`  Migration enabled - rendering migration Job`);
+      const trigger = migrationEnabledByAnnotation ? 'annotation' : 'spec';
+      console.log(`  Migration enabled via ${trigger} - rendering migration Job`);
       const migrationJob = renderMigrationJobFromCRD(parent, storageAccount, migrationSourceSecret, config);
       response.children.push(migrationJob);
+    } else if (migrationEnabled && !migrationSourceSecret) {
+      console.log(`  Migration requested but sourceConnectionSecret not provided`);
     }
     
     // Check if NS user creation is needed
@@ -192,7 +298,7 @@ function createStorageCompositeSync(config) {
       phase,
       observedGeneration: parent.metadata?.generation,
       conditions,
-      connectionSecret: appCredentialsSecret.metadata.name,
+      connectionSecret: appCredentialsSecretName,
       databaseName: databaseName
     };
 
@@ -1037,6 +1143,40 @@ function countTenantUsage(related, storageAccountLabel) {
     count: tenants.length,
     tenantIds: tenants
   };
+}
+
+/**
+ * Collect children that should be preserved unchanged
+ * This prevents accidental deletion when we don't return a child
+ * 
+ * We preserve:
+ * - Completed Jobs (Success status) - keep them for audit/history
+ * - Failed Jobs - keep for debugging
+ * - Running Jobs - keep them running
+ * Only exclude Pending/incomplete Jobs that we might want to recreate
+ * 
+ * @param {Object} children - Existing children from request
+ * @param {Object} parent - Parent StorageAccount CRD
+ * @returns {Array} - Array of children resources to preserve
+ */
+function collectPreservedChildren(children, parent) {
+  const preserved = [];
+  
+  // Preserve completed/running Jobs (don't recreate them)
+  const jobs = children['Job.batch/v1'] || {};
+  for (const [name, job] of Object.entries(jobs)) {
+    const succeeded = job.status?.succeeded || 0;
+    const failed = job.status?.failed || 0;
+    const active = job.status?.active || 0;
+    
+    // Preserve if completed (succeeded or failed) or still running
+    if (succeeded > 0 || failed > 0 || active > 0) {
+      console.log(`  Preserving Job: ${name} (succeeded=${succeeded}, failed=${failed}, active=${active})`);
+      preserved.push(job);
+    }
+  }
+  
+  return preserved;
 }
 
 }
