@@ -881,78 +881,10 @@ function generatePassword() {
   return Math.random().toString(36).slice(-16) + Math.random().toString(36).slice(-16);
 }
 
-/**
- * Render Storage Secret - represents status of storage account
- * Used for both dedicated and shared storage types
- * 
- * For dedicated storage: Auto-populated with connection details
- * For shared storage: Placeholder where staff populates sourceMongoUri
- * 
- * @param {string} storageAccount - Storage account ID
- * @param {string} namespace - Kubernetes namespace
- * @param {string} storageType - 'dedicated' or 'shared'
- * @param {Object} connectionDetails - Connection info (databaseName, mongoHost, mongoPort)
- * @param {Object} storageLabels - Labels from parent StorageAccount
- * @returns {Object} - Kubernetes Secret manifest
- */
-function renderStorageSecret(storageAccount, namespace, storageType, connectionDetails, storageLabels) {
-  const secretName = `${storageAccount}-storage`;
-  
-  // Build Secret data based on storage type
-  let secretData = {};
-  
-  if (storageType === 'dedicated') {
-    // Auto-populated for dedicated storage
-    secretData = {
-      'storageType': storageType,
-      'databaseName': connectionDetails.databaseName,
-      'mongoHost': connectionDetails.mongoHost,
-      'mongoPort': connectionDetails.mongoPort || '27017'
-    };
-  } else if (storageType === 'shared') {
-    // Placeholder for shared storage - staff will populate sourceMongoUri
-    secretData = {
-      'storageType': storageType,
-      'databaseName': connectionDetails.databaseName,
-      'sourceMongoUri': '',  // To be populated by staff
-      'migrationStatus': 'pending'  // Tracks migration state
-    };
-  }
-  
-  // Encode all fields to base64
-  const encodedData = {};
-  Object.keys(secretData).forEach(key => {
-    encodedData[key] = Buffer.from(secretData[key]).toString('base64');
-  });
-  
-  return {
-    apiVersion: 'v1',
-    kind: 'Secret',
-    metadata: {
-      name: secretName,
-      namespace: namespace,
-      labels: {
-        ...storageLabels,
-        'app.kubernetes.io/component': 'storage',
-        'ns.mdn.io/composite': 'storage',
-        'ns.mdn.io/secret-type': 'storage-status'
-      },
-      annotations: {
-        'ns.mdn.io/created-at': new Date().toISOString(),
-        'ns.mdn.io/description': `Storage status and connection details for ${storageType} storage`,
-        'ns.mdn.io/storage-type': storageType
-      }
-    },
-    type: 'Opaque',
-    data: encodedData
-  };
-}
-
 module.exports = {
   renderMongoDB,
   renderNightscout,
   renderKafkaTopics,
   renderKafkaConnector,
-  renderMigrationJob,
-  renderStorageSecret
+  renderMigrationJob
 };

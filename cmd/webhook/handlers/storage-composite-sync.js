@@ -22,7 +22,7 @@
  *   - spec.migration.sourceConnectionSecret: Secret containing source MongoDB URI
  */
 
-const { renderMongoDB, renderStorageSecret } = require('./resources');
+const { renderMongoDB } = require('./resources');
 
 function createStorageCompositeSync(config) {
   return async function storageCompositeSync(req, res) {
@@ -81,37 +81,43 @@ function createStorageCompositeSync(config) {
       // CHILD PRESERVATION: Start with preserved children
       response.children.push(...preservedChildren);
       
-      // Check if Storage Secret already exists (first-cycle-only pattern)
-      const storageSecretName = `${storageAccount}-storage`;
-      const existingStorageSecret = children['Secret.v1']?.[storageSecretName];
+      // Check if app-credentials Secret already exists (first-cycle-only pattern)
+      const appCredentialsSecretName = `${storageAccount}-app-credentials`;
+      const existingAppSecret = children['Secret.v1']?.[appCredentialsSecretName];
       
       let sourceMongoUri = '';
       
-      if (existingStorageSecret) {
-        // Existing Storage Secret found - preserve it unchanged
-        console.log(`  Preserving existing Storage Secret: ${storageSecretName}`);
-        response.children.push(existingStorageSecret);
+      if (existingAppSecret) {
+        // Existing Secret found - preserve it unchanged
+        console.log(`  Preserving existing app-credentials Secret: ${appCredentialsSecretName}`);
+        response.children.push(existingAppSecret);
         
         // Extract sourceMongoUri (staff may have populated it)
-        sourceMongoUri = existingStorageSecret.data?.sourceMongoUri 
-          ? Buffer.from(existingStorageSecret.data.sourceMongoUri, 'base64').toString('utf-8')
+        sourceMongoUri = existingAppSecret.data?.sourceMongoUri 
+          ? Buffer.from(existingAppSecret.data.sourceMongoUri, 'base64').toString('utf-8')
           : '';
       } else {
-        // First cycle - render new Storage Secret as placeholder
-        console.log(`  First cycle - rendering Storage Secret for shared storage`);
-        const storageSecret = renderStorageSecret(
+        // First cycle - render new app-credentials Secret as placeholder for shared storage
+        console.log(`  First cycle - rendering app-credentials Secret for shared storage`);
+        const appCredentials = {
+          'storageType': 'shared',
+          'databaseName': databaseName,
+          'sourceMongoUri': '',  // To be populated by staff
+          'migrationStatus': 'pending'
+        };
+        
+        const appCredentialsSecret = renderAppCredentialsSecret(
           storageAccount,
           parent.metadata.namespace,
-          'shared',
-          { databaseName },
+          appCredentials,
           parent.metadata.labels
         );
-        response.children.push(storageSecret);
+        response.children.push(appCredentialsSecret);
       }
       
       if (!sourceMongoUri || sourceMongoUri === '') {
         // Staff has not yet populated sourceMongoUri
-        console.log(`  Shared storage waiting for sourceMongoUri to be populated in Storage Secret`);
+        console.log(`  Shared storage waiting for sourceMongoUri to be populated in app-credentials Secret`);
         
         response.status = {
           phase: 'Pending',
@@ -122,11 +128,11 @@ function createStorageCompositeSync(config) {
               status: 'False',
               lastTransitionTime: new Date().toISOString(),
               reason: 'AwaitingSourceURI',
-              message: 'Waiting for staff to populate sourceMongoUri in Storage Secret'
+              message: 'Waiting for staff to populate sourceMongoUri in app-credentials Secret'
             }
           ],
           databaseName: databaseName,
-          storageSecret: storageSecretName
+          connectionSecret: appCredentialsSecretName
         };
         
         res.send(response);
@@ -157,7 +163,7 @@ function createStorageCompositeSync(config) {
           }
         ],
         databaseName: databaseName,
-        storageSecret: storageSecretName
+        connectionSecret: appCredentialsSecretName
       };
       
       res.send(response);
@@ -170,27 +176,6 @@ function createStorageCompositeSync(config) {
     
     // CHILD PRESERVATION: Start with preserved children
     response.children.push(...preservedChildren);
-    
-    // Check if Storage Secret already exists (first-cycle-only pattern)
-    const storageSecretName = `${storageAccount}-storage`;
-    const existingStorageSecret = children['Secret.v1']?.[storageSecretName];
-    
-    if (existingStorageSecret) {
-      // Existing Storage Secret found - preserve it unchanged
-      console.log(`  Preserving existing Storage Secret: ${storageSecretName}`);
-      response.children.push(existingStorageSecret);
-    } else {
-      // First cycle - render new Storage Secret with connection details
-      console.log(`  First cycle - rendering Storage Secret for dedicated storage`);
-      const storageSecret = renderStorageSecret(
-        storageAccount,
-        parent.metadata.namespace,
-        'dedicated',
-        { databaseName, mongoHost, mongoPort },
-        parent.metadata.labels
-      );
-      response.children.push(storageSecret);
-    }
     
     // Check if app-credentials Secret already exists (first-cycle-only pattern)
     const appCredentialsSecretName = `${storageAccount}-app-credentials`;
