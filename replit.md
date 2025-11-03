@@ -77,6 +77,32 @@ The platform employs a **CRD-based two-composite architecture** (Storage and Com
 - Backward compatibility: Legacy endpoints moved to `/accounts-legacy/*` for Gen 3 migration support
 - New API creates CRDs directly, triggering Metacontroller webhooks for resource provisioning
 
+### 2025-11-03: Child Lifecycle Management for Storage Composite Controller
+- **Child Preservation Pattern**: Implemented proper resource lifecycle management to prevent accidental deletions
+  - Added `collectPreservedChildren()` function that preserves completed/running/failed Jobs
+  - Both dedicated and shared storage paths start with preserved children before adding new resources
+  - Metacontroller deletes children not returned in response - preservation prevents data loss
+- **Storage Secret** (new `renderStorageSecret()` in resources.js): Status representation for storage accounts
+  - For dedicated storage: Auto-populated with databaseName, mongoHost, mongoPort
+  - For shared storage: Placeholder where staff populates sourceMongoUri field
+  - Used for both status tracking and input mechanism for migration
+  - Both types use first-cycle-only pattern (preserve existing, only create if missing)
+- **First-Cycle-Only App Credentials**: Prevents credential regeneration on every reconciliation
+  - Checks if app-credentials Secret exists in children before creating
+  - If exists: Preserves unchanged and extracts credentials for use in Jobs
+  - If missing: Generates new credentials and renders Secret
+  - Fixes issue where credentials would regenerate randomly on each sync
+- **Annotation-Triggered Migration**: Flexible migration triggering mechanism
+  - Checks for both `spec.migration.enabled` and `nightscout.io/migration-requested: "true"` annotation
+  - Migration Job rendered when either trigger is active and MongoDB is ready
+  - Allows staff to trigger migrations via kubectl annotate without CRD spec changes
+  - Logs which trigger (spec or annotation) activated the migration
+- **Status Reflects Secret State**: Kubernetes-idiomatic status reporting
+  - For shared storage: Ready=False with reason='AwaitingSourceURI' until staff populates sourceMongoUri in Storage Secret
+  - Once populated: Ready=False with reason='NotImplemented' (Secret reading TODO)
+  - Status includes storageSecret reference for operator visibility
+  - Clear feedback loop for operators managing shared storage migrations
+
 ### 2025-11-02: Storage Composite Controller Enhancements
 - **Shared Storage Support**: Added `spec.storageType` field to StorageAccount CRD with enum ['dedicated', 'shared']
   - 'dedicated' (default): Creates new MongoDB StatefulSet and Service as before
