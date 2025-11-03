@@ -82,11 +82,12 @@ The platform employs a **CRD-based two-composite architecture** (Storage and Com
   - Added `collectPreservedChildren()` function that preserves completed/running/failed Jobs
   - Both dedicated and shared storage paths start with preserved children before adding new resources
   - Metacontroller deletes children not returned in response - preservation prevents data loss
-- **Storage Secret** (new `renderStorageSecret()` in resources.js): Status representation for storage accounts
+- **Storage Secret** (new `renderStorageSecret()` in resources.js): Managed child resource representing storage account status
+  - Treated as a managed child by Metacontroller, same pattern as app-credentials Secret
   - For dedicated storage: Auto-populated with databaseName, mongoHost, mongoPort
   - For shared storage: Placeholder where staff populates sourceMongoUri field
   - Used for both status tracking and input mechanism for migration
-  - Both types use first-cycle-only pattern (preserve existing, only create if missing)
+  - First-cycle-only pattern: if exists in children, preserve unchanged; if missing, create on first cycle
 - **First-Cycle-Only App Credentials**: Prevents credential regeneration on every reconciliation
   - Checks if app-credentials Secret exists in children before creating
   - If exists: Preserves unchanged and extracts credentials for use in Jobs

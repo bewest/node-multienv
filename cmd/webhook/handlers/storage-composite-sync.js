@@ -81,14 +81,21 @@ function createStorageCompositeSync(config) {
       // CHILD PRESERVATION: Start with preserved children
       response.children.push(...preservedChildren);
       
-      // Render Storage Secret for shared storage (placeholder for staff to populate)
+      // Check if Storage Secret already exists (first-cycle-only pattern)
       const storageSecretName = `${storageAccount}-storage`;
       const existingStorageSecret = children['Secret.v1']?.[storageSecretName];
       
+      let sourceMongoUri = '';
+      
       if (existingStorageSecret) {
-        // Preserve existing Storage Secret (staff may have populated sourceMongoUri)
+        // Existing Storage Secret found - preserve it unchanged
         console.log(`  Preserving existing Storage Secret: ${storageSecretName}`);
         response.children.push(existingStorageSecret);
+        
+        // Extract sourceMongoUri (staff may have populated it)
+        sourceMongoUri = existingStorageSecret.data?.sourceMongoUri 
+          ? Buffer.from(existingStorageSecret.data.sourceMongoUri, 'base64').toString('utf-8')
+          : '';
       } else {
         // First cycle - render new Storage Secret as placeholder
         console.log(`  First cycle - rendering Storage Secret for shared storage`);
@@ -101,11 +108,6 @@ function createStorageCompositeSync(config) {
         );
         response.children.push(storageSecret);
       }
-      
-      // Check if Storage Secret has sourceMongoUri populated
-      const sourceMongoUri = existingStorageSecret?.data?.sourceMongoUri 
-        ? Buffer.from(existingStorageSecret.data.sourceMongoUri, 'base64').toString('utf-8')
-        : '';
       
       if (!sourceMongoUri || sourceMongoUri === '') {
         // Staff has not yet populated sourceMongoUri
@@ -169,12 +171,12 @@ function createStorageCompositeSync(config) {
     // CHILD PRESERVATION: Start with preserved children
     response.children.push(...preservedChildren);
     
-    // Render Storage Secret for dedicated storage (status representation)
+    // Check if Storage Secret already exists (first-cycle-only pattern)
     const storageSecretName = `${storageAccount}-storage`;
     const existingStorageSecret = children['Secret.v1']?.[storageSecretName];
     
     if (existingStorageSecret) {
-      // Preserve existing Storage Secret
+      // Existing Storage Secret found - preserve it unchanged
       console.log(`  Preserving existing Storage Secret: ${storageSecretName}`);
       response.children.push(existingStorageSecret);
     } else {
