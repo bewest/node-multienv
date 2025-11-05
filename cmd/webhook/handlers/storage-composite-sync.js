@@ -22,14 +22,202 @@
  *   - spec.migration.sourceConnectionSecret: Secret containing source MongoDB URI
  */
 
+const _ = require('lodash');
 const { renderMongoDB } = require('./resources');
 
 function createStorageCompositeSync(config) {
+  // TODO: set up as a pipeline of handlers
+  function pull_objects (req, res, next) {
+    // set up everything needed by our handlers.
+    const { parent, children, related } = req.body;
+    // Extract configuration from StorageAccount CRD spec
+    const storageConfig = extractStorageConfig(parent);
+    const spec = parent.spec || {};
+    const storageType = spec.storageType;
+    const storageAccount = parent.metadata.name;
+    const storageAccountLabel = parent.metadata.labels?.['storage.nightscout.org/account'];
+    req.parent = parent;
+    req.children = children;
+    req.related = related;
+    req.storageConfig = storageConfig;
+    req.spec = spec;
+    req.storageAccount = storageAccount;
+    req.databaseName = generateDatabaseName(storageAccount);
+    
+    res.children = [ ];
+    res.status = { phase: 'Pending', conditions: [ ] };
+
+    // Count tenants using this storage account (from related ComputeInstances)
+    const tenantUsage = countTenantUsage(req.related, req.storageAccount);
+    console.log('Tenant Usage', tenantUsage);
+    return next( );
+  }
+  function ensure_initialization (req, res, next) {
+
+
+    const storageAccount = req.storageAccount;
+    // Check if app-credentials Secret already exists (first-cycle-only pattern)
+    const appCredentialsSecretName = `${storageAccount}-mongo-auth`;
+    const existingAppSecret = req.children['Secret.v1']?.[appCredentialsSecretName];
+
+    if (!existingAppSecret) {
+      console.log(`  Generating mongo admin credentials for ${storageAccount}`);
+      
+      // Generate new credentials
+      const root_username = generateUsername(storageAccount, 'admin');
+      const root_password = generateSecurePassword(32);
+      const databaseName = generateDatabaseName(storageAccount);
+      const stringData = {
+        STORAGE: storageAccount,
+        MONGO_INITDB_ROOT_USERNAME: root_username,
+        MONGO_INITDB_ROOT_PASSWORD: root_password,
+        MONGO_INITDB_DATABASE: databaseName
+      };
+      var mongo_secret = template_initial_storage_secret(storageAccount, req.storageType, req.spec.tier, stringData);
+      res.status.phase = 'Pending';
+      res.children.push(mongo_secret);
+      return next( );
+    }
+
+    res.status.phase = 'Pending';
+    req.storageSecret = existingAppSecret;
+    return next( );
+  }
+
+  function template_initial_storage_secret (accountId, storageType, tier, stringData) {
+    const secretName = `${accountId}-mongo-auth`;
+    
+    // Create K8s secret with provisioning root MongoDB credentials
+    // This Secret triggers the storage composite controller via ns.mdn.io/composite label
+    const secret = {
+      apiVersion: 'v1',
+      kind: 'Secret',
+      metadata: {
+        name: secretName,
+        labels: {
+          'app.kubernetes.io/managed-by': 'metacontroller',
+          'storage.nightscout.org/account': accountId,
+          'ns.mdn.io/composite': 'storage'
+        },
+        annotations: {
+          'ns.mdn.io/storage-type': storageType || config.storage.defaultStorageType,
+          'ns.mdn.io/tier': tier || opts.DEFAULT_TIER || 'basic',
+          'ns.mdn.io/created-at': new Date().toISOString()
+        }
+      },
+      stringData
+    };
+    return secret;
+  }
+
+  function render_shared_status (req, res, next) {
+    if (req.spec.storageType != 'shared') {
+      return next( );
+    }
+    var ready = req.storageSecret ? true : false;
+    var sharedStatus = {
+      condition: {
+        type: 'Ready',
+        status: ready ? 'True' : 'False',
+        reason: ready ? 'SharedSecretReady' : 'WaitingForMongoSecret',
+        message: ready
+          ? 'Secret ready'
+          : `SharedSecret not ready`,
+        // lastTransitionTime: new Date().toISOString()
+      }
+    };
+    res.status.phase = ready? 'Ready' : 'Pending';
+    res.status.conditions.push(sharedStatus.condition);
+    next( );
+
+  }
+
+  function render_specified_dedicated (req, res, next) {
+    if (req.spec.storageType != 'dedicated') {
+      return next( );
+    }
+
+    // Check user initialization state
+    const userInitState = checkUserInitializationState(req.children, req.parent);
+    if (userInitState.condition) {
+      res.status.conditions.push(userInitState.condition)
+    }
+
+    // Extract credentials from existing Secret for use in Jobs
+    const secretData = req.storageSecret.data || {};
+    var databaseName = Buffer.from(secretData.MONGO_INITDB_DATABASE || '', 'base64').toString('utf-8');
+
+    if (req.storageSecret) {
+        
+      // Ensure app credentials
+      var updated_secret = ensureNSUserCredentials(req.storageSecret, storageAccount);
+      var nsuserUsername = Buffer.from(secretData.MONGO_USERNAME || '', 'base64').toString('utf-8');
+      var nsuserPassword = Buffer.from(secretData.MONGO_PASSWORD || '', 'base64').toString('utf-8');
+      res.children.push(updated_secret);
+      const mongoResources = renderMongoDB(req.storageConfig, databaseName, config);
+      res.children.push(...mongoResources);
+      // Check if NS user creation is needed
+      
+      // const hasCredentials = nsuserUsername && nsuserPassword;
+      // Check MongoDB readiness
+      const mongoReadiness = checkMongoReadiness(children, storageAccount);
+      if (mongoReadiness.condition) {
+        res.status.conditions.push(mongoReadiness.condition);
+      }
+      if (mongoReadiness.ready) {
+        const userInitialized = req.parent.status?.conditions?.find(c => c.type === 'UserInitialized' && c.status === 'True');
+        if (!userInitialized) {
+          console.log(`  NS user creation needed - rendering create-user Job`);
+          const createUserJob = renderCreateUserJobFromCRD(req.parent, req.storageAccount, nsuserUsername, nsuserPassword, config);
+          res.children.push(createUserJob);
+        }
+      }
+    }
+
+    next( );
+  }
+
+  function fmt_metacontroller_webhook (req, res, next) {
+    const response = {
+      status: {
+        phase: res.status.phase,
+        observedGeneration: req.parent.metadata?.generation,
+        conditions: res.status.conditions,
+        connectionSecret: req.storageSecret?.metadata.name,
+        databaseName: req.databaseName
+      },
+      children: res.children
+    };
+    var remaining = _(req.children).flatMap(function (resources, kind) {
+      return _.map(resources, (resource, name) => ({
+        ...resource
+        // ..._.omit(resource, 'status')
+      }));
+    }).reject((child) => {
+        // child.metadata.name == name
+        // child.metadata.kind == kind
+        return _.some(response.children, (excluded) => {
+          hasSameName = excluded.metadata.name == child.metadata.name && excluded;
+          isSameKind = excluded.kind == child.kind;
+          return hasSameName && isSameKind;
+          
+        });
+    }).value( );
+    console.log("ADDING REMAINING CHILDREN not active in current phase", remaining.length, remaining);
+    response.children.push(...remaining);
+    res.send(response);
+    return next( );
+
+  }
+
+  // Compose/configure a list of handlers that operate in a chain or pipeline.
+  return [ pull_objects, ensure_initialization, render_shared_status, render_specified_dedicated, fmt_metacontroller_webhook ];
+  // TODO: Finish refactoring/break up this function into smaller logical units
+  // that can be composed or pipelined in an idiomatic way with better
+  // ergonomics.
   return async function storageCompositeSync(req, res) {
   const { parent, children, related } = req.body;
   
-  const storageAccount = parent.metadata.name;
-  const storageAccountLabel = parent.metadata.labels?.['storage.nightscout.org/account'];
   console.log('Storage composite sync for account:', storageAccount);
   
   try {
@@ -41,11 +229,24 @@ function createStorageCompositeSync(config) {
     // Extract configuration from StorageAccount CRD spec
     const storageConfig = extractStorageConfig(parent);
     const spec = parent.spec || {};
-    const storageType = spec.storageType || 'dedicated';
+    const storageType = spec.storageType;
+    
+
+    // Check if app-credentials Secret already exists (first-cycle-only pattern)
+    const appCredentialsSecretName = `${storageAccount}-app-credentials`;
+    const existingAppSecret = children['Secret.v1']?.[appCredentialsSecretName];
+
+    if (!existingAppSecret) {
+      // Existing Secret found - preserve it unchanged
+
+
+    }
+      response.children.push(existingAppSecret);
+    
+    let sourceMongoUri = '';
     
     // Generate database name (used for both dedicated and shared)
     const databaseName = generateDatabaseName(storageAccount);
-    
     // CHILD PRESERVATION: Collect existing children to preserve
     // We preserve: completed Jobs, PVCs (not owned), and existing Secrets (conditionally)
     const preservedChildren = collectPreservedChildren(children, parent);
@@ -81,11 +282,7 @@ function createStorageCompositeSync(config) {
       // CHILD PRESERVATION: Start with preserved children
       response.children.push(...preservedChildren);
       
-      // Check if app-credentials Secret already exists (first-cycle-only pattern)
-      const appCredentialsSecretName = `${storageAccount}-app-credentials`;
-      const existingAppSecret = children['Secret.v1']?.[appCredentialsSecretName];
-      
-      let sourceMongoUri = '';
+      // XXX
       
       if (existingAppSecret) {
         // Existing Secret found - preserve it unchanged
@@ -139,9 +336,9 @@ function createStorageCompositeSync(config) {
         return;
       }
       
-      // For shared storage, we need to read credentials from the referenced Secret
-      // TODO: Implement actual Secret reading from Kubernetes API
-      // For now, fail fast to avoid creating invalid credentials
+      // TODO: the following code isn't quite right.
+      // For shared storage, we don't need to do anything and can declare a
+      // Ready status.
       const mongoHost = sharedConnection.host;
       const mongoPort = sharedConnection.port || '27017';
       const credentialsSecretName = sharedConnection.secretRef.name;
@@ -178,8 +375,8 @@ function createStorageCompositeSync(config) {
     response.children.push(...preservedChildren);
     
     // Check if app-credentials Secret already exists (first-cycle-only pattern)
-    const appCredentialsSecretName = `${storageAccount}-app-credentials`;
-    const existingAppSecret = children['Secret.v1']?.[appCredentialsSecretName];
+    // const appCredentialsSecretName = `${storageAccount}-app-credentials`;
+    // const existingAppSecret = children['Secret.v1']?.[appCredentialsSecretName];
     
     let nsuserUsername, nsuserPassword;
     
@@ -194,7 +391,7 @@ function createStorageCompositeSync(config) {
       nsuserPassword = Buffer.from(secretData.MONGO_PASSWORD || '', 'base64').toString('utf-8');
     } else {
       // First cycle - generate new credentials and render Secret
-      console.log(`  First cycle - rendering new app-credentials Secret`);
+      console.log(`  Initialization - rendering new app-credentials Secret`);
       nsuserUsername = generateUsername(storageAccount);
       nsuserPassword = generateSecurePassword(32);
       
@@ -248,6 +445,9 @@ function createStorageCompositeSync(config) {
       const userInitialized = parent.status?.conditions?.find(c => c.type === 'UserInitialized' && c.status === 'True');
       if (!userInitialized) {
         console.log(`  NS user creation needed - rendering create-user Job`);
+        // TODO: The create-user Job needs to be rendered in response
+        // when a new compute tenant is linked to the our storage
+        // resource by
         const createUserJob = renderCreateUserJobFromCRD(parent, storageAccount, nsuserUsername, nsuserPassword, config);
         response.children.push(createUserJob);
       }
@@ -315,10 +515,10 @@ function generateSecurePassword(length = 32) {
 /**
  * Generate unique username with random suffix
  */
-function generateUsername(storageAccount) {
+function generateUsername(storageAccount, prefix='nsuser') {
   const crypto = require('crypto');
   const randomSuffix = crypto.randomBytes(4).toString('hex');
-  return `nsuser-${storageAccount}-${randomSuffix}`;
+  return `${prefix}-${storageAccount}-${randomSuffix}`;
 }
 
 /**
@@ -741,6 +941,10 @@ function renderCreateUserJobFromCRD(parent, storageAccount, nsuserUsername, nsus
             imagePullPolicy: config.images.nsUtilityPullPolicy,
             env: [
               { name: 'MONGO_HOST', value: targetHost },
+              // TODO: MONGO_ADMIN_URI is required by the create-users script.
+              // The create-user Job needs to be rendered in response when a
+              // new compute tenant is linked to the our storage resource by
+              { name: 'MONGO_ADMIN_URI', value: targetHost },
               { name: 'MONGO_PORT', value: '27017' },
               { name: 'NSUSER_USERNAME', value: nsuserUsername },
               { name: 'NSUSER_PASSWORD', value: nsuserPassword },

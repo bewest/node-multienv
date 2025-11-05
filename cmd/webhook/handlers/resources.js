@@ -1,7 +1,5 @@
 /**
- * LEGACY GEN 3 PATTERN: renderMongoDB
  * 
- * This function is part of the legacy Gen 3 architecture and is kept for backward compatibility.
  * 
  * Gen 4 Two-Secret Architecture:
  * ===============================
@@ -235,6 +233,10 @@ function renderMongoDB(parent, databaseName, config) {
           ]
         }
       },
+      persistentVolumeClaimRetentionPolicy: {
+        whenDeleted: 'Retain',
+        whenScaled: 'Retain',
+      },
       volumeClaimTemplates: [
         {
           metadata: {
@@ -248,7 +250,7 @@ function renderMongoDB(parent, databaseName, config) {
             annotations: {
               'ns.mdn.io/created-at': new Date().toISOString(),
               'ns.mdn.io/parent-generation': String(parent.metadata.generation || 1),
-              'ns.mdn.io/tenant-email': parent.data.TENANT_EMAIL || '',
+              // 'ns.mdn.io/tenant-email': parent.data.TENANT_EMAIL || '',
               'ns.mdn.io/backup-schedule': parent.data.BACKUP_SCHEDULE || 'daily',
               'ns.mdn.io/storage-class': storageClass,
               'ns.mdn.io/size-gi': storageGi

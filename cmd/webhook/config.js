@@ -117,6 +117,7 @@ const config = {
 
   // Storage configuration
   storage: {
+    defaultStorageType: process.env.DEFAULT_STORAGE_TYPE || 'shared',
     defaultStorageClass: process.env.STORAGE_CLASS || 'do-block-storage',
     defaultMongoStorageGi: process.env.MONGO_STORAGE_GI || '2',
     defaultMongoReplicas: process.env.MONGO_REPLICAS || '1',

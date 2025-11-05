@@ -318,7 +318,7 @@
                       description: 'Number of Nightscout replicas',
                       minimum: 1,
                       maximum: 10,
-                      default: 2,
+                      default: 1,
                     },
                     tier: {
                       type: 'string',
