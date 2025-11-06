@@ -257,33 +257,8 @@ function createStorageCredentialsDecoratorSync(config) {
     planUserInitJob,
     assembleResponse
   ];
+  return pipeline;
   
-  // Return async handler that executes pipeline
-  return async function storageCredentialsDecoratorSync(req, res) {
-    let currentStage = 0;
-    
-    function next(err) {
-      if (err) {
-        console.error('Error in storage credentials decorator sync:', err);
-        return res.send(500, { error: err.message });
-      }
-      
-      if (currentStage >= pipeline.length) {
-        return;
-      }
-      
-      const handler = pipeline[currentStage++];
-      
-      try {
-        handler(req, res, next);
-      } catch (error) {
-        console.error('Error in storage credentials decorator sync:', error);
-        res.send(500, { error: error.message });
-      }
-    }
-    
-    next();
-  };
 }
 
 // ============================================================================
