@@ -165,6 +165,7 @@ function createStorageCredentialsDecoratorSync(config) {
       const secretData = req.existingSecret.data || {};
       username = Buffer.from(secretData.MONGO_USERNAME || '', 'base64').toString('utf-8');
       password = Buffer.from(secretData.MONGO_PASSWORD || '', 'base64').toString('utf-8');
+      req.credentials = username && password ? { username, password } : null;
       
     } else {
       // First cycle - generate new credentials
@@ -191,12 +192,12 @@ function createStorageCredentialsDecoratorSync(config) {
         appCredentials,
         req.computeInstance.metadata.labels
       );
+      req.credentials = null;
       
       res.attachments.push(secret);
     }
     
     // Store credentials for Job rendering
-    req.credentials = username && password ? { username, password } : null;
     
     return next();
   }
