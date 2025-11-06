@@ -96,9 +96,18 @@ The platform employs a **CRD-based two-composite architecture** (Storage and Com
   - **Stage 3: collectAttachments** - Index existing Secrets and Jobs for efficient lookup
   - **Stage 4: planCredentialsSecret** - Decide create/update/skip for app-credentials Secret
   - **Stage 5: planUserInitJob** - Render create-user Job if UserInitialized condition not True
-  - **Stage 6: assembleResponse** - Finalize attachments array and send to Metacontroller
+  - **Stage 6: planMigrationJob** - Render migration Job if `nightscout.io/migrate-to-dedicated` annotation present
+  - **Stage 7: assembleResponse** - Finalize attachments array and send to Metacontroller
   - Each stage uses req/res/next pattern for composable logic
   - Enables future extension: add new stages without touching existing logic
+- **Migration Support**: Shared → Dedicated storage transition
+  - Detects `nightscout.io/migrate-to-dedicated: "true"` annotation on ComputeInstance
+  - Renders migration Job using `migrate-database.sh` script from ns-utility container
+  - Only executes if MigrationCompleted condition is not True
+  - Uses `mongodump-restore` method to transfer data
+  - Source: ConfigMap-based shared storage credentials (TODO: discovery logic)
+  - Target: Newly created dedicated app-credentials Secret
+  - Job includes full environment variables for source/target connections
 - **Integration**: 
   - Created `cmd/webhook/handlers/storage-credentials-decorator-sync.js`
   - Added DecoratorController manifest in `metacontroller.libsonnet` with relatedResources

@@ -241,7 +241,56 @@ function createStorageCredentialsDecoratorSync(config) {
   }
   
   /**
-   * Stage 6: Assemble final response
+   * Stage 6: Plan migration Job (shared → dedicated storage transition)
+   * Detects migration annotation and renders migration Job
+   * Only executes if migration annotation is present
+   */
+  function planMigrationJob(req, res, next) {
+    // Check for migration annotation
+    const migrationRequested = req.computeInstance.metadata?.annotations?.['nightscout.io/migrate-to-dedicated'] === 'true';
+    
+    if (!migrationRequested) {
+      return next();
+    }
+    
+    console.log(`  Migration annotation detected - planning shared → dedicated migration`);
+    
+    // Check if migration already completed
+    const migrationCompleted = req.status.conditions?.find(
+      c => c.type === 'MigrationCompleted' && c.status === 'True'
+    );
+    
+    if (migrationCompleted) {
+      console.log(`  Migration already completed - skipping Job creation`);
+      return next();
+    }
+    
+    // Verify we have target credentials (should exist from planCredentialsSecret stage)
+    if (!req.credentials) {
+      console.log(`  Warning: Migration requested but no target credentials available - skipping`);
+      return next();
+    }
+    
+    console.log(`  Rendering migration Job for tenant ${req.tenantId}`);
+    
+    const migrationJob = renderMigrationJob(
+      req.tenantId,
+      req.namespace,
+      req.storageAccountId,
+      req.databaseName,
+      req.credentials.username,
+      req.credentials.password,
+      req.computeInstance.metadata.labels,
+      config
+    );
+    
+    res.attachments.push(migrationJob);
+    
+    return next();
+  }
+  
+  /**
+   * Stage 7: Assemble final response
    * Sends attachments back to Metacontroller
    */
   function assembleResponse(req, res, next) {
@@ -255,6 +304,7 @@ function createStorageCredentialsDecoratorSync(config) {
     collectAttachments,
     planCredentialsSecret,
     planUserInitJob,
+    planMigrationJob,
     assembleResponse
   ];
   return pipeline;
@@ -405,6 +455,104 @@ function renderAppCredentialsSecret(tenantId, namespace, appCredentials, labels)
     },
     type: 'Opaque',
     data: encodedData
+  };
+}
+
+/**
+ * Render migration Job (shared → dedicated storage transition)
+ * Migrates data from shared MongoDB (ConfigMap-based) to dedicated storage
+ */
+function renderMigrationJob(tenantId, namespace, storageAccount, databaseName, username, password, labels, config) {
+  const jobName = `${tenantId}-migrate-to-dedicated`;
+  const targetHost = `mongo-${databaseName}`;
+  const migrationMethod = 'mongodump-restore';
+  
+  // TODO: Discover source ConfigMap credentials for shared storage
+  // For now, assume source ConfigMap name follows convention
+  const sourceConfigMapName = `${tenantId}-shared-storage-config`;
+  
+  return {
+    apiVersion: 'batch/v1',
+    kind: 'Job',
+    metadata: {
+      name: jobName,
+      namespace: namespace,
+      labels: {
+        ...labels,
+        'app.kubernetes.io/component': 'migration',
+        'app.kubernetes.io/managed-by': 'metacontroller',
+        'ns.mdn.io/decorator': 'storage-credentials',
+        'ns.mdn.io/migration-type': 'shared-to-dedicated',
+        'storage.nightscout.org/account': storageAccount
+      },
+      annotations: {
+        'ns.mdn.io/created-at': new Date().toISOString(),
+        'ns.mdn.io/tenant': tenantId,
+        'ns.mdn.io/migration-method': migrationMethod,
+        'ns.mdn.io/migration-target-db': databaseName,
+        'ns.mdn.io/source-config': sourceConfigMapName
+      }
+    },
+    spec: {
+      ttlSecondsAfterFinished: 86400, // 24 hours
+      backoffLimit: 3,
+      template: {
+        metadata: {
+          labels: {
+            ...labels,
+            'app.kubernetes.io/component': 'migration',
+            'ns.mdn.io/decorator': 'storage-credentials'
+          }
+        },
+        spec: {
+          restartPolicy: 'OnFailure',
+          serviceAccountName: 'migration-job',
+          containers: [{
+            name: 'migration',
+            image: config.images.nsUtility,
+            imagePullPolicy: config.imagePullPolicies.nsUtility || 'IfNotPresent',
+            env: [
+              // TODO: Source MongoDB URI from ConfigMap
+              // This should reference the shared storage ConfigMap
+              // For now, use placeholder that will need to be populated
+              {
+                name: 'MIGRATION_SOURCE_URI',
+                valueFrom: {
+                  configMapKeyRef: {
+                    name: sourceConfigMapName,
+                    key: 'MONGODB_URI',
+                    optional: true
+                  }
+                }
+              },
+              // Target MongoDB connection (dedicated storage)
+              { name: 'MIGRATION_TARGET_HOST', value: targetHost },
+              { name: 'MIGRATION_TARGET_PORT', value: '27017' },
+              { name: 'MIGRATION_TARGET_DB', value: databaseName },
+              { name: 'MIGRATION_TARGET_USER', value: username },
+              { name: 'MIGRATION_TARGET_PASSWORD', value: password },
+              // Migration configuration
+              { name: 'MIGRATION_METHOD', value: migrationMethod },
+              { name: 'MIGRATION_SOURCE_DB', value: 'nightscout' }, // Default shared DB name
+              { name: 'STORAGE_ACCOUNT', value: storageAccount },
+              { name: 'TENANT_ID', value: tenantId }
+            ],
+            command: ['migrate-database.sh'],
+            args: [], // TODO: Add specific migration args if needed
+            resources: {
+              requests: {
+                cpu: config.resources?.nsUtility?.cpuRequest || '100m',
+                memory: config.resources?.nsUtility?.memRequest || '256Mi'
+              },
+              limits: {
+                cpu: config.resources?.nsUtility?.cpuLimit || '500m',
+                memory: config.resources?.nsUtility?.memLimit || '512Mi'
+              }
+            }
+          }]
+        }
+      }
+    }
   };
 }
 
