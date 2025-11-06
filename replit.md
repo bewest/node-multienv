@@ -122,11 +122,15 @@ The platform employs a **CRD-based two-composite architecture** (Storage and Com
   - Disposable resources keep ownerReferences - normal cascade delete
   - Finalizers (future) will orchestrate cleanup with VolumeSnapshot backup before deletion
 
-**CRD Schema Updates** (storageaccount.yaml, computeinstance.yaml):
+**CRD Schema Updates** (storageaccount.yaml, computeinstance.yaml, crds.libsonnet):
 - Added `spec.selector` field with matchLabels and matchExpressions support (optional for backward compatibility)
 - Added `status.orphanedResources` field for tracking resources matching selector but unmanaged
 - Selector enables label-based resource discovery and adoption
 - Legacy 1300+ tenants without selector continue working unchanged
+- **2025-11-06 Update**: Updated crds.libsonnet to include spec.selector field in both CRD definitions
+  - Ensures jsonnet-generated CRDs match hand-maintained YAML versions
+  - StorageAccount and ComputeInstance both support selector-based resource protection
+  - Schema includes matchLabels (object) and matchExpressions (array) with proper validation
 
 **Protected Resources** (no ownerReferences, labeled for tracking):
 - **PVCs**: MongoDB data volumes - must survive StorageAccount deletion
