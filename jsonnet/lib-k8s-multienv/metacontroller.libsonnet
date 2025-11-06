@@ -99,7 +99,6 @@
       childResources=[
         { apiVersion: 'apps/v1', resource: 'statefulsets' },
         { apiVersion: 'v1', resource: 'services' },
-        { apiVersion: 'v1', resource: 'secrets' },
         { apiVersion: 'batch/v1', resource: 'jobs' },
         { apiVersion: 'policy/v1', resource: 'poddisruptionbudgets' },
       ],
@@ -109,6 +108,20 @@
         {
           apiVersion: 'v1',
           resource: 'persistentvolumeclaims',
+          labelSelector: {
+            matchExpressions: [
+              {
+                key: 'storage.nightscout.org/account',
+                operator: 'In',
+                values: ['${parent.metadata.name}'],
+              },
+            ],
+          },
+        },
+        // mongo-auth Secrets (protected, label-based discovery)
+        {
+          apiVersion: 'v1',
+          resource: 'secrets',
           labelSelector: {
             matchExpressions: [
               {

@@ -105,7 +105,8 @@ function createStorageCompositeSync(config) {
           'ns.mdn.io/tier': tier || opts.DEFAULT_TIER || 'basic',
           'ns.mdn.io/created-at': new Date().toISOString(),
           [ANNOTATIONS.PROTECTED_RESOURCE]: 'true'
-        }
+        },
+        ownerReferences: null  // CRITICAL: Protected resource - survives parent deletion
       },
       stringData
     };
@@ -205,8 +206,27 @@ function createStorageCompositeSync(config) {
     
     if (existingMongoAuth) {
       console.log(`  Found existing mongo-auth Secret: ${mongoAuthSecretName} (${existingMongoAuth.source})`);
-      // Preserve existing secret - already has correct labels/annotations
-      res.children.push(existingMongoAuth.resource);
+      
+      // Clone and strip ownerReferences (like decorator does)
+      const protectedSecret = {
+        ...existingMongoAuth.resource,
+        metadata: {
+          ...existingMongoAuth.resource.metadata,
+          labels: {
+            ...existingMongoAuth.resource.metadata.labels,
+            [LABELS.STORAGE_ACCOUNT]: req.storageAccount,
+            ...req.selectorContext.labels
+          },
+          annotations: {
+            ...existingMongoAuth.resource.metadata.annotations,
+            [ANNOTATIONS.PROTECTED_RESOURCE]: 'true'
+          },
+          ownerReferences: null,  // CRITICAL: Remove garbage collection
+          managedFields: null
+        }
+      };
+      
+      res.children.push(protectedSecret);
     } else if (req.storageSecret) {
       // Secret was created in ensure_initialization, ensure it has protected annotation
       console.log(`  Using mongo-auth Secret from ensure_initialization`);
