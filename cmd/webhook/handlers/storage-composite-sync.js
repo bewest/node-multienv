@@ -24,6 +24,7 @@
 
 const _ = require('lodash');
 const { renderMongoDB } = require('./resources');
+const { ANNOTATIONS, LABELS } = require('./constants');
 
 function createStorageCompositeSync(config) {
   // TODO: set up as a pipeline of handlers
@@ -102,12 +103,152 @@ function createStorageCompositeSync(config) {
         annotations: {
           'ns.mdn.io/storage-type': storageType || config.storage.defaultStorageType,
           'ns.mdn.io/tier': tier || opts.DEFAULT_TIER || 'basic',
-          'ns.mdn.io/created-at': new Date().toISOString()
+          'ns.mdn.io/created-at': new Date().toISOString(),
+          [ANNOTATIONS.PROTECTED_RESOURCE]: 'true'
         }
       },
       stringData
     };
     return secret;
+  }
+
+  function resolveSelectorContext (req, res, next) {
+    // Extract selector labels from parent.spec.selector
+    // Handle legacy parents without selector
+    const selector = req.parent.spec?.selector;
+    
+    if (!selector) {
+      console.log('  No selector found in parent spec - using legacy behavior');
+      req.selectorContext = null;
+      return next();
+    }
+    
+    // Build selector context with labels from parent.spec.selector
+    req.selectorContext = {
+      labels: {
+        [LABELS.STORAGE_ACCOUNT]: req.storageAccount,
+        ...selector
+      }
+    };
+    
+    console.log('  Resolved selector context:', req.selectorContext.labels);
+    return next();
+  }
+
+  function collectAttachments (req, res, next) {
+    // Index req.children (owned) and req.related (label-selected) into req.attachments
+    // This provides easy lookup for protected resources
+    
+    req.attachments = {
+      pvcs: {},
+      secrets: {},
+      configMaps: {}
+    };
+    
+    // Index owned children (PVCs may not be owned in selector mode)
+    const childPVCs = req.children['PersistentVolumeClaim.v1'] || {};
+    for (const [name, pvc] of Object.entries(childPVCs)) {
+      req.attachments.pvcs[name] = { source: 'children', resource: pvc };
+    }
+    
+    const childSecrets = req.children['Secret.v1'] || {};
+    for (const [name, secret] of Object.entries(childSecrets)) {
+      req.attachments.secrets[name] = { source: 'children', resource: secret };
+    }
+    
+    const childConfigMaps = req.children['ConfigMap.v1'] || {};
+    for (const [name, cm] of Object.entries(childConfigMaps)) {
+      req.attachments.configMaps[name] = { source: 'children', resource: cm };
+    }
+    
+    // Index related resources (label-selected, not owned)
+    if (req.related) {
+      const relatedPVCs = req.related['PersistentVolumeClaim.v1'] || {};
+      for (const [name, pvc] of Object.entries(relatedPVCs)) {
+        if (!req.attachments.pvcs[name]) {
+          req.attachments.pvcs[name] = { source: 'related', resource: pvc };
+        }
+      }
+      
+      const relatedSecrets = req.related['Secret.v1'] || {};
+      for (const [name, secret] of Object.entries(relatedSecrets)) {
+        if (!req.attachments.secrets[name]) {
+          req.attachments.secrets[name] = { source: 'related', resource: secret };
+        }
+      }
+      
+      const relatedConfigMaps = req.related['ConfigMap.v1'] || {};
+      for (const [name, cm] of Object.entries(relatedConfigMaps)) {
+        if (!req.attachments.configMaps[name]) {
+          req.attachments.configMaps[name] = { source: 'related', resource: cm };
+        }
+      }
+    }
+    
+    console.log(`  Collected attachments: ${Object.keys(req.attachments.pvcs).length} PVCs, ${Object.keys(req.attachments.secrets).length} Secrets, ${Object.keys(req.attachments.configMaps).length} ConfigMaps`);
+    return next();
+  }
+
+  function planProtectedAssets (req, res, next) {
+    // Only run if selector context is available (new behavior)
+    if (!req.selectorContext) {
+      console.log('  Skipping planProtectedAssets - no selector context');
+      return next();
+    }
+    
+    // Plan protected resources WITHOUT ownerReferences
+    // These resources survive parent deletion for data safety
+    
+    // 1. Handle mongo-auth Secret (protected resource)
+    const mongoAuthSecretName = `${req.storageAccount}-mongo-auth`;
+    const existingMongoAuth = req.attachments.secrets[mongoAuthSecretName];
+    
+    if (existingMongoAuth) {
+      console.log(`  Found existing mongo-auth Secret: ${mongoAuthSecretName} (${existingMongoAuth.source})`);
+      // Preserve existing secret - already has correct labels/annotations
+      res.children.push(existingMongoAuth.resource);
+    } else if (req.storageSecret) {
+      // Secret was created in ensure_initialization, ensure it has protected annotation
+      console.log(`  Using mongo-auth Secret from ensure_initialization`);
+      // The secret is already in res.children from ensure_initialization
+      // Just verify it has the protected annotation (added in template_initial_storage_secret)
+    }
+    
+    // 2. Handle PVCs (protected resources)
+    // PVCs are typically created by StatefulSet volumeClaimTemplates
+    // We check if they exist in attachments (from related resources)
+    // If they exist, we ensure they have correct labels but NO ownerReferences
+    const pvcPattern = new RegExp(`^data-${req.storageAccount}-mongodb-\\d+$`);
+    
+    for (const [pvcName, pvcAttachment] of Object.entries(req.attachments.pvcs)) {
+      if (pvcPattern.test(pvcName)) {
+        console.log(`  Found MongoDB PVC: ${pvcName} (${pvcAttachment.source})`);
+        
+        // Ensure PVC has correct labels (without ownerReferences)
+        const pvc = pvcAttachment.resource;
+        const protectedPVC = {
+          ...pvc,
+          metadata: {
+            ...pvc.metadata,
+            labels: {
+              ...pvc.metadata.labels,
+              [LABELS.STORAGE_ACCOUNT]: req.storageAccount,
+              ...req.selectorContext.labels
+            },
+            annotations: {
+              ...pvc.metadata.annotations,
+              [ANNOTATIONS.PROTECTED_RESOURCE]: 'true'
+            },
+            ownerReferences: undefined  // Explicitly remove ownerReferences
+          }
+        };
+        
+        // Add to response children WITHOUT ownerReferences
+        res.children.push(protectedPVC);
+      }
+    }
+    
+    return next();
   }
 
   function render_shared_status (req, res, next) {
@@ -211,7 +352,16 @@ function createStorageCompositeSync(config) {
   }
 
   // Compose/configure a list of handlers that operate in a chain or pipeline.
-  return [ pull_objects, ensure_initialization, render_shared_status, render_specified_dedicated, fmt_metacontroller_webhook ];
+  return [ 
+    pull_objects, 
+    resolveSelectorContext,       // NEW - extract selector labels from parent.spec.selector
+    collectAttachments,            // NEW - index children and related resources for easy lookup
+    ensure_initialization,         // EXISTING - handle mongo-auth secret initialization
+    planProtectedAssets,           // NEW - handle protected resources (PVCs, secrets) without ownerReferences
+    render_shared_status,          // EXISTING - handle shared storage type
+    render_specified_dedicated,    // EXISTING - handle dedicated storage type
+    fmt_metacontroller_webhook     // EXISTING - format response
+  ];
   // TODO: Finish refactoring/break up this function into smaller logical units
   // that can be composed or pipelined in an idiomatic way with better
   // ergonomics.

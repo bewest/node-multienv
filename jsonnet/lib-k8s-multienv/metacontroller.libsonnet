@@ -20,6 +20,7 @@
     syncUrl,
     parentResource,  // { apiVersion, resource }
     childResources=[],  // Array of { apiVersion, resource }
+    relatedResources=[],  // Optional related resources for selector-based discovery
     customizeUrl=null,  // Optional customize hook URL
     generateSelector=true,
     resyncPeriodSeconds=30,
@@ -33,6 +34,7 @@
       generateSelector: generateSelector,
       parentResource: parentResource,
       childResources: childResources,
+      [if std.length(relatedResources) > 0 then 'relatedResources']: relatedResources,
       hooks: {
         [if customizeUrl != null then 'customize']: {
           webhook: {
@@ -100,6 +102,51 @@
         { apiVersion: 'v1', resource: 'secrets' },
         { apiVersion: 'batch/v1', resource: 'jobs' },
         { apiVersion: 'policy/v1', resource: 'poddisruptionbudgets' },
+      ],
+      relatedResources=[
+        // Protected resources discovered via selector labels (not owned)
+        // PVCs with MongoDB data - must survive parent deletion
+        {
+          apiVersion: 'v1',
+          resource: 'persistentvolumeclaims',
+          labelSelector: {
+            matchExpressions: [
+              {
+                key: 'storage.nightscout.org/account',
+                operator: 'In',
+                values: ['${parent.metadata.name}'],
+              },
+            ],
+          },
+        },
+        // Legacy Gen 3 ConfigMaps for migration support (adopted, not created)
+        {
+          apiVersion: 'v1',
+          resource: 'configmaps',
+          labelSelector: {
+            matchExpressions: [
+              {
+                key: 'storage.nightscout.org/account',
+                operator: 'In',
+                values: ['${parent.metadata.name}'],
+              },
+            ],
+          },
+        },
+        // ComputeInstances using this storage (for usage tracking)
+        {
+          apiVersion: crdGroup + '/' + crdVersion,
+          resource: 'computeinstances',
+          labelSelector: {
+            matchExpressions: [
+              {
+                key: 'storage.nightscout.org/account',
+                operator: 'In',
+                values: ['${parent.metadata.name}'],
+              },
+            ],
+          },
+        },
       ],
       resyncPeriodSeconds=resyncPeriodSeconds,
     ),
