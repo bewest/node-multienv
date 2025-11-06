@@ -96,3 +96,66 @@ The platform employs a **CRD-based two-composite architecture** (Storage and Com
   - Added RBAC role `storageCredentialsDecoratorRole` with permissions for CRDs, Secrets, Jobs, ConfigMaps
   - Registered webhook endpoint: POST `/decorator/storage-credentials/sync`
   - Integrated into `gen4.stack()` with ServiceAccount creation
+
+### 2025-11-06: Selector-Based Resource Protection (Hybrid Lifecycle Pattern)
+- **Problem**: Accidental CRD deletion cascades to PVCs and Secrets containing irreplaceable MongoDB data and credentials
+- **Solution**: Hybrid selector-driven lifecycle with tiered resource protection
+  - Protected resources tracked by labels (no ownerReferences) - survive parent deletion
+  - Disposable resources keep ownerReferences - normal cascade delete
+  - Finalizers (future) will orchestrate cleanup with VolumeSnapshot backup before deletion
+
+**CRD Schema Updates** (storageaccount.yaml, computeinstance.yaml):
+- Added `spec.selector` field with matchLabels and matchExpressions support (optional for backward compatibility)
+- Added `status.orphanedResources` field for tracking resources matching selector but unmanaged
+- Selector enables label-based resource discovery and adoption
+- Legacy 1300+ tenants without selector continue working unchanged
+
+**Protected Resources** (no ownerReferences, labeled for tracking):
+- **PVCs**: MongoDB data volumes - must survive StorageAccount deletion
+- **mongo-auth Secrets**: Root MongoDB credentials - singleton, no backup exists
+- **app-credentials Secrets**: Per-tenant application credentials - managed by decorator
+- All marked with `nightscout.io/protected-resource: "true"` annotation
+- Tracked via `storage.nightscout.org/account` and resource-type labels
+
+**Disposable Resources** (keep ownerReferences, cascade delete normally):
+- Services (can recreate from specs)
+- Jobs (completed migration/init jobs)
+- ConfigMaps (metadata only)
+
+**Storage Composite Pipeline Refactoring** (storage-composite-sync.js):
+- Added `resolveSelectorContext` stage - extracts selector labels, handles legacy parents without selector
+- Added `collectAttachments` stage - indexes children (owned) and related (label-selected) resources
+- Added `planProtectedAssets` stage - handles PVCs and mongo-auth Secret WITHOUT ownerReferences
+- Backward compatible - parents without selector use unchanged legacy behavior
+- Protected resources receive correct labels and annotations on creation
+
+**Decorator Protection Enhancement** (storage-credentials-decorator-sync.js):
+- Now protects EXISTING app-credentials Secrets (not just new ones)
+- Clones existing Secret, strips ownerReferences (sets to null), adds protected-resource annotation
+- Gradual protection - all existing Secrets protected on next reconciliation cycle
+- No credential rotation - data/credentials preserved, only metadata updated
+
+**Metacontroller Configuration** (metacontroller.libsonnet):
+- Updated compositeController helper to support relatedResources parameter
+- Added selector-based discovery of PVCs, ConfigMaps, and ComputeInstances to storageComposite
+- Webhook receives existing protected resources via `related` field for adoption/tracking
+
+**Constants & Conventions** (constants.js):
+- Defined finalizers: `storage.nightscout.io/finalizer`, `compute.nightscout.io/finalizer`
+- Defined annotations: `nightscout.io/protected-resource`, migration triggers, backup policy
+- Defined labels: storage/compute account links, tenant ID, resource types
+- Resource type constants for tracking (PVC, secrets, jobs)
+
+**Rollout Strategy**:
+1. Deploy new CRDs (selector optional) - no breaking changes
+2. Deploy updated webhooks
+3. Existing 1300+ tenants continue operating (no selector required)
+4. Decorator automatically protects existing Secrets through normal reconciliation
+5. Operators can add selectors to tenants gradually over time
+6. New tenants can use selector pattern immediately
+
+**Remaining Work** (future enhancements):
+- Finalizer webhook handlers for cleanup orchestration (VolumeSnapshot + Secret backup before deletion)
+- Orphan detection in status reporting (surfaces resources matching selector but unmanaged)
+- RBAC permissions for finalizer operations
+- Operator runbook for recovery scenarios and manual cleanup procedures
