@@ -32,6 +32,7 @@
  */
 
 const crypto = require('crypto');
+const { ANNOTATIONS, LABELS, RESOURCE_TYPES } = require('./constants');
 
 function createStorageCredentialsDecoratorSync(config) {
   return async function storageCredentialsDecoratorSync(req, res) {
@@ -85,9 +86,30 @@ function createStorageCredentialsDecoratorSync(config) {
         let username, password;
         
         if (existingSecret) {
-          // Preserve existing credentials
-          console.log(`  Preserving existing app-credentials Secret: ${appCredentialsSecretName}`);
-          response.attachments.push(existingSecret);
+          // Preserve existing credentials but ensure protected-resource annotation and labels
+          console.log(`  Updating existing app-credentials Secret: ${appCredentialsSecretName}`);
+          
+          // Clone existing Secret and add protections
+          // CRITICAL: Remove ownerReferences to prevent garbage collection
+          const updatedSecret = {
+            ...existingSecret,
+            metadata: {
+              ...existingSecret.metadata,
+              labels: {
+                ...(existingSecret.metadata.labels || {}),
+                [LABELS.RESOURCE_TYPE]: RESOURCE_TYPES.APP_CREDENTIALS_SECRET
+              },
+              annotations: {
+                ...(existingSecret.metadata.annotations || {}),
+                [ANNOTATIONS.PROTECTED_RESOURCE]: 'true'
+              },
+              // Remove fields that enable garbage collection (use null for JSON serialization)
+              ownerReferences: null,
+              managedFields: null
+            }
+          };
+          
+          response.attachments.push(updatedSecret);
           
           // Extract credentials for Job rendering
           const secretData = existingSecret.data || {};
@@ -295,12 +317,14 @@ function renderAppCredentialsSecret(tenantId, namespace, appCredentials, labels)
         'app.kubernetes.io/component': 'app-credentials',
         'app.kubernetes.io/managed-by': 'metacontroller',
         'ns.mdn.io/decorator': 'storage-credentials',
-        'ns.mdn.io/credential-type': 'application'
+        'ns.mdn.io/credential-type': 'application',
+        [LABELS.RESOURCE_TYPE]: RESOURCE_TYPES.APP_CREDENTIALS_SECRET
       },
       annotations: {
         'ns.mdn.io/created-at': new Date().toISOString(),
         'ns.mdn.io/tenant': tenantId,
-        'ns.mdn.io/description': 'MongoDB credentials for Nightscout application pods'
+        'ns.mdn.io/description': 'MongoDB credentials for Nightscout application pods',
+        [ANNOTATIONS.PROTECTED_RESOURCE]: 'true'
       }
     },
     type: 'Opaque',

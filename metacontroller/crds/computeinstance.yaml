@@ -33,7 +33,6 @@ spec:
             spec:
               type: object
               required:
-                - selector
                 - storageAccountRef
               properties:
                 selector:
