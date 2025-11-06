@@ -146,6 +146,10 @@ The platform employs a **CRD-based two-composite architecture** (Storage and Com
 - Added `planProtectedAssets` stage - handles PVCs and mongo-auth Secret WITHOUT ownerReferences
 - Backward compatible - parents without selector use unchanged legacy behavior
 - Protected resources receive correct labels and annotations on creation
+- **2025-11-06 Update**: Enhanced mongo-auth Secret protection
+  - New secrets created with `ownerReferences: null` in metadata (template_initial_storage_secret)
+  - Existing secrets cloned and stripped of ownerReferences/managedFields (planProtectedAssets)
+  - Matches decorator protection pattern for consistency across all credential secrets
 
 **Decorator Protection Enhancement** (storage-credentials-decorator-sync.js):
 - Now protects EXISTING app-credentials Secrets (not just new ones)
@@ -157,6 +161,10 @@ The platform employs a **CRD-based two-composite architecture** (Storage and Com
 - Updated compositeController helper to support relatedResources parameter
 - Added selector-based discovery of PVCs, ConfigMaps, and ComputeInstances to storageComposite
 - Webhook receives existing protected resources via `related` field for adoption/tracking
+- **2025-11-06 Update**: Moved mongo-auth Secrets from childResources to relatedResources
+  - Removed `{ apiVersion: 'v1', resource: 'secrets' }` from childResources
+  - Added Secrets to relatedResources with label selector `storage.nightscout.org/account`
+  - Enables selector-based adoption and orphaning pattern for mongo-auth Secrets
 
 **Constants & Conventions** (constants.js):
 - Defined finalizers: `storage.nightscout.io/finalizer`, `compute.nightscout.io/finalizer`
