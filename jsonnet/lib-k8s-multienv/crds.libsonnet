@@ -76,6 +76,42 @@
                   type: 'object',
                   required: ['mongodbVersion'],
                   properties: {
+                    selector: {
+                      type: 'object',
+                      description: 'Label selector for resources managed by this StorageAccount',
+                      properties: {
+                        matchLabels: {
+                          type: 'object',
+                          additionalProperties: {
+                            type: 'string',
+                          },
+                          description: 'Map of label key-value pairs that must match',
+                        },
+                        matchExpressions: {
+                          type: 'array',
+                          description: 'List of label selector requirements',
+                          items: {
+                            type: 'object',
+                            required: ['key', 'operator'],
+                            properties: {
+                              key: {
+                                type: 'string',
+                              },
+                              operator: {
+                                type: 'string',
+                                enum: ['In', 'NotIn', 'Exists', 'DoesNotExist'],
+                              },
+                              values: {
+                                type: 'array',
+                                items: {
+                                  type: 'string',
+                                },
+                              },
+                            },
+                          },
+                        },
+                      },
+                    },
                     storageType: {
                       type: 'string',
                       description: 'Storage type (dedicated creates new MongoDB, shared uses existing)',
@@ -297,6 +333,42 @@
                   type: 'object',
                   required: ['storageAccountRef'],
                   properties: {
+                    selector: {
+                      type: 'object',
+                      description: 'Label selector for resources managed by this ComputeInstance',
+                      properties: {
+                        matchLabels: {
+                          type: 'object',
+                          additionalProperties: {
+                            type: 'string',
+                          },
+                          description: 'Map of label key-value pairs that must match',
+                        },
+                        matchExpressions: {
+                          type: 'array',
+                          description: 'List of label selector requirements',
+                          items: {
+                            type: 'object',
+                            required: ['key', 'operator'],
+                            properties: {
+                              key: {
+                                type: 'string',
+                              },
+                              operator: {
+                                type: 'string',
+                                enum: ['In', 'NotIn', 'Exists', 'DoesNotExist'],
+                              },
+                              values: {
+                                type: 'array',
+                                items: {
+                                  type: 'string',
+                                },
+                              },
+                            },
+                          },
+                        },
+                      },
+                    },
                     storageAccountRef: {
                       type: 'object',
                       description: 'Reference to StorageAccount providing MongoDB',
