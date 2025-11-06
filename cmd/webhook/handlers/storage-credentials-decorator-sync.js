@@ -34,159 +34,261 @@
 const crypto = require('crypto');
 const { ANNOTATIONS, LABELS, RESOURCE_TYPES } = require('./constants');
 
+/**
+ * Create storage credentials decorator sync handler with pipeline pattern
+ */
 function createStorageCredentialsDecoratorSync(config) {
-  return async function storageCredentialsDecoratorSync(req, res) {
+  
+  /**
+   * Stage 1: Initialize context from webhook request
+   * Extracts ComputeInstance, related resources, and attachments
+   * Sets up req/res objects for pipeline
+   */
+  function initializeContext(req, res, next) {
     const { object: computeInstance, related, attachments } = req.body;
     
-    const tenantId = computeInstance.metadata.name;
-    const namespace = computeInstance.metadata.namespace;
-    const spec = computeInstance.spec || {};
-    const storageAccountName = spec.storageAccountRef?.name;
-    const storageAccountLabel = computeInstance.metadata.labels?.['storage.nightscout.org/account'];
+    req.computeInstance = computeInstance;
+    req.related = related;
+    req.attachments = attachments;
+    req.tenantId = computeInstance.metadata.name;
+    req.namespace = computeInstance.metadata.namespace;
+    req.spec = computeInstance.spec || {};
+    req.status = computeInstance.status || {};
     
-    console.log('Storage credentials decorator sync for tenant:', tenantId);
+    // Extract storage account reference (supports both spec and label)
+    req.storageAccountName = req.spec.storageAccountRef?.name;
+    req.storageAccountLabel = computeInstance.metadata.labels?.['storage.nightscout.org/account'];
     
-    try {
-      const response = {
-        attachments: []
+    // Initialize response
+    res.attachments = [];
+    
+    console.log('Storage credentials decorator sync for tenant:', req.tenantId);
+    
+    return next();
+  }
+  
+  /**
+   * Stage 2: Discover StorageAccount from relatedResources
+   * Supports both spec.storageAccountRef.name and label-based discovery
+   * Handles transient API failures by preserving existing attachments
+   */
+  function discoverStorageAccount(req, res, next) {
+    const storageAccount = findStorageAccount(
+      req.related,
+      req.storageAccountName,
+      req.storageAccountLabel
+    );
+    
+    if (!storageAccount) {
+      console.log(`  StorageAccount not found (name: ${req.storageAccountName}, label: ${req.storageAccountLabel})`);
+      console.log('  Preserving existing attachments to prevent deletion');
+      
+      // CRITICAL: Preserve existing attachments during transient API failures
+      // This prevents Metacontroller from deleting Secrets and Jobs
+      const preserved = collectExistingAttachments(req.attachments);
+      res.attachments.push(...preserved);
+      
+      // Early exit - skip remaining pipeline stages
+      res.send({ attachments: res.attachments });
+      return;
+    }
+    
+    req.storageAccount = storageAccount;
+    req.storageType = storageAccount.spec?.storageType || 'dedicated';
+    req.storageAccountId = storageAccount.metadata.name;
+    req.databaseName = generateDatabaseName(req.storageAccountId);
+    
+    console.log(`  Storage account: ${req.storageAccountId}, type: ${req.storageType}, database: ${req.databaseName}`);
+    
+    return next();
+  }
+  
+  /**
+   * Stage 3: Collect and index existing attachments
+   * Indexes Secrets and Jobs for efficient lookup
+   */
+  function collectAttachments(req, res, next) {
+    req.existingSecrets = req.attachments['Secret.v1'] || {};
+    req.existingJobs = req.attachments['Job.batch/v1'] || {};
+    
+    req.appCredentialsSecretName = `${req.tenantId}-app-credentials`;
+    req.existingSecret = req.existingSecrets[req.appCredentialsSecretName];
+    
+    console.log(`  Existing app-credentials Secret: ${req.existingSecret ? 'found' : 'not found'}`);
+    
+    return next();
+  }
+  
+  /**
+   * Stage 4: Plan credentials Secret (create/update/skip)
+   * Handles dedicated vs shared storage modes
+   * Protects existing Secrets from garbage collection
+   */
+  function planCredentialsSecret(req, res, next) {
+    // Skip for shared storage mode
+    if (req.storageType !== 'dedicated') {
+      console.log(`  Shared storage mode - skipping credential creation`);
+      req.credentials = null;
+      return next();
+    }
+    
+    console.log(`  Dedicated storage mode - managing app credentials`);
+    
+    let username, password;
+    
+    if (req.existingSecret) {
+      // Existing Secret found - preserve credentials and add protections
+      console.log(`  Updating existing app-credentials Secret: ${req.appCredentialsSecretName}`);
+      
+      // Clone Secret and strip garbage collection metadata
+      const updatedSecret = {
+        ...req.existingSecret,
+        metadata: {
+          ...req.existingSecret.metadata,
+          labels: {
+            ...(req.existingSecret.metadata.labels || {}),
+            [LABELS.RESOURCE_TYPE]: RESOURCE_TYPES.APP_CREDENTIALS_SECRET
+          },
+          annotations: {
+            ...(req.existingSecret.metadata.annotations || {}),
+            [ANNOTATIONS.PROTECTED_RESOURCE]: 'true'
+          },
+          // CRITICAL: Remove ownerReferences (use null for JSON serialization)
+          ownerReferences: null,
+          managedFields: null
+        }
       };
       
-      // Find StorageAccount from related resources
-      // Supports both spec.storageAccountRef.name and label-based discovery
-      const storageAccount = findStorageAccount(related, storageAccountName, storageAccountLabel);
+      res.attachments.push(updatedSecret);
       
-      if (!storageAccount) {
-        console.log(`  StorageAccount not found (name: ${storageAccountName}, label: ${storageAccountLabel}) - preserving existing attachments`);
-        
-        // CRITICAL: Preserve existing attachments to prevent Metacontroller from deleting them
-        // This handles transient API issues, related resource discovery delays, or legacy configs
-        const existingAttachments = collectExistingAttachments(attachments);
-        response.attachments.push(...existingAttachments);
-        
-        res.send(response);
+      // Extract credentials for Job rendering
+      const secretData = req.existingSecret.data || {};
+      username = Buffer.from(secretData.MONGO_USERNAME || '', 'base64').toString('utf-8');
+      password = Buffer.from(secretData.MONGO_PASSWORD || '', 'base64').toString('utf-8');
+      
+    } else {
+      // First cycle - generate new credentials
+      console.log(`  First cycle - generating new app credentials`);
+      
+      username = generateUsername(req.tenantId);
+      password = generateSecurePassword(32);
+      
+      const mongoHost = `mongo-${req.databaseName}`;
+      const mongoPort = '27017';
+      
+      const appCredentials = generateAppCredentials(
+        req.tenantId,
+        mongoHost,
+        mongoPort,
+        req.databaseName,
+        username,
+        password
+      );
+      
+      const secret = renderAppCredentialsSecret(
+        req.tenantId,
+        req.namespace,
+        appCredentials,
+        req.computeInstance.metadata.labels
+      );
+      
+      res.attachments.push(secret);
+    }
+    
+    // Store credentials for Job rendering
+    req.credentials = username && password ? { username, password } : null;
+    
+    return next();
+  }
+  
+  /**
+   * Stage 5: Plan user initialization Job (create/skip)
+   * Only renders Job if UserInitialized condition is not True
+   * Preserves completed/running/failed Jobs
+   */
+  function planUserInitJob(req, res, next) {
+    // Skip if no credentials (shared storage or missing data)
+    if (!req.credentials) {
+      return next();
+    }
+    
+    // Check if user already initialized
+    const userInitialized = req.status.conditions?.find(
+      c => c.type === 'UserInitialized' && c.status === 'True'
+    );
+    
+    if (userInitialized) {
+      console.log(`  User already initialized - skipping Job creation`);
+      return next();
+    }
+    
+    console.log(`  User not initialized - rendering create-user Job`);
+    
+    const createUserJob = renderCreateUserJob(
+      req.tenantId,
+      req.namespace,
+      req.storageAccountId,
+      req.databaseName,
+      req.credentials.username,
+      req.credentials.password,
+      req.computeInstance.metadata.labels,
+      config
+    );
+    
+    res.attachments.push(createUserJob);
+    
+    return next();
+  }
+  
+  /**
+   * Stage 6: Assemble final response
+   * Sends attachments back to Metacontroller
+   */
+  function assembleResponse(req, res, next) {
+    res.send({ attachments: res.attachments });
+  }
+  
+  // Define pipeline stages
+  const pipeline = [
+    initializeContext,
+    discoverStorageAccount,
+    collectAttachments,
+    planCredentialsSecret,
+    planUserInitJob,
+    assembleResponse
+  ];
+  
+  // Return async handler that executes pipeline
+  return async function storageCredentialsDecoratorSync(req, res) {
+    let currentStage = 0;
+    
+    function next(err) {
+      if (err) {
+        console.error('Error in storage credentials decorator sync:', err);
+        return res.send(500, { error: err.message });
+      }
+      
+      if (currentStage >= pipeline.length) {
         return;
       }
       
-      const storageType = storageAccount.spec?.storageType || 'dedicated';
-      // CRITICAL: Use storageAccount.metadata.name for database name generation
-      // This must match the storage composite's naming to connect to correct MongoDB Service
-      const storageAccountId = storageAccount.metadata.name;
-      const databaseName = generateDatabaseName(storageAccountId);
+      const handler = pipeline[currentStage++];
       
-      console.log(`  Storage account: ${storageAccountId}, type: ${storageType}, database: ${databaseName}`);
-      
-      // Check for existing app-credentials Secret (first-cycle-only pattern)
-      const appCredentialsSecretName = `${tenantId}-app-credentials`;
-      const existingSecret = attachments['Secret.v1']?.[appCredentialsSecretName];
-      
-      // DEDICATED STORAGE MODE: Create per-tenant credentials
-      if (storageType === 'dedicated') {
-        console.log(`  Dedicated storage mode - managing app credentials`);
-        
-        let username, password;
-        
-        if (existingSecret) {
-          // Preserve existing credentials but ensure protected-resource annotation and labels
-          console.log(`  Updating existing app-credentials Secret: ${appCredentialsSecretName}`);
-          
-          // Clone existing Secret and add protections
-          // CRITICAL: Remove ownerReferences to prevent garbage collection
-          const updatedSecret = {
-            ...existingSecret,
-            metadata: {
-              ...existingSecret.metadata,
-              labels: {
-                ...(existingSecret.metadata.labels || {}),
-                [LABELS.RESOURCE_TYPE]: RESOURCE_TYPES.APP_CREDENTIALS_SECRET
-              },
-              annotations: {
-                ...(existingSecret.metadata.annotations || {}),
-                [ANNOTATIONS.PROTECTED_RESOURCE]: 'true'
-              },
-              // Remove fields that enable garbage collection (use null for JSON serialization)
-              ownerReferences: null,
-              managedFields: null
-            }
-          };
-          
-          response.attachments.push(updatedSecret);
-          
-          // Extract credentials for Job rendering
-          const secretData = existingSecret.data || {};
-          username = Buffer.from(secretData.MONGO_USERNAME || '', 'base64').toString('utf-8');
-          password = Buffer.from(secretData.MONGO_PASSWORD || '', 'base64').toString('utf-8');
-        } else {
-          // First cycle - generate new credentials
-          console.log(`  First cycle - generating new app credentials for tenant ${tenantId}`);
-          username = generateUsername(tenantId);
-          password = generateSecurePassword(32);
-          
-          const mongoHost = `mongo-${databaseName}`;
-          const mongoPort = '27017';
-          
-          const appCredentials = generateAppCredentials(
-            tenantId,
-            mongoHost,
-            mongoPort,
-            databaseName,
-            username,
-            password
-          );
-          
-          const secret = renderAppCredentialsSecret(
-            tenantId,
-            namespace,
-            appCredentials,
-            computeInstance.metadata.labels
-          );
-          
-          response.attachments.push(secret);
-        }
-        
-        // Check if user initialization is needed
-        if (username && password) {
-          const userInitialized = computeInstance.status?.conditions?.find(
-            c => c.type === 'UserInitialized' && c.status === 'True'
-          );
-          
-          if (!userInitialized) {
-            console.log(`  User not initialized - rendering create-user Job`);
-            const createUserJob = renderCreateUserJob(
-              tenantId,
-              namespace,
-              storageAccountId,
-              databaseName,
-              username,
-              password,
-              computeInstance.metadata.labels,
-              config
-            );
-            response.attachments.push(createUserJob);
-          }
-        }
+      try {
+        handler(req, res, next);
+      } catch (error) {
+        console.error('Error in storage credentials decorator sync:', error);
+        res.send(500, { error: error.message });
       }
-      
-      // SHARED STORAGE MODE: Skip credential creation
-      else if (storageType === 'shared') {
-        console.log(`  Shared storage mode - skipping credential creation (use ConfigMap)`);
-        
-        // Check for migration annotation
-        const migrationRequested = computeInstance.metadata?.annotations?.['nightscout.io/migrate-to-dedicated'] === 'true';
-        
-        if (migrationRequested) {
-          console.log(`  Migration annotation detected - this would trigger shared → dedicated migration`);
-          // TODO: Implement migration Job rendering
-          // Would read ConfigMap for source URI, create new credentials, render migration Job
-        }
-      }
-      
-      res.send(response);
-    } catch (error) {
-      console.error('Error in storage credentials decorator sync:', error);
-      res.send(500, { error: error.message });
     }
+    
+    next();
   };
 }
+
+// ============================================================================
+// Helper Functions
+// ============================================================================
 
 /**
  * Find StorageAccount CRD from related resources
@@ -205,7 +307,6 @@ function findStorageAccount(related, storageAccountName, storageAccountLabel) {
   }
   
   // Fallback: search by storage account label
-  // This handles legacy ComputeInstances that only have the label
   if (storageAccountLabel) {
     for (const [name, sa] of Object.entries(storageAccounts)) {
       const saLabel = sa.metadata?.labels?.['storage.nightscout.org/account'];
@@ -221,7 +322,7 @@ function findStorageAccount(related, storageAccountName, storageAccountLabel) {
 
 /**
  * Collect existing attachments to preserve during transient failures
- * This prevents Metacontroller from deleting Secrets and Jobs when StorageAccount lookup fails
+ * Prevents Metacontroller from deleting Secrets and Jobs when StorageAccount lookup fails
  */
 function collectExistingAttachments(attachments) {
   const preserved = [];

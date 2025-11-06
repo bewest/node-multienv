@@ -90,6 +90,15 @@ The platform employs a **CRD-based two-composite architecture** (Storage and Com
   - Decorator checks `storageAccount.spec.storageType`
   - Only creates credentials when storageType === 'dedicated'
   - Allows operators to switch storage modes independently
+- **Pipeline Architecture**: Refactored to middleware-style pipeline pattern (similar to storage-composite)
+  - **Stage 1: initializeContext** - Extract ComputeInstance, related resources, attachments
+  - **Stage 2: discoverStorageAccount** - Find StorageAccount via relatedResources (supports spec ref and label)
+  - **Stage 3: collectAttachments** - Index existing Secrets and Jobs for efficient lookup
+  - **Stage 4: planCredentialsSecret** - Decide create/update/skip for app-credentials Secret
+  - **Stage 5: planUserInitJob** - Render create-user Job if UserInitialized condition not True
+  - **Stage 6: assembleResponse** - Finalize attachments array and send to Metacontroller
+  - Each stage uses req/res/next pattern for composable logic
+  - Enables future extension: add new stages without touching existing logic
 - **Integration**: 
   - Created `cmd/webhook/handlers/storage-credentials-decorator-sync.js`
   - Added DecoratorController manifest in `metacontroller.libsonnet` with relatedResources
