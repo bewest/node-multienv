@@ -47,6 +47,7 @@ const config = {
 
   // Container commands
   commands: {
+    podHealthcheck: process.env.POD_HEALTHCHECK_COMMAND || 'tenant-pod-healthcheck',
     mongodb: parseArray(process.env.MONGODB_COMMAND, ['mongod', '--replSet', 'rs0', '--bind_ip_all']),
     initReplicaSet: parseArray(process.env.INIT_REPLICA_SET_COMMAND, ['init-replica-set.sh']),
     migration: parseArray(process.env.MIGRATION_COMMAND, ['migrate-tenant-storage']),

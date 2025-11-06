@@ -303,7 +303,6 @@ function renderNightscout(parent, config) {
   const nsImage = parent.data.NS_IMAGE || config.images.nightscout;
   const nsImagePullPolicy = parent.data.NS_IMAGE_PULL_POLICY || config.imagePullPolicies.nightscout;
   const nsReplicas = parseInt(parent.data.NS_REPLICAS || '1');
-  const nsServiceType = parent.data.NS_SERVICE_TYPE || 'ClusterIP';
   
   // Resource limits (tenant-specific overrides config defaults)
   const nsCpuRequest = parent.data.NS_CPU_REQUEST || config.resources.nightscout.requests.cpu;
@@ -319,6 +318,7 @@ function renderNightscout(parent, config) {
     ? parent.data.POD_HEALTHCHECK_ENABLED !== 'false'
     : config.podHealthcheck.enabled;
   const healthCheckImage = parent.data.POD_HEALTHCHECK_IMAGE || config.images.podHealthcheck;
+  const healthCheckCommand = parent.data.POD_HEALTHCHECK_COMMAND || config.commands.podHealthcheck;
   const healthCheckImagePullPolicy = parent.data.POD_HEALTHCHECK_IMAGE_PULL_POLICY || config.imagePullPolicies.podHealthcheck;
   const healthCheckPort = parseInt(parent.data.POD_HEALTHCHECK_PORT || String(config.podHealthcheck.port));
   const healthCheckCpuRequest = parent.data.POD_HEALTHCHECK_CPU_REQUEST || config.resources.podHealthcheck.requests.cpu;
@@ -397,16 +397,29 @@ function renderNightscout(parent, config) {
         // Gen 4 Two-Secret Architecture: Use envFrom to project app-credentials Secret
         // The app-credentials Secret contains MONGODB_URI and all MongoDB connection details
         // This follows the principle of least privilege - Nightscout never sees root credentials
-        envFrom: parent.data.APP_CREDENTIALS_SECRET ? [
+        envFrom: (parent.data.APP_CREDENTIALS_SECRET ? [
           {
             secretRef: {
               name: parent.data.APP_CREDENTIALS_SECRET
             }
           }
-        ] : undefined,
+        ] : []).concat([
+          {
+            secretRef: {
+              name: `${tenantId}-secrets`
+            , optional: true
+            },
+          },
+          {
+            configMapRef: {
+              name: tenantId
+            , optional: true
+            }
+          }
+        ]),
         // Legacy Gen 3 fallback: Individual env vars with secretKeyRef
         // Kept for backward compatibility during migration
-        env: parent.data.APP_CREDENTIALS_SECRET ? undefined : [
+        env: !parent.data.APP_CREDENTIALS_SECRET ? [ ] : [
           {
             name: 'MONGO_CONNECTION',
             value: `mongodb://$(MONGO_USER):$(MONGO_PASS)@${mongoHost}:27017/$(MONGO_DB)?replicaSet=rs0`
@@ -456,6 +469,7 @@ function renderNightscout(parent, config) {
       containers.push({
         name: 'pod-healthcheck',
         image: healthCheckImage,
+        args: [healthCheckCommand],
         imagePullPolicy: healthCheckImagePullPolicy,
         ports: [
           {
@@ -525,30 +539,6 @@ function renderNightscout(parent, config) {
     return containers;
   }
 
-  const service = {
-    apiVersion: 'v1',
-    kind: 'Service',
-    metadata: {
-      name: serviceName,
-      namespace: namespace,
-      labels: standardLabels('application')
-    },
-    spec: {
-      type: nsServiceType,
-      selector: {
-        'app.kubernetes.io/name': 'nightscout',
-        'app.kubernetes.io/instance': tenantId
-      },
-      ports: [
-        {
-          name: 'http',
-          port: 80,
-          targetPort: 1337
-        }
-      ]
-    }
-  };
-
   const pdb = {
     apiVersion: 'policy/v1',
     kind: 'PodDisruptionBudget',
@@ -568,7 +558,7 @@ function renderNightscout(parent, config) {
     }
   };
 
-  resources.push(deployment, service, pdb);
+  resources.push(deployment, pdb);
   return resources;
 }
 

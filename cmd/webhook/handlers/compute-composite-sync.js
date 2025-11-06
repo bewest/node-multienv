@@ -53,7 +53,7 @@ function createComputeCompositeSync(config) {
           status: 'False',
           reason: 'StorageAccountRefMissing',
           message: `spec.storageAccountRef.name is required`,
-          lastTransitionTime: new Date().toISOString()
+          // lastTransitionTime: new Date().toISOString()
         }]
       };
       res.send(response);
@@ -73,7 +73,7 @@ function createComputeCompositeSync(config) {
           status: 'False',
           reason: 'StorageAccountNotFound',
           message: `StorageAccount ${storageAccountName} not found`,
-          lastTransitionTime: new Date().toISOString()
+          // lastTransitionTime: new Date().toISOString()
         }]
       };
       res.send(response);
@@ -83,7 +83,8 @@ function createComputeCompositeSync(config) {
     // Find app-credentials Secret from related resources (for Nightscout credentials)
     const appCredentialsSecret = findAppCredentialsSecret(related, storageAccountLabel);
     
-    if (!appCredentialsSecret) {
+    if (storageAccount.spec.storageType == 'dedicated' && !appCredentialsSecret) {
+      // TODO: Maybe renderCreateUserJob create-user
       console.warn(`App credentials Secret not found for account: ${storageAccountLabel}`);
       response.status = {
         phase: 'Pending',
@@ -93,7 +94,7 @@ function createComputeCompositeSync(config) {
           status: 'False',
           reason: 'AppCredentialsNotFound',
           message: `App credentials Secret not found for account ${storageAccountLabel}. Ensure StorageAccount is ready.`,
-          lastTransitionTime: new Date().toISOString()
+          // lastTransitionTime: new Date().toISOString()
         }]
       };
       res.send(response);
@@ -193,7 +194,7 @@ function checkMongoReadinessFromRelated(related, storageAccountLabel, storageAcc
         message: ready 
           ? `StorageAccount is ready`
           : `Waiting for StorageAccount to become ready (current phase: ${phase})`,
-        lastTransitionTime: new Date().toISOString()
+        // lastTransitionTime: new Date().toISOString()
       }
     };
   }
@@ -207,7 +208,7 @@ function checkMongoReadinessFromRelated(related, storageAccountLabel, storageAcc
         status: 'False',
         reason: 'StatefulSetNotFound',
         message: 'MongoDB StatefulSet not found in related resources',
-        lastTransitionTime: new Date().toISOString()
+        // lastTransitionTime: new Date().toISOString()
       }
     };
   }
@@ -232,7 +233,7 @@ function checkMongoReadinessFromRelated(related, storageAccountLabel, storageAcc
           message: ready 
             ? `MongoDB StatefulSet is ready (${readyReplicas}/${replicas} replicas)`
             : `Waiting for MongoDB pods (${readyReplicas}/${replicas} replicas ready)`,
-          lastTransitionTime: new Date().toISOString()
+          // lastTransitionTime: new Date().toISOString()
         }
       };
     }
@@ -245,7 +246,7 @@ function checkMongoReadinessFromRelated(related, storageAccountLabel, storageAcc
       status: 'False',
       reason: 'StatefulSetNotFound',
       message: `MongoDB StatefulSet for storage account ${storageAccountLabel} not found`,
-      lastTransitionTime: new Date().toISOString()
+      // lastTransitionTime: new Date().toISOString()
     }
   };
 }
@@ -259,7 +260,7 @@ function enrichWithStorageInfo(parent, storageAccount, appCredentialsSecret, sto
   
   // Decode app credentials to get MONGO_HOST (for reference)
   const appCredentials = {};
-  if (appCredentialsSecret.data) {
+  if (appCredentialsSecret && appCredentialsSecret.data) {
     Object.keys(appCredentialsSecret.data).forEach(key => {
       appCredentials[key] = Buffer.from(appCredentialsSecret.data[key], 'base64').toString('utf-8');
     });
@@ -270,8 +271,8 @@ function enrichWithStorageInfo(parent, storageAccount, appCredentialsSecret, sto
     data: {
       TENANT_ID: parent.metadata.name,
       NS_IMAGE: spec.nightscoutImage || 'nightscout/cgm-remote-monitor:latest',
-      NS_REPLICAS: String(spec.replicas || 2),
-      APP_CREDENTIALS_SECRET: appCredentialsSecret.metadata.name,
+      NS_REPLICAS: String(spec.replicas || 1),
+      // APP_CREDENTIALS_SECRET: appCredentialsSecret.metadata.name,
       MONGO_HOST: appCredentials.MONGO_HOST || `${storageAccountLabel}-mongo`,
       STORAGE_ACCOUNT: storageAccountLabel,
       CDC_ENABLED: spec.cdc?.enabled ? 'true' : 'false',
@@ -301,7 +302,7 @@ function buildStatus(parent, state) {
     message: allReady 
       ? 'Tenant is ready and operational'
       : 'Waiting for MongoDB to become ready',
-    lastTransitionTime: new Date().toISOString()
+    // lastTransitionTime: new Date().toISOString()
   });
   
   // Determine phase
