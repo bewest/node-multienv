@@ -9,6 +9,7 @@ const createComputeCompositeSync = require('./handlers/compute-composite-sync');
 const createComputeCompositeCustomize = require('./handlers/compute-composite-customize');
 const createDecoratorSync = require('./handlers/decorator-sync');
 const createDecoratorFinalize = require('./handlers/decorator-finalize');
+const { createStorageCredentialsDecoratorSync } = require('./handlers/storage-credentials-decorator-sync');
 
 // Create handlers with config
 const storageCompositeSync = createStorageCompositeSync(config);
@@ -17,6 +18,7 @@ const computeCompositeSync = createComputeCompositeSync(config);
 const computeCompositeCustomize = createComputeCompositeCustomize(config);
 const decoratorSync = createDecoratorSync(config);
 const decoratorFinalize = createDecoratorFinalize(config);
+const storageCredentialsDecoratorSync = createStorageCredentialsDecoratorSync(config);
 
 const server = restify.createServer({
   name: config.server.name,
@@ -40,18 +42,21 @@ server.use((req, res, next) => {
   next();
 });
 
-// Gen 4: Two-Composite Architecture
-// Storage composite: Secret → MongoDB StatefulSet + Migration Jobs
+// Gen 4: Three-Controller Architecture
+// Storage composite: StorageAccount CRD → MongoDB StatefulSet + Migration Jobs
 server.post('/composite/storage/customize', storageCompositeCustomize);
 server.post('/composite/storage/sync', storageCompositeSync);
 
-// Compute composite: ConfigMap → Nightscout Deployment + CDC resources
+// Compute composite: ComputeInstance CRD → Nightscout Deployment + CDC resources
 server.post('/composite/compute/customize', computeCompositeCustomize);
 server.post('/composite/compute/sync', computeCompositeSync);
 
 // Decorator: PVC backup policy enforcement
 server.post('/decorator/sync', decoratorSync);
 server.post('/decorator/finalize', decoratorFinalize);
+
+// Decorator: Storage credentials management (ComputeInstance → App Credentials + User Init)
+server.post('/decorator/storage-credentials/sync', storageCredentialsDecoratorSync);
 
 server.get('/health', (req, res, next) => {
   res.send({ status: 'healthy', timestamp: new Date().toISOString() });
@@ -60,13 +65,14 @@ server.get('/health', (req, res, next) => {
 
 server.listen(port, '0.0.0.0', () => {
   console.log(`Metacontroller webhook server listening on port ${port}`);
-  console.log(`Gen 4: Two-Composite Architecture`);
+  console.log(`Gen 4: Three-Controller Architecture (2 Composites + 2 Decorators)`);
   console.log(`Endpoints:`);
   console.log(`  POST /composite/storage/customize - Storage: Related resource discovery`);
-  console.log(`  POST /composite/storage/sync - Storage: Secret → MongoDB + Migration`);
+  console.log(`  POST /composite/storage/sync - Storage: StorageAccount → MongoDB + Migration`);
   console.log(`  POST /composite/compute/customize - Compute: Related resource discovery`);
-  console.log(`  POST /composite/compute/sync - Compute: ConfigMap → Nightscout + CDC`);
+  console.log(`  POST /composite/compute/sync - Compute: ComputeInstance → Nightscout + CDC`);
   console.log(`  POST /decorator/sync - PVC backup policy`);
   console.log(`  POST /decorator/finalize - PVC cleanup`);
+  console.log(`  POST /decorator/storage-credentials/sync - Credentials: ComputeInstance → App Creds + User Init`);
   console.log(`  GET  /health - Health check`);
 });

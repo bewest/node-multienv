@@ -164,6 +164,42 @@
     ],
   },
 
+  // ClusterRole for storage-credentials decorator
+  // Decorator needs to read CRDs and create Secrets + Jobs as attachments
+  storageCredentialsDecoratorRole(name):: {
+    apiVersion: 'rbac.authorization.k8s.io/v1',
+    kind: 'ClusterRole',
+    metadata: {
+      name: name,
+    },
+    rules: [
+      // Read ComputeInstances and StorageAccounts to determine storage mode
+      {
+        apiGroups: ['nightscout.io'],
+        resources: ['storageaccounts', 'computeinstances'],
+        verbs: ['get', 'list', 'watch'],
+      },
+      // Create/update Secrets (app-credentials attachments)
+      {
+        apiGroups: [''],
+        resources: ['secrets'],
+        verbs: ['get', 'list', 'watch', 'create', 'update', 'patch'],
+      },
+      // Create/update Jobs (user initialization, migration)
+      {
+        apiGroups: ['batch'],
+        resources: ['jobs'],
+        verbs: ['get', 'list', 'watch', 'create', 'update', 'patch'],
+      },
+      // Read ConfigMaps (for migration source detection - Gen 3 legacy)
+      {
+        apiGroups: [''],
+        resources: ['configmaps'],
+        verbs: ['get', 'list', 'watch'],
+      },
+    ],
+  },
+
   // ClusterRoleBinding
   clusterRoleBinding(name, serviceAccountName=name, serviceAccountNamespace='default', roleName=name):: {
     apiVersion: 'rbac.authorization.k8s.io/v1',
@@ -307,6 +343,18 @@
   migrationJobServiceAccount(name, namespace='default', imagePullSecrets=[]):: {
     serviceAccount: $.serviceAccount(name, namespace, imagePullSecrets),
     clusterRole: $.migrationJobRole(name),
+    clusterRoleBinding: $.clusterRoleBinding(
+      name,
+      serviceAccountName=name,
+      serviceAccountNamespace=namespace,
+      roleName=name
+    ),
+  },
+
+  // Convenience: Full RBAC set for storage-credentials decorator
+  storageCredentialsDecoratorServiceAccount(name, namespace='default', imagePullSecrets=[]):: {
+    serviceAccount: $.serviceAccount(name, namespace, imagePullSecrets),
+    clusterRole: $.storageCredentialsDecoratorRole(name),
     clusterRoleBinding: $.clusterRoleBinding(
       name,
       serviceAccountName=name,

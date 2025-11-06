@@ -54,6 +54,7 @@
     name,
     webhookUrl,
     resources,  // Array of { apiVersion, resource, labelSelector }
+    relatedResources=[],  // Optional related resources for discovery
     resyncPeriodSeconds=30,
   ):: {
     apiVersion: 'metacontroller.k8s.io/v1alpha1',
@@ -63,6 +64,7 @@
     },
     spec: {
       resources: resources,
+      [if std.length(relatedResources) > 0 then 'relatedResources']: relatedResources,
       hooks: {
         sync: {
           webhook: {
@@ -152,6 +154,50 @@
       resyncPeriodSeconds=resyncPeriodSeconds,
     ),
 
+  // Storage Credentials Decorator (ComputeInstance → App Credentials + User Init)
+  storageCredentialsDecorator(
+    webhookServiceUrl='http://webhook-service:3000',
+    crdGroup='nightscout.io',
+    crdVersion='v1alpha1',
+    resyncPeriodSeconds=30,
+  )::
+    $.decoratorController(
+      name='storage-credentials-decorator',
+      webhookUrl=webhookServiceUrl + '/decorator/storage-credentials/sync',
+      resources=[
+        {
+          apiVersion: crdGroup + '/' + crdVersion,
+          resource: 'computeinstances',
+          labelSelector: {
+            matchExpressions: [
+              {
+                key: 'storage.nightscout.org/account',
+                operator: 'Exists',
+              },
+            ],
+          },
+        },
+      ],
+      relatedResources=[
+        // Discover StorageAccount to determine storage mode (shared/dedicated)
+        {
+          apiVersion: crdGroup + '/' + crdVersion,
+          resource: 'storageaccounts',
+        },
+        // Discover legacy Gen 3 ConfigMaps for migration detection
+        {
+          apiVersion: 'v1',
+          resource: 'configmaps',
+          labelSelector: {
+            matchLabels: {
+              'role': 'config-as-deploy',
+            },
+          },
+        },
+      ],
+      resyncPeriodSeconds=resyncPeriodSeconds,
+    ),
+
   // Complete controller set
   controllers(
     webhookServiceUrl='http://webhook-service:3000',
@@ -160,6 +206,7 @@
     storageResyncSeconds=30,
     computeResyncSeconds=30,
     pvcResyncSeconds=60,
+    credentialsResyncSeconds=30,
   ):: {
     storage: $.storageComposite(
       webhookServiceUrl=webhookServiceUrl,
@@ -176,6 +223,12 @@
     pvcBackup: $.pvcBackupDecorator(
       webhookUrl=webhookServiceUrl + '/decorator/sync',
       resyncPeriodSeconds=pvcResyncSeconds,
+    ),
+    storageCredentials: $.storageCredentialsDecorator(
+      webhookServiceUrl=webhookServiceUrl,
+      crdGroup=crdGroup,
+      crdVersion=crdVersion,
+      resyncPeriodSeconds=credentialsResyncSeconds,
     ),
   },
 

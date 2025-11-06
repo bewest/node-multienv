@@ -236,9 +236,11 @@ local crds = import 'crds.libsonnet';
     crdVersion='v1alpha1',
     deploymentControllerName='multienv-metactl-controller-sa',
     migrationJobName='migration-job',
+    storageCredentialsDecoratorName='storage-credentials-decorator',
     storageResyncSeconds=30,
     computeResyncSeconds=30,
     pvcResyncSeconds=60,
+    credentialsResyncSeconds=30,
     webhookResources={
       requests: { cpu: '100m', memory: '128Mi' },
       limits: { cpu: '500m', memory: '512Mi' },
@@ -257,6 +259,11 @@ local crds = import 'crds.libsonnet';
     );
     local migrationRbac = rbac.migrationJobServiceAccount(
       migrationJobName,
+      webhookNamespace,
+      imagePullSecrets
+    );
+    local storageCredentialsRbac = rbac.storageCredentialsDecoratorServiceAccount(
+      storageCredentialsDecoratorName,
       webhookNamespace,
       imagePullSecrets
     );
@@ -282,6 +289,12 @@ local crds = import 'crds.libsonnet';
       migration_job_clusterRole: migrationRbac.clusterRole,
       migration_job_clusterRoleBinding: migrationRbac.clusterRoleBinding,
       
+      // ServiceAccount and RBAC for storage-credentials decorator
+      // Permissions: read CRDs, create Secrets + Jobs as attachments
+      storage_credentials_decorator_serviceAccount: storageCredentialsRbac.serviceAccount,
+      storage_credentials_decorator_clusterRole: storageCredentialsRbac.clusterRole,
+      storage_credentials_decorator_clusterRoleBinding: storageCredentialsRbac.clusterRoleBinding,
+      
       // Webhook Deployment and Service
       webhook: webhook.stack(
         name=webhookName,
@@ -295,7 +308,7 @@ local crds = import 'crds.libsonnet';
         resources=webhookResources,
       ),
       
-      // Metacontroller CRDs (CompositeControllers + DecoratorController)
+      // Metacontroller CRDs (CompositeControllers + DecoratorControllers)
       metacontroller: metacontroller.controllers(
         webhookServiceUrl=webhookUrl,
         crdGroup=crdGroup,
@@ -303,6 +316,7 @@ local crds = import 'crds.libsonnet';
         storageResyncSeconds=storageResyncSeconds,
         computeResyncSeconds=computeResyncSeconds,
         pvcResyncSeconds=pvcResyncSeconds,
+        credentialsResyncSeconds=credentialsResyncSeconds,
       ),
     },
 }
