@@ -291,9 +291,9 @@ local crds = import 'crds.libsonnet';
       
       // ServiceAccount and RBAC for storage-credentials decorator
       // Permissions: read CRDs, create Secrets + Jobs as attachments
-      storage_credentials_decorator_serviceAccount: storageCredentialsRbac.serviceAccount,
-      storage_credentials_decorator_clusterRole: storageCredentialsRbac.clusterRole,
-      storage_credentials_decorator_clusterRoleBinding: storageCredentialsRbac.clusterRoleBinding,
+      storage_credentials_decorator_serviceAccount:: storageCredentialsRbac.serviceAccount,
+      storage_credentials_decorator_clusterRole:: storageCredentialsRbac.clusterRole,
+      storage_credentials_decorator_clusterRoleBinding:: storageCredentialsRbac.clusterRoleBinding,
       
       // Webhook Deployment and Service
       webhook: webhook.stack(

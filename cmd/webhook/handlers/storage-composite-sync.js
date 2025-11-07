@@ -295,13 +295,8 @@ function createStorageCompositeSync(config) {
 
   function render_specified_dedicated (req, res, next) {
     if (req.spec.storageType != 'dedicated') {
+      // if (!migrate-to-dedicated)
       return next( );
-    }
-
-    // Check user initialization state
-    const userInitState = checkUserInitializationState(req.children, req.parent);
-    if (userInitState.condition) {
-      res.status.conditions.push(userInitState.condition)
     }
 
     // Extract credentials from existing Secret for use in Jobs
@@ -311,10 +306,11 @@ function createStorageCompositeSync(config) {
     if (req.storageSecret) {
         
       // Ensure app credentials
-      var updated_secret = ensureNSUserCredentials(req.storageSecret, storageAccount);
-      var nsuserUsername = Buffer.from(secretData.MONGO_USERNAME || '', 'base64').toString('utf-8');
-      var nsuserPassword = Buffer.from(secretData.MONGO_PASSWORD || '', 'base64').toString('utf-8');
-      res.children.push(updated_secret);
+      // var updated_secret = ensureNSUserCredentials(req.storageSecret, storageAccount);
+      // var nsuserUsername = Buffer.from(secretData.MONGO_USERNAME || '', 'base64').toString('utf-8');
+      // var nsuserPassword = Buffer.from(secretData.MONGO_PASSWORD || '', 'base64').toString('utf-8');
+      // res.children.push(updated_secret);
+
       const mongoResources = renderMongoDB(req.storageConfig, databaseName, config);
       res.children.push(...mongoResources);
       // Check if NS user creation is needed

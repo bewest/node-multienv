@@ -99,6 +99,7 @@
       childResources=[
         { apiVersion: 'apps/v1', resource: 'statefulsets' },
         { apiVersion: 'v1', resource: 'services' },
+        { apiVersion: 'v1', resource: 'secrets' },
         { apiVersion: 'batch/v1', resource: 'jobs' },
         { apiVersion: 'policy/v1', resource: 'poddisruptionbudgets' },
       ],
@@ -146,6 +147,7 @@
             ],
           },
         },
+        /*
         // ComputeInstances using this storage (for usage tracking)
         {
           apiVersion: crdGroup + '/' + crdVersion,
@@ -160,6 +162,7 @@
             ],
           },
         },
+        */
       ],
       resyncPeriodSeconds=resyncPeriodSeconds,
     ),
@@ -184,7 +187,7 @@
       },
       childResources=[
         { apiVersion: 'apps/v1', resource: 'deployments' },
-        { apiVersion: 'v1', resource: 'services' },
+        // { apiVersion: 'v1', resource: 'services' },
         // { apiVersion: 'kafka.strimzi.io/v1beta2', resource: 'kafkatopics' },
         // { apiVersion: 'kafka.strimzi.io/v1beta2', resource: 'kafkaconnectors' },
         { apiVersion: 'policy/v1', resource: 'poddisruptionbudgets' },
