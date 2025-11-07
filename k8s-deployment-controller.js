@@ -1005,8 +1005,8 @@ function configure (opts) {
   // Gen 4 Account and site provisioning endpoints (CRD based)
   // StorageAccount CRD endpoints
   server.post('/accounts', storageAccountRoutes.createOrUpdateStorageAccount);
-  server.post('/accounts/:account', storageAccountRoutes.createOrUpdateStorageAccount, format_result);
-  server.get('/accounts/:account', storageAccountRoutes.getStorageAccount, format_result);
+  server.post('/accounts/:account', storageAccountRoutes.createOrUpdateStorageAccount);
+  server.get('/accounts/:account', storageAccountRoutes.getStorageAccount);
   server.get('/accounts', storageAccountRoutes.listStorageAccounts, format_result);
   server.del('/accounts/:account', storageAccountRoutes.deleteStorageAccount);
 

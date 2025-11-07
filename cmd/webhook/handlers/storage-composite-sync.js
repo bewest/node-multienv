@@ -56,13 +56,16 @@ function createStorageCompositeSync(config) {
   function ensure_initialization (req, res, next) {
 
 
+    console.log('req.related', req.related);
+    console.log('req.children', req.children);
     const storageAccount = req.storageAccount;
     // Check if app-credentials Secret already exists (first-cycle-only pattern)
     const appCredentialsSecretName = `${storageAccount}-mongo-auth`;
-    const existingAppSecret = req.children['Secret.v1']?.[appCredentialsSecretName];
+    const existingAppSecret = req.related['Secret.v1']?.[appCredentialsSecretName];
 
     if (!existingAppSecret) {
-      console.log(`  Generating mongo admin credentials for ${storageAccount}`);
+      console.log('storageAccount', storageAccount, 'MISSING SECRET KEY MUST CREATE OUT OF BAND');
+      // console.log(`  Generating mongo admin credentials for ${storageAccount}`);
       
       // Generate new credentials
       const root_username = generateUsername(storageAccount, 'admin');
@@ -75,8 +78,10 @@ function createStorageCompositeSync(config) {
         MONGO_INITDB_DATABASE: databaseName
       };
       var mongo_secret = template_initial_storage_secret(storageAccount, req.storageType, req.spec.tier, stringData);
+      // console.log("SELECTOR", req.spec.selector);
+      // console.log("NEW LABELS", mongo_secret.metadata.labels);
       res.status.phase = 'Pending';
-      res.children.push(mongo_secret);
+      // res.children.push(mongo_secret);
       return next( );
     }
 
@@ -98,7 +103,8 @@ function createStorageCompositeSync(config) {
         labels: {
           'app.kubernetes.io/managed-by': 'metacontroller',
           'storage.nightscout.org/account': accountId,
-          'ns.mdn.io/composite': 'storage'
+          // set to storage to manage as a child, set to key to set as related?
+          'ns.mdn.io/composite': 'key'
         },
         annotations: {
           'ns.mdn.io/storage-type': storageType || config.storage.defaultStorageType,
@@ -128,7 +134,7 @@ function createStorageCompositeSync(config) {
     req.selectorContext = {
       labels: {
         [LABELS.STORAGE_ACCOUNT]: req.storageAccount,
-        ...selector
+        // ...selector
       }
     };
     
@@ -215,7 +221,8 @@ function createStorageCompositeSync(config) {
           labels: {
             ...existingMongoAuth.resource.metadata.labels,
             [LABELS.STORAGE_ACCOUNT]: req.storageAccount,
-            ...req.selectorContext.labels
+            // ...req.selectorContext.labels
+            'ns.mdn.io/composite': 'backup'
           },
           annotations: {
             ...existingMongoAuth.resource.metadata.annotations,
@@ -362,6 +369,7 @@ function createStorageCompositeSync(config) {
     }).value( );
     console.log("ADDING REMAINING CHILDREN not active in current phase", remaining.length, remaining);
     response.children.push(...remaining);
+    console.log("TOTAL CHILDREN", response.children.length, response.children);
     res.send(response);
     return next( );
 
@@ -370,10 +378,10 @@ function createStorageCompositeSync(config) {
   // Compose/configure a list of handlers that operate in a chain or pipeline.
   return [
     pull_objects, 
-    resolveSelectorContext,       // NEW - extract selector labels from parent.spec.selector
+    // resolveSelectorContext,       // NEW - extract selector labels from parent.spec.selector
     collectAttachments,            // NEW - index children and related resources for easy lookup
     ensure_initialization,         // EXISTING - handle mongo-auth secret initialization
-    planProtectedAssets,           // NEW - handle protected resources (PVCs, secrets) without ownerReferences
+    // planProtectedAssets,           // NEW - handle protected resources (PVCs, secrets) without ownerReferences
     render_shared_status,          // EXISTING - handle shared storage type
     render_specified_dedicated,    // EXISTING - handle dedicated storage type
     fmt_metacontroller_webhook     // EXISTING - format response

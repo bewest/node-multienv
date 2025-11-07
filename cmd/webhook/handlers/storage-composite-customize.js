@@ -29,6 +29,15 @@ function createStorageCompositeCustomize(config) {
             }
           },
           {
+            apiVersion: 'v1',
+            resource: 'secrets',
+            labelSelector: {
+              matchLabels: {
+                'storage.nightscout.org/account': storageAccount
+              }
+            }
+          },
+          {
             // Discover tenant ComputeInstances using this storage (for auditing)
             // ComputeInstances must be labeled with storage.nightscout.org/account: <storageaccount-name>
             apiVersion: 'nightscout.io/v1alpha1',

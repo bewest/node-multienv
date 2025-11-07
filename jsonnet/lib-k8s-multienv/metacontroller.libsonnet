@@ -89,6 +89,7 @@
       name='storage-composite',
       syncUrl=webhookServiceUrl + '/composite/storage/sync',
       customizeUrl=webhookServiceUrl + '/composite/storage/customize',
+      generateSelector=false,
       parentResource={
         apiVersion: crdGroup + '/' + crdVersion,
         resource: 'storageaccounts',
@@ -97,12 +98,25 @@
         }
       },
       childResources=[
-        { apiVersion: 'apps/v1', resource: 'statefulsets' },
-        { apiVersion: 'v1', resource: 'services' },
+        { apiVersion: 'apps/v1', resource: 'statefulsets',
+          updateStrategy: {
+            method: 'RollingRecreate'
+          }
+        },
+        { apiVersion: 'v1', resource: 'services',
+          updateStrategy: {
+            method: 'InPlace'
+          }
+        },
         { apiVersion: 'v1', resource: 'secrets' },
         { apiVersion: 'batch/v1', resource: 'jobs' },
-        { apiVersion: 'policy/v1', resource: 'poddisruptionbudgets' },
+        { apiVersion: 'policy/v1', resource: 'poddisruptionbudgets',
+          updateStrategy: {
+            method: 'InPlace'
+          }
+        },
       ],
+      /*
       relatedResources=[
         // Protected resources discovered via selector labels (not owned)
         // PVCs with MongoDB data - must survive parent deletion
@@ -147,7 +161,6 @@
             ],
           },
         },
-        /*
         // ComputeInstances using this storage (for usage tracking)
         {
           apiVersion: crdGroup + '/' + crdVersion,
@@ -162,8 +175,8 @@
             ],
           },
         },
-        */
       ],
+      */
       resyncPeriodSeconds=resyncPeriodSeconds,
     ),
 
@@ -289,7 +302,7 @@
       webhookUrl=webhookServiceUrl + '/decorator/sync',
       resyncPeriodSeconds=pvcResyncSeconds,
     ),
-    storageCredentials: $.storageCredentialsDecorator(
+    storageCredentials:: $.storageCredentialsDecorator(
       webhookServiceUrl=webhookServiceUrl,
       crdGroup=crdGroup,
       crdVersion=crdVersion,
