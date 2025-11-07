@@ -49,8 +49,8 @@ function createStorageCompositeSync(config) {
     res.status = { phase: 'Pending', conditions: [ ] };
 
     // Count tenants using this storage account (from related ComputeInstances)
-    const tenantUsage = countTenantUsage(req.related, req.storageAccount);
-    console.log('Tenant Usage', tenantUsage);
+    // const tenantUsage = countTenantUsage(req.related, req.storageAccount);
+    // console.log('Tenant Usage', tenantUsage);
     return next( );
   }
   function ensure_initialization (req, res, next) {

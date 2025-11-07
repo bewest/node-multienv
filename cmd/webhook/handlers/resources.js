@@ -348,6 +348,7 @@ function renderNightscout(parent, config) {
     'app.kubernetes.io/version': nsVersion,
     'app.kubernetes.io/managed-by': 'metacontroller',
     'ns.mdn.io/tenant': tenantId,
+    'tenant': tenantId,
     'storage.nightscout.org/account': storageAccount,
     ...additionalLabels
   });
