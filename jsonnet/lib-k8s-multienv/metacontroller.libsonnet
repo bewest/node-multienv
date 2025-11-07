@@ -241,6 +241,7 @@
           },
         },
       ],
+      /*
       relatedResources=[
         // Discover StorageAccount to determine storage mode (shared/dedicated)
         {
@@ -258,6 +259,7 @@
           },
         },
       ],
+      */
       resyncPeriodSeconds=resyncPeriodSeconds,
     ),
 
