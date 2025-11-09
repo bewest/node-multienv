@@ -54,6 +54,7 @@ function createStorageCredentialsDecoratorSync(config) {
     req.namespace = computeInstance.metadata.namespace;
     req.spec = computeInstance.spec || {};
     req.status = computeInstance.status || {};
+    req.migrationRequested = req.computeInstance.metadata?.annotations?.['nightscout.io/migrate-to-dedicated'] === 'true';
     
     // Extract storage account reference (supports both spec and label)
     req.storageAccountName = req.spec.storageAccountRef?.name;
@@ -94,7 +95,8 @@ function createStorageCredentialsDecoratorSync(config) {
     }
     
     req.storageAccount = storageAccount;
-    req.storageType = storageAccount.spec?.storageType || 'dedicated';
+    req.storageType = storageAccount.spec?.storageType;
+    req.credentialsRequested = req.storageType == 'dedicated' || req.migrationRequested;
     req.storageAccountId = storageAccount.metadata.name;
     req.databaseName = generateDatabaseName(req.storageAccountId);
     
@@ -126,7 +128,7 @@ function createStorageCredentialsDecoratorSync(config) {
    */
   function planCredentialsSecret(req, res, next) {
     // Skip for shared storage mode
-    if (req.storageType !== 'dedicated') {
+    if (!req.credentialsRequested) {
       console.log(`  Shared storage mode - skipping credential creation`);
       req.credentials = null;
       return next();
@@ -151,11 +153,7 @@ function createStorageCredentialsDecoratorSync(config) {
           },
           annotations: {
             ...(req.existingSecret.metadata.annotations || {}),
-            [ANNOTATIONS.PROTECTED_RESOURCE]: 'true'
           },
-          // CRITICAL: Remove ownerReferences (use null for JSON serialization)
-          ownerReferences: null,
-          managedFields: null
         }
       };
       
@@ -163,6 +161,7 @@ function createStorageCredentialsDecoratorSync(config) {
       
       // Extract credentials for Job rendering
       const secretData = req.existingSecret.data || {};
+      // VERIFY
       username = Buffer.from(secretData.MONGO_USERNAME || '', 'base64').toString('utf-8');
       password = Buffer.from(secretData.MONGO_PASSWORD || '', 'base64').toString('utf-8');
       req.credentials = username && password ? { username, password } : null;

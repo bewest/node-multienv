@@ -119,29 +119,6 @@ function createStorageCompositeSync(config) {
     return secret;
   }
 
-  function resolveSelectorContext (req, res, next) {
-    // Extract selector labels from parent.spec.selector
-    // Handle legacy parents without selector
-    const selector = req.parent.spec?.selector;
-    
-    if (!selector) {
-      console.log('  No selector found in parent spec - using legacy behavior');
-      req.selectorContext = null;
-      return next();
-    }
-    
-    // Build selector context with labels from parent.spec.selector
-    req.selectorContext = {
-      labels: {
-        [LABELS.STORAGE_ACCOUNT]: req.storageAccount,
-        // ...selector
-      }
-    };
-    
-    console.log('  Resolved selector context:', req.selectorContext.labels);
-    return next();
-  }
-
   function collectAttachments (req, res, next) {
     // Index req.children (owned) and req.related (label-selected) into req.attachments
     // This provides easy lookup for protected resources
@@ -193,88 +170,6 @@ function createStorageCompositeSync(config) {
     }
     
     console.log(`  Collected attachments: ${Object.keys(req.attachments.pvcs).length} PVCs, ${Object.keys(req.attachments.secrets).length} Secrets, ${Object.keys(req.attachments.configMaps).length} ConfigMaps`);
-    return next();
-  }
-
-  function planProtectedAssets (req, res, next) {
-    // Only run if selector context is available (new behavior)
-    if (!req.selectorContext) {
-      console.log('  Skipping planProtectedAssets - no selector context');
-      return next();
-    }
-    
-    // Plan protected resources WITHOUT ownerReferences
-    // These resources survive parent deletion for data safety
-    
-    // 1. Handle mongo-auth Secret (protected resource)
-    const mongoAuthSecretName = `${req.storageAccount}-mongo-auth`;
-    const existingMongoAuth = req.attachments.secrets[mongoAuthSecretName];
-    
-    if (existingMongoAuth) {
-      console.log(`  Found existing mongo-auth Secret: ${mongoAuthSecretName} (${existingMongoAuth.source})`);
-      
-      // Clone and strip ownerReferences (like decorator does)
-      const protectedSecret = {
-        ...existingMongoAuth.resource,
-        metadata: {
-          ...existingMongoAuth.resource.metadata,
-          labels: {
-            ...existingMongoAuth.resource.metadata.labels,
-            [LABELS.STORAGE_ACCOUNT]: req.storageAccount,
-            // ...req.selectorContext.labels
-            'ns.mdn.io/composite': 'backup'
-          },
-          annotations: {
-            ...existingMongoAuth.resource.metadata.annotations,
-            [ANNOTATIONS.PROTECTED_RESOURCE]: 'true'
-          },
-          ownerReferences: null,  // CRITICAL: Remove garbage collection
-          managedFields: null
-        }
-      };
-      
-      res.children.push(protectedSecret);
-    } else if (req.storageSecret) {
-      // Secret was created in ensure_initialization, ensure it has protected annotation
-      console.log(`  Using mongo-auth Secret from ensure_initialization`);
-      // The secret is already in res.children from ensure_initialization
-      // Just verify it has the protected annotation (added in template_initial_storage_secret)
-    }
-    
-    // 2. Handle PVCs (protected resources)
-    // PVCs are typically created by StatefulSet volumeClaimTemplates
-    // We check if they exist in attachments (from related resources)
-    // If they exist, we ensure they have correct labels but NO ownerReferences
-    const pvcPattern = new RegExp(`^data-${req.storageAccount}-mongodb-\\d+$`);
-    
-    for (const [pvcName, pvcAttachment] of Object.entries(req.attachments.pvcs)) {
-      if (pvcPattern.test(pvcName)) {
-        console.log(`  Found MongoDB PVC: ${pvcName} (${pvcAttachment.source})`);
-        
-        // Ensure PVC has correct labels (without ownerReferences)
-        const pvc = pvcAttachment.resource;
-        const protectedPVC = {
-          ...pvc,
-          metadata: {
-            ...pvc.metadata,
-            labels: {
-              ...pvc.metadata.labels,
-              [LABELS.STORAGE_ACCOUNT]: req.storageAccount,
-              ...req.selectorContext.labels
-            },
-            annotations: {
-              ...pvc.metadata.annotations,
-              [ANNOTATIONS.PROTECTED_RESOURCE]: 'true'
-            },
-            ownerReferences: undefined  // Explicitly remove ownerReferences
-          }
-        };
-        
-        // Add to response children WITHOUT ownerReferences
-        res.children.push(protectedPVC);
-      }
-    }
-    
     return next();
   }
 
@@ -378,10 +273,8 @@ function createStorageCompositeSync(config) {
   // Compose/configure a list of handlers that operate in a chain or pipeline.
   return [
     pull_objects, 
-    // resolveSelectorContext,       // NEW - extract selector labels from parent.spec.selector
-    collectAttachments,            // NEW - index children and related resources for easy lookup
+    // collectAttachments,            // NEW - index children and related resources for easy lookup
     ensure_initialization,         // EXISTING - handle mongo-auth secret initialization
-    // planProtectedAssets,           // NEW - handle protected resources (PVCs, secrets) without ownerReferences
     render_shared_status,          // EXISTING - handle shared storage type
     render_specified_dedicated,    // EXISTING - handle dedicated storage type
     fmt_metacontroller_webhook     // EXISTING - format response
