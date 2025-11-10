@@ -44,7 +44,7 @@ function createDecoratorSync(config) {
     req.configMap = configMap;
     req.related = related || {};
     req.attachments = attachments || {};
-    req.tenantId = configMap.metadata.labels?.internal_name;
+    req.tenantId = configMap.metadata.labels?.tenant;
     req.namespace = configMap.metadata.namespace;
     
     // Initialize response
@@ -195,7 +195,7 @@ function createDecoratorSync(config) {
     
     // Plan label removal
     res.labels = {
-      role: null,  // Remove config-as-deploy label
+      role: 'dedicated',  // Remove config-as-deploy label
       'nightscout.io/migrated-at': new Date().toISOString()
     };
     
@@ -242,7 +242,7 @@ function createDecoratorSync(config) {
    */
   function customize_userdata_related(req, res, next) {
     const { parent } = req.body;
-    const tenantId = parent.metadata?.labels?.internal_name;
+    const tenantId = parent.metadata?.labels?.tenant;
     
     console.log('Instance userdata decorator customize for ConfigMap:', parent.metadata?.name);
     console.log('  Tenant ID:', tenantId);
