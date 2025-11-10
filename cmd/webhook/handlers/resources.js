@@ -349,6 +349,8 @@ function renderNightscout(parent, config) {
     'app.kubernetes.io/managed-by': 'metacontroller',
     'ns.mdn.io/tenant': tenantId,
     'tenant': tenantId,
+    'internal_name': tenantId,
+    // 'app': 'deployment',
     'storage.nightscout.org/account': storageAccount,
     ...additionalLabels
   });
