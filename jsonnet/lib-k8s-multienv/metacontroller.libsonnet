@@ -57,6 +57,7 @@
     webhookUrl,
     resources,  // Array of { apiVersion, resource, labelSelector }
     relatedResources=[],  // Optional related resources for discovery
+    customizeUrl=null,  // Optional customize hook URL
     resyncPeriodSeconds=30,
   ):: {
     apiVersion: 'metacontroller.k8s.io/v1alpha1',
@@ -68,6 +69,11 @@
       resources: resources,
       [if std.length(relatedResources) > 0 then 'relatedResources']: relatedResources,
       hooks: {
+        [if customizeUrl != null then 'customize']: {
+          webhook: {
+            url: customizeUrl,
+          },
+        },
         sync: {
           webhook: {
             url: webhookUrl,
@@ -276,6 +282,31 @@
       resyncPeriodSeconds=resyncPeriodSeconds,
     ),
 
+  // Instance Userdata Decorator (ConfigMap Migration → Gen 3 to Gen 4 Cutover)
+  instanceUserdataDecorator(
+    webhookServiceUrl='http://webhook-service:3000',
+    crdGroup='nightscout.io',
+    crdVersion='v1alpha1',
+    resyncPeriodSeconds=30,
+  )::
+    $.decoratorController(
+      name='instance-userdata-decorator',
+      webhookUrl=webhookServiceUrl + '/decorator/instance-userdata/sync',
+      customizeUrl=webhookServiceUrl + '/decorator/instance-userdata/customize',
+      resources=[
+        {
+          apiVersion: 'v1',
+          resource: 'configmaps',
+          labelSelector: {
+            matchLabels: {
+              role: 'config-as-deploy',  // Gen 3 ConfigMaps only
+            },
+          },
+        },
+      ],
+      resyncPeriodSeconds=resyncPeriodSeconds,
+    ),
+
   // Complete controller set
   controllers(
     webhookServiceUrl='http://webhook-service:3000',
@@ -285,6 +316,7 @@
     computeResyncSeconds=30,
     pvcResyncSeconds=60,
     credentialsResyncSeconds=30,
+    userdataResyncSeconds=30,
   ):: {
     storage: $.storageComposite(
       webhookServiceUrl=webhookServiceUrl,
@@ -307,6 +339,12 @@
       crdGroup=crdGroup,
       crdVersion=crdVersion,
       resyncPeriodSeconds=credentialsResyncSeconds,
+    ),
+    instanceUserdata:: $.instanceUserdataDecorator(
+      webhookServiceUrl=webhookServiceUrl,
+      crdGroup=crdGroup,
+      crdVersion=crdVersion,
+      resyncPeriodSeconds=userdataResyncSeconds,
     ),
   },
 

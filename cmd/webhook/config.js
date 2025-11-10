@@ -180,6 +180,11 @@ const config = {
     timeout: parseInt(process.env.MIGRATION_TIMEOUT || '3600', 10), // seconds
     backoffLimit: parseInt(process.env.MIGRATION_BACKOFF_LIMIT || '3', 10),
   },
+
+  // Archive configuration for ConfigMap backups
+  archive: {
+    namespace: process.env.ARCHIVE_NAMESPACE || 'archived-configs',
+  },
 };
 
 module.exports = config;
