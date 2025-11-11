@@ -273,7 +273,7 @@ function createDecoratorSync(config) {
         labelSelector: {
           matchExpressions: [
             {
-              key: 'compute.nightscout.org/instance',
+              key: 'nightscout.io/tenant',
               operator: 'In',
               values: [tenantId]
             }

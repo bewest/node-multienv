@@ -111,14 +111,14 @@
         },
         { apiVersion: 'v1', resource: 'services',
           updateStrategy: {
-            method: 'InPlace'
+            method: 'RollingInPlace'
           }
         },
         { apiVersion: 'v1', resource: 'secrets' },
         { apiVersion: 'batch/v1', resource: 'jobs' },
         { apiVersion: 'policy/v1', resource: 'poddisruptionbudgets',
           updateStrategy: {
-            method: 'InPlace'
+            method: 'RollingInPlace'
           }
         },
       ],
@@ -340,7 +340,7 @@
       crdVersion=crdVersion,
       resyncPeriodSeconds=credentialsResyncSeconds,
     ),
-    instanceUserdata:: $.instanceUserdataDecorator(
+    instanceUserdata: $.instanceUserdataDecorator(
       webhookServiceUrl=webhookServiceUrl,
       crdGroup=crdGroup,
       crdVersion=crdVersion,

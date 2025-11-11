@@ -312,10 +312,12 @@ function buildStatus(parent, state) {
     phase,
     observedGeneration: parent.metadata?.generation,
     conditions,
+    /*
     storage: {
       account: storageAccount,
       mongoReady: mongoReadiness.ready
     }
+    */
   };
 }
 

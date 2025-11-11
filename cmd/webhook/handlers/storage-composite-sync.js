@@ -202,10 +202,10 @@ function createStorageCompositeSync(config) {
     }
 
     // Extract credentials from existing Secret for use in Jobs
-    const secretData = req.storageSecret.data || {};
-    var databaseName = Buffer.from(secretData.MONGO_INITDB_DATABASE || '', 'base64').toString('utf-8');
-
     if (req.storageSecret) {
+      const secretData = req.storageSecret?.data || {};
+      var databaseName = Buffer.from(secretData.MONGO_INITDB_DATABASE || '', 'base64').toString('utf-8');
+
         
       // Ensure app credentials
       // var updated_secret = ensureNSUserCredentials(req.storageSecret, storageAccount);
@@ -219,16 +219,19 @@ function createStorageCompositeSync(config) {
       
       // const hasCredentials = nsuserUsername && nsuserPassword;
       // Check MongoDB readiness
-      const mongoReadiness = checkMongoReadiness(children, storageAccount);
+      const mongoReadiness = checkMongoReadiness(req.children, req.storageAccount);
       if (mongoReadiness.condition) {
+        res.status.phase = mongoReadiness.ready ? 'Ready' : res.status.phase;
+        console.log("SETTING STATUS", mongoReadiness);
         res.status.conditions.push(mongoReadiness.condition);
       }
+
       if (mongoReadiness.ready) {
         const userInitialized = req.parent.status?.conditions?.find(c => c.type === 'UserInitialized' && c.status === 'True');
         if (!userInitialized) {
           console.log(`  NS user creation needed - rendering create-user Job`);
-          const createUserJob = renderCreateUserJobFromCRD(req.parent, req.storageAccount, nsuserUsername, nsuserPassword, config);
-          res.children.push(createUserJob);
+          // const createUserJob = renderCreateUserJobFromCRD(req.parent, req.storageAccount, req.storageConfig, config);
+          // res.children.push(createUserJob);
         }
       }
     }
@@ -264,7 +267,7 @@ function createStorageCompositeSync(config) {
     }).value( );
     console.log("ADDING REMAINING CHILDREN not active in current phase", remaining.length, remaining);
     response.children.push(...remaining);
-    console.log("TOTAL CHILDREN", response.children.length, response.children);
+    console.log("FULL RESPONSE", response.children.length, JSON.stringify(response, null, 2));
     res.send(response);
     return next( );
 
@@ -458,7 +461,7 @@ function checkMongoReadiness(children, storageAccount) {
           message: ready 
             ? `MongoDB StatefulSet is ready (${readyReplicas}/${replicas} replicas)`
             : `Waiting for MongoDB pods (${readyReplicas}/${replicas} replicas ready)`,
-          lastTransitionTime: new Date().toISOString()
+          // lastTransitionTime: new Date().toISOString()
         }
       };
     }
@@ -472,7 +475,7 @@ function checkMongoReadiness(children, storageAccount) {
       status: 'False',
       reason: 'StatefulSetNotFound',
       message: 'MongoDB StatefulSet not found or not yet created',
-      lastTransitionTime: new Date().toISOString()
+      // lastTransitionTime: new Date().toISOString()
     }
   };
 }

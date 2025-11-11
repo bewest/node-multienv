@@ -66,6 +66,7 @@ function renderMongoDB(parent, databaseName, config) {
     // 'app.kubernetes.io/instance': tenantId,
     'app.kubernetes.io/version': mongoVersion,
     'app.kubernetes.io/managed-by': 'metacontroller',
+    'ns.mdn.io/composite': 'storage',
     'storage.nightscout.org/account': storageAccount,
     ...additionalLabels
   });
@@ -150,28 +151,6 @@ function renderMongoDB(parent, databaseName, config) {
           imagePullSecrets: parent.data.IMAGE_PULL_SECRET 
             ? [{ name: parent.data.IMAGE_PULL_SECRET }] 
             : undefined,
-          initContainers: [
-            {
-              name: 'init-replica-set',
-              image: parent.data.NS_UTILITY_IMAGE || config.images.nsUtility,
-              imagePullPolicy: parent.data.NS_UTILITY_IMAGE_PULL_POLICY || config.imagePullPolicies.nsUtility,
-              command: parent.data.INIT_REPLICA_SET_COMMAND ? parent.data.INIT_REPLICA_SET_COMMAND.split(',') : config.commands.initReplicaSet,
-              env: [
-                {
-                  name: 'MONGO_HOST',
-                  value: pod0Hostname
-                },
-                {
-                  name: 'MONGO_PORT',
-                  value: '27017'
-                },
-                {
-                  name: 'MONGO_RS_NAME',
-                  value: 'rs0'
-                }
-              ]
-            }
-          ],
           containers: [
             {
               name: 'mongodb',
@@ -184,13 +163,18 @@ function renderMongoDB(parent, databaseName, config) {
                   name: 'mongodb'
                 }
               ],
+              /*
+              envFrom: [
+                { secretRef: { name: secretName } }
+              ],
+              */
               env: [
                 {
                   name: 'MONGO_INITDB_ROOT_USERNAME',
                   valueFrom: {
                     secretKeyRef: {
                       name: secretName,
-                      key: 'username'
+                      key: 'MONGO_INITDB_ROOT_USERNAME'
                     }
                   }
                 },
@@ -199,7 +183,7 @@ function renderMongoDB(parent, databaseName, config) {
                   valueFrom: {
                     secretKeyRef: {
                       name: secretName,
-                      key: 'password'
+                      key: 'MONGO_INITDB_ROOT_USERNAME'
                     }
                   }
                 },
@@ -208,7 +192,7 @@ function renderMongoDB(parent, databaseName, config) {
                   valueFrom: {
                     secretKeyRef: {
                       name: secretName,
-                      key: 'database'
+                      key: 'MONGO_INITDB_DATABASE'
                     }
                   }
                 }
@@ -290,7 +274,8 @@ function renderMongoDB(parent, databaseName, config) {
     }
   };
 
-  resources.push(secret, headlessService, statefulSet, pdb);
+  // resources.push(secret, headlessService, statefulSet, pdb);
+  resources.push(headlessService, statefulSet, pdb);
   return resources;
 }
 
@@ -361,7 +346,7 @@ function renderNightscout(parent, config) {
     metadata: {
       name: deploymentName,
       namespace: namespace,
-      labels: standardLabels('application')
+      labels: standardLabels('application', { app: 'deployment' })
     },
     spec: {
       replicas: nsReplicas,
