@@ -106,19 +106,19 @@
       childResources=[
         { apiVersion: 'apps/v1', resource: 'statefulsets',
           updateStrategy: {
-            method: 'RollingRecreate'
+            method: 'InPlace'
           }
         },
         { apiVersion: 'v1', resource: 'services',
           updateStrategy: {
-            method: 'RollingInPlace'
+            method: 'InPlace'
           }
         },
         { apiVersion: 'v1', resource: 'secrets' },
         { apiVersion: 'batch/v1', resource: 'jobs' },
         { apiVersion: 'policy/v1', resource: 'poddisruptionbudgets',
           updateStrategy: {
-            method: 'RollingInPlace'
+            method: 'InPlace'
           }
         },
       ],

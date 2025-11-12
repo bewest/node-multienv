@@ -128,7 +128,7 @@ function renderMongoDB(parent, databaseName, config) {
         'ns.mdn.io/tier': parent.metadata.labels?.['ns.mdn.io/tier'] || 'basic'
       },
       annotations: {
-        'ns.mdn.io/created-at': new Date().toISOString(),
+        // 'ns.mdn.io/created-at': new Date().toISOString(),
         'ns.mdn.io/replicas': String(mongoReplicas),
         'ns.mdn.io/storage-gi': storageGi
       }
@@ -232,8 +232,8 @@ function renderMongoDB(parent, databaseName, config) {
               'ns.mdn.io/region': parent.data.REGION || 'default'
             },
             annotations: {
-              'ns.mdn.io/created-at': new Date().toISOString(),
-              'ns.mdn.io/parent-generation': String(parent.metadata.generation || 1),
+              // 'ns.mdn.io/created-at': new Date().toISOString(),
+              // 'ns.mdn.io/parent-generation': String(parent.metadata.generation || 1),
               // 'ns.mdn.io/tenant-email': parent.data.TENANT_EMAIL || '',
               'ns.mdn.io/backup-schedule': parent.data.BACKUP_SCHEDULE || 'daily',
               'ns.mdn.io/storage-class': storageClass,
