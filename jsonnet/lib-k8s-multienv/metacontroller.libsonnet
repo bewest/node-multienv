@@ -282,6 +282,39 @@
       resyncPeriodSeconds=resyncPeriodSeconds,
     ),
 
+  // Storage Initialization Decorator (mongo-auth Secret → Replica Set Init State)
+  storageInitializationDecorator(
+    webhookServiceUrl='http://webhook-service:3000',
+    crdGroup='nightscout.io',
+    crdVersion='v1alpha1',
+    resyncPeriodSeconds=30,
+  )::
+    $.decoratorController(
+      name='storage-initialization-decorator',
+      webhookUrl=webhookServiceUrl + '/decorator/storage-initialization/sync',
+      customizeUrl=webhookServiceUrl + '/decorator/storage-initialization/customize',
+      resources=[
+        {
+          apiVersion: 'v1',
+          resource: 'secrets',
+          labelSelector: {
+            matchExpressions: [
+              {
+                key: 'storage.nightscout.org/account',
+                operator: 'Exists',
+              },
+              {
+                key: 'ns.mdn.io/credential-type',
+                operator: 'In',
+                values: ['mongodb-auth'],
+              },
+            ],
+          },
+        },
+      ],
+      resyncPeriodSeconds=resyncPeriodSeconds,
+    ),
+
   // Instance Userdata Decorator (ConfigMap Migration → Gen 3 to Gen 4 Cutover)
   instanceUserdataDecorator(
     webhookServiceUrl='http://webhook-service:3000',
@@ -316,6 +349,7 @@
     computeResyncSeconds=30,
     pvcResyncSeconds=60,
     credentialsResyncSeconds=30,
+    initializationResyncSeconds=30,
     userdataResyncSeconds=30,
   ):: {
     storage: $.storageComposite(
@@ -339,6 +373,12 @@
       crdGroup=crdGroup,
       crdVersion=crdVersion,
       resyncPeriodSeconds=credentialsResyncSeconds,
+    ),
+    storageInitialization: $.storageInitializationDecorator(
+      webhookServiceUrl=webhookServiceUrl,
+      crdGroup=crdGroup,
+      crdVersion=crdVersion,
+      resyncPeriodSeconds=initializationResyncSeconds,
     ),
     instanceUserdata: $.instanceUserdataDecorator(
       webhookServiceUrl=webhookServiceUrl,

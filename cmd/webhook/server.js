@@ -10,6 +10,8 @@ const createComputeCompositeCustomize = require('./handlers/compute-composite-cu
 const createDecoratorSync = require('./handlers/decorator-sync');
 const createDecoratorFinalize = require('./handlers/decorator-finalize');
 const { createStorageCredentialsDecoratorSync } = require('./handlers/storage-credentials-decorator-sync');
+const { createStorageInitializationDecoratorSync } = require('./handlers/storage-initialization-decorator-sync');
+const { createStorageInitializationDecoratorCustomize } = require('./handlers/storage-initialization-decorator-customize');
 const createInstanceUserdataDecorator = require('./handlers/instance-userdata-decorator');
 
 // Create handlers with config
@@ -20,6 +22,8 @@ const computeCompositeCustomize = createComputeCompositeCustomize(config);
 const decoratorSync = createDecoratorSync(config);
 const decoratorFinalize = createDecoratorFinalize(config);
 const storageCredentialsDecoratorSync = createStorageCredentialsDecoratorSync(config);
+const storageInitializationDecoratorSync = createStorageInitializationDecoratorSync(config);
+const storageInitializationDecoratorCustomize = createStorageInitializationDecoratorCustomize(config);
 const instanceUserdataDecorator = createInstanceUserdataDecorator(config);
 const instanceUserdataDecoratorSync = instanceUserdataDecorator.sync;
 const instanceUserdataDecoratorCustomize = instanceUserdataDecorator.customize;
@@ -62,6 +66,10 @@ server.post('/decorator/finalize', decoratorFinalize);
 // Decorator: Storage credentials management (ComputeInstance → App Credentials + User Init)
 server.post('/decorator/storage-credentials/sync', storageCredentialsDecoratorSync);
 
+// Decorator: Storage initialization state (mongo-auth Secret → Replica Set Init Tracking)
+server.post('/decorator/storage-initialization/customize', storageInitializationDecoratorCustomize);
+server.post('/decorator/storage-initialization/sync', ...storageInitializationDecoratorSync);
+
 // Decorator: Instance userdata migration (ConfigMap → Gen 3 to Gen 4 cutover)
 server.post('/decorator/instance-userdata/customize', ...instanceUserdataDecoratorCustomize);
 server.post('/decorator/instance-userdata/sync', ...instanceUserdataDecoratorSync);
@@ -73,7 +81,7 @@ server.get('/health', (req, res, next) => {
 
 server.listen(port, '0.0.0.0', () => {
   console.log(`Metacontroller webhook server listening on port ${port}`);
-  console.log(`Gen 4: Three-Controller Architecture (2 Composites + 3 Decorators)`);
+  console.log(`Gen 4: Three-Controller Architecture (2 Composites + 4 Decorators)`);
   console.log(`Endpoints:`);
   console.log(`  POST /composite/storage/customize - Storage: Related resource discovery`);
   console.log(`  POST /composite/storage/sync - Storage: StorageAccount → MongoDB + Migration`);
@@ -82,6 +90,8 @@ server.listen(port, '0.0.0.0', () => {
   console.log(`  POST /decorator/sync - PVC backup policy`);
   console.log(`  POST /decorator/finalize - PVC cleanup`);
   console.log(`  POST /decorator/storage-credentials/sync - Credentials: ComputeInstance → App Creds + User Init`);
+  console.log(`  POST /decorator/storage-initialization/customize - Initialization: mongo-auth Secret state tracking`);
+  console.log(`  POST /decorator/storage-initialization/sync - Initialization: Replica set init marker`);
   console.log(`  POST /decorator/instance-userdata/customize - ConfigMap migration: Related resource discovery`);
   console.log(`  POST /decorator/instance-userdata/sync - ConfigMap migration: Gen 3 → Gen 4 cutover`);
   console.log(`  GET  /health - Health check`);
