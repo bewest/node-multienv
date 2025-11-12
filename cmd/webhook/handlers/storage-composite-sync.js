@@ -313,22 +313,8 @@ function createStorageCompositeSync(config) {
       console.log(`  Init Job status: active=${active}, succeeded=${succeeded}, failed=${failed}`);
       
       if (succeeded > 0) {
-        // Job succeeded - update Secret annotation for durability
-        console.log(`  Init Job succeeded - marking Secret as initialized`);
-        
-        const updatedSecret = {
-          ...req.storageSecret,
-          metadata: {
-            ...req.storageSecret.metadata,
-            annotations: {
-              ...(req.storageSecret.metadata.annotations || {}),
-              'ns.mdn.io/replica-set-initialized': new Date().toISOString()
-            }
-          }
-        };
-        
-        // Emit updated Secret through res.children to persist annotation
-        res.children.push(updatedSecret);
+        // Job succeeded - Secret Decorator will update the annotation
+        console.log(`  Init Job succeeded - Secret Decorator will mark initialization`);
         
         // Set status condition: ready
         res.status.conditions.push({
@@ -339,6 +325,7 @@ function createStorageCompositeSync(config) {
         });
         
         // Don't re-add Job - let ttlSecondsAfterFinished clean it up
+        // Don't modify Secret - Secret Decorator owns annotation updates
       } else if (failed > 0) {
         // Job failed - keep rendering to allow retry (up to backoffLimit)
         console.log(`  Init Job failed (${failed} failures) - keeping Job for retry`);
