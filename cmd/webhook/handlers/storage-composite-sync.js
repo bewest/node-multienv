@@ -108,7 +108,9 @@ function createStorageCompositeSync(config) {
           'app.kubernetes.io/managed-by': 'metacontroller',
           'storage.nightscout.org/account': accountId,
           // set to storage to manage as a child, set to key to set as related?
-          'ns.mdn.io/composite': 'key'
+          'ns.mdn.io/composite': 'key',
+          // Credential type label for decorator selection
+          'ns.mdn.io/credential-type': 'mongodb-auth'
         },
         annotations: {
           'ns.mdn.io/storage-type': storageType || config.storage.defaultStorageType,

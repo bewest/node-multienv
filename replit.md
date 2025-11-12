@@ -25,7 +25,9 @@ All tenants are deployed within a single `hosted-tenants` namespace, with resour
 - **Storage CompositeController**: Manages MongoDB StatefulSets, Services, and Migration Jobs.
 - **Compute CompositeController**: Manages Nightscout Deployments, Services, and optional Kafka components.
 - **Storage-Credentials DecoratorController**: Manages per-tenant application credentials and user initialization.
-- **DecoratorController (PVC Backup Policy)**: Enforces backup policies for MongoDB Persistent Volume Claims.
+- **Storage-Initialization DecoratorController**: Manages replica set initialization state on mongo-auth Secrets. Observes init-mongo-cluster Jobs and sets durable state markers (`ns.mdn.io/replica-set-initialized`) when replica set initialization completes. Coordinates migration intent detection.
+- **Instance-Userdata DecoratorController**: Manages Gen 3 to Gen 4 ConfigMap migration and cutover orchestration.
+- **PVC-Backup DecoratorController**: Enforces backup policies for MongoDB Persistent Volume Claims.
 
 ### Key Technologies
 - **Orchestration**: Kubernetes, Metacontroller.
