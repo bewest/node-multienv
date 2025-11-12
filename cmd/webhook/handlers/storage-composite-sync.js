@@ -23,7 +23,7 @@
  */
 
 const _ = require('lodash');
-const { renderMongoDB } = require('./resources');
+const { renderMongoDB, renderInitMongoClusterJob } = require('./resources');
 const { ANNOTATIONS, LABELS } = require('./constants');
 
 function createStorageCompositeSync(config) {
@@ -47,6 +47,10 @@ function createStorageCompositeSync(config) {
     
     res.children = [ ];
     res.status = { phase: 'Pending', conditions: [ ] };
+
+    // Determine provisioning needs upfront (accommodates hybrid migration scenarios)
+    req.needsDedicatedInfra = (storageType === 'dedicated' || storageType === 'hybrid-migration');
+    req.needsSharedAccess = (storageType === 'shared' || storageType === 'hybrid-migration');
 
     // Count tenants using this storage account (from related ComputeInstances)
     // const tenantUsage = countTenantUsage(req.related, req.storageAccount);
@@ -239,6 +243,132 @@ function createStorageCompositeSync(config) {
     next( );
   }
 
+  /**
+   * Plan stable replica set initialization
+   * Ensures MongoDB replica set is initialized before tenants can use it
+   * 
+   * Flow:
+   * 1. Check if dedicated infrastructure is needed (skip for shared)
+   * 2. Check durable marker (Secret annotation) for initialization status
+   * 3. Render init-mongo-cluster Job if not initialized
+   * 4. Watch Job status for completion
+   * 5. Update Secret annotation when Job succeeds
+   * 6. Set ReplicaSetReady status condition
+   */
+  function planStableReplicaset(req, res, next) {
+    // Only for dedicated infrastructure (not shared)
+    if (!req.needsDedicatedInfra) {
+      return next();
+    }
+
+    // Check if we have a storage Secret
+    if (!req.storageSecret) {
+      console.log(`  Replica set init: No storage Secret yet, skipping`);
+      return next();
+    }
+
+    const storageAccount = req.storageAccount;
+    const jobName = `${storageAccount}-init-mongo-cluster`;
+    
+    // Check durable marker on Secret
+    const rsInitialized = req.storageSecret.metadata?.annotations?.['ns.mdn.io/replica-set-initialized'];
+    
+    if (rsInitialized) {
+      // Already initialized - just report status
+      console.log(`  Replica set already initialized at ${rsInitialized}`);
+      res.status.conditions.push({
+        type: 'ReplicaSetReady',
+        status: 'True',
+        reason: 'ReplicaSetInitialized',
+        message: `MongoDB replica set initialized at ${rsInitialized}`
+      });
+      return next();
+    }
+
+    // Not initialized yet - check if Job exists and render if needed
+    console.log(`  Replica set not initialized - checking for init Job`);
+    
+    const existingJob = req.children['Job.batch/v1']?.[jobName];
+    
+    if (!existingJob) {
+      // No Job exists - render it
+      console.log(`  Rendering init-mongo-cluster Job for ${storageAccount}`);
+      const initJob = renderInitMongoClusterJob(req.parent, storageAccount, config);
+      res.children.push(initJob);
+      
+      // Set status condition: initialization in progress
+      res.status.conditions.push({
+        type: 'ReplicaSetReady',
+        status: 'False',
+        reason: 'InitializationPending',
+        message: 'Replica set initialization Job created, waiting for execution'
+      });
+    } else {
+      // Job exists - check its status
+      const jobStatus = existingJob.status || {};
+      const succeeded = jobStatus.succeeded || 0;
+      const failed = jobStatus.failed || 0;
+      const active = jobStatus.active || 0;
+      
+      console.log(`  Init Job status: active=${active}, succeeded=${succeeded}, failed=${failed}`);
+      
+      if (succeeded > 0) {
+        // Job succeeded - update Secret annotation for durability
+        console.log(`  Init Job succeeded - marking Secret as initialized`);
+        
+        const updatedSecret = {
+          ...req.storageSecret,
+          metadata: {
+            ...req.storageSecret.metadata,
+            annotations: {
+              ...(req.storageSecret.metadata.annotations || {}),
+              'ns.mdn.io/replica-set-initialized': new Date().toISOString()
+            }
+          }
+        };
+        
+        // Emit updated Secret through res.children to persist annotation
+        res.children.push(updatedSecret);
+        
+        // Set status condition: ready
+        res.status.conditions.push({
+          type: 'ReplicaSetReady',
+          status: 'True',
+          reason: 'ReplicaSetInitialized',
+          message: 'MongoDB replica set initialized successfully'
+        });
+        
+        // Don't re-add Job - let ttlSecondsAfterFinished clean it up
+      } else if (failed > 0) {
+        // Job failed - keep rendering to allow retry (up to backoffLimit)
+        console.log(`  Init Job failed (${failed} failures) - keeping Job for retry`);
+        const initJob = renderInitMongoClusterJob(req.parent, storageAccount, config);
+        res.children.push(initJob);
+        
+        res.status.conditions.push({
+          type: 'ReplicaSetReady',
+          status: 'False',
+          reason: 'InitializationFailed',
+          message: `Replica set initialization failed (${failed} attempts). Check Job logs for details.`
+        });
+      } else {
+        // Job still running - re-add to keep it alive
+        console.log(`  Init Job in progress (active=${active}) - keeping Job alive`);
+        const initJob = renderInitMongoClusterJob(req.parent, storageAccount, config);
+        res.children.push(initJob);
+        
+        res.status.conditions.push({
+          type: 'ReplicaSetReady',
+          status: 'False',
+          reason: 'InitializationInProgress',
+          message: 'Replica set initialization Job is running'
+        });
+      }
+    }
+
+    return next();
+  }
+
   function fmt_metacontroller_webhook (req, res, next) {
     const response = {
       status: {
@@ -275,12 +405,13 @@ function createStorageCompositeSync(config) {
 
   // Compose/configure a list of handlers that operate in a chain or pipeline.
   return [
-    pull_objects, 
-    // collectAttachments,            // NEW - index children and related resources for easy lookup
-    ensure_initialization,         // EXISTING - handle mongo-auth secret initialization
-    render_shared_status,          // EXISTING - handle shared storage type
-    render_specified_dedicated,    // EXISTING - handle dedicated storage type
-    fmt_metacontroller_webhook     // EXISTING - format response
+    pull_objects,                  // Gather K8s resources and classify provisioning needs
+    // collectAttachments,         // NEW - index children and related resources for easy lookup
+    ensure_initialization,         // Ensure mongo-auth Secret exists
+    render_shared_status,          // Handle shared storage type
+    render_specified_dedicated,    // Render StatefulSet, Service, PDB for dedicated storage
+    planStableReplicaset,          // NEW - Initialize MongoDB replica set via Job
+    fmt_metacontroller_webhook     // Format response
   ];
 
 }

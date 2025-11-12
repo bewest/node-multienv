@@ -857,6 +857,97 @@ function renderMigrationJob(parent, config) {
   return job;
 }
 
+/**
+ * Render init-mongo-cluster Job for MongoDB replica set initialization
+ * Uses ns-utility container with init-replica-set.sh script
+ * 
+ * @param {object} parent - StorageAccount CRD
+ * @param {string} storageAccount - Storage account ID
+ * @param {object} config - Webhook configuration
+ * @returns {object} Job manifest
+ */
+function renderInitMongoClusterJob(parent, storageAccount, config) {
+  const namespace = parent.metadata.namespace || 'hosted-tenants';
+  const serviceName = `${storageAccount}-mongo`;
+  const jobName = `${storageAccount}-init-mongo-cluster`;
+  
+  // Standard labels for this storage account
+  const standardLabels = {
+    'app.kubernetes.io/name': 'mongodb',
+    'app.kubernetes.io/component': 'init-job',
+    'app.kubernetes.io/managed-by': 'metacontroller',
+    'storage.nightscout.org/account': storageAccount,
+    'ns.mdn.io/tier': parent.metadata.labels?.['ns.mdn.io/tier'] || 'basic'
+  };
+  
+  const utilityImage = config.images.nsUtility;
+  const utilityImagePullPolicy = config.imagePullPolicies.nsUtility;
+  const utilityResources = config.resources.initReplicaSet;
+  
+  const job = {
+    apiVersion: 'batch/v1',
+    kind: 'Job',
+    metadata: {
+      name: jobName,
+      namespace: namespace,
+      labels: standardLabels,
+      annotations: {
+        'ns.mdn.io/purpose': 'replica-set-initialization',
+        'ns.mdn.io/storage-account': storageAccount
+      }
+    },
+    spec: {
+      ttlSecondsAfterFinished: 3600,
+      backoffLimit: 4,
+      template: {
+        metadata: {
+          labels: {
+            ...standardLabels,
+            'job-name': jobName
+          }
+        },
+        spec: {
+          restartPolicy: 'OnFailure',
+          containers: [
+            {
+              name: 'init-replica-set',
+              image: utilityImage,
+              imagePullPolicy: utilityImagePullPolicy,
+              command: ['/scripts/entrypoints/init-replica-set.sh'],
+              env: [
+                {
+                  name: 'MONGO_HOST',
+                  value: `${serviceName}-0.${serviceName}`
+                },
+                {
+                  name: 'MONGO_PORT',
+                  value: '27017'
+                },
+                {
+                  name: 'MONGO_RS_NAME',
+                  value: 'rs0'
+                }
+              ],
+              resources: {
+                requests: {
+                  cpu: utilityResources.requests.cpu,
+                  memory: utilityResources.requests.memory
+                },
+                limits: {
+                  cpu: utilityResources.limits.cpu,
+                  memory: utilityResources.limits.memory
+                }
+              }
+            }
+          ]
+        }
+      }
+    }
+  };
+  
+  return job;
+}
+
 function generatePassword() {
   return Math.random().toString(36).slice(-16) + Math.random().toString(36).slice(-16);
 }
@@ -866,5 +957,6 @@ module.exports = {
   renderNightscout,
   renderKafkaTopics,
   renderKafkaConnector,
-  renderMigrationJob
+  renderMigrationJob,
+  renderInitMongoClusterJob
 };
