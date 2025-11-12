@@ -60,8 +60,11 @@ function createStorageInitializationDecoratorSync(config) {
   function discoverStorageAccount(req, res, next) {
     if (!req.storageAccountId) {
       console.log('  WARNING: Secret missing storage.nightscout.org/account label');
-      // Return unmodified Secret
-      res.send({ object: req.secret });
+      // Return current labels/annotations unchanged
+      res.send({
+        labels: req.secret.metadata?.labels || {},
+        annotations: req.secret.metadata?.annotations || {}
+      });
       return;
     }
     
@@ -71,8 +74,11 @@ function createStorageInitializationDecoratorSync(config) {
     
     if (!req.storageAccount) {
       console.log(`  StorageAccount ${req.storageAccountId} not found in related resources`);
-      // Return unmodified Secret - StorageAccount may not exist yet
-      res.send({ object: req.secret });
+      // Return current labels/annotations unchanged - StorageAccount may not exist yet
+      res.send({
+        labels: req.secret.metadata?.labels || {},
+        annotations: req.secret.metadata?.annotations || {}
+      });
       return;
     }
     
@@ -139,18 +145,29 @@ function createStorageInitializationDecoratorSync(config) {
    * Stage 5: Handle migration intent detection
    * Detects and tracks migration requests for shared → dedicated transitions
    * 
-   * Migration can be triggered by:
-   * 1. ComputeInstance annotation: nightscout.io/migrate-to-dedicated=true
-   * 2. Secret annotation: nightscout.io/migrate-to-dedicated=true
+   * Migration annotation originates from ComputeInstance:
+   *   nightscout.io/migrate-to-dedicated=true
    * 
-   * When detected, the Storage Composite will provision dedicated infrastructure
+   * When detected, the Storage Composite provisions dedicated infrastructure
    * This decorator tracks the migration state on the Secret
    */
   function handleMigrationIntent(req, res, next) {
-    const migrationRequested = req.secret.metadata?.annotations?.['nightscout.io/migrate-to-dedicated'];
+    // Check for migration annotation on ComputeInstance (origin)
+    const computeInstances = req.related['ComputeInstance.nightscout.io/v1alpha1'] || {};
+    let migrationRequested = false;
+    
+    // Check all ComputeInstances associated with this storage account
+    for (const [name, instance] of Object.entries(computeInstances)) {
+      if (instance.metadata?.annotations?.['nightscout.io/migrate-to-dedicated'] === 'true') {
+        console.log(`  Migration annotation found on ComputeInstance: ${name}`);
+        migrationRequested = true;
+        break;
+      }
+    }
+    
     const migrationInProgress = req.secret.metadata?.annotations?.['ns.mdn.io/migration-status'];
     
-    if (migrationRequested === 'true') {
+    if (migrationRequested) {
       console.log('  Migration to dedicated storage requested');
       
       // Check if StorageAccount is now dedicated (migration infrastructure provisioned)
@@ -184,27 +201,24 @@ function createStorageInitializationDecoratorSync(config) {
   
   /**
    * Stage 6: Format response
-   * Returns modified Secret or original if no changes
+   * Returns only labels and annotations (decorator response format)
    */
   function formatResponse(req, res, next) {
     if (req.annotationsModified) {
-      console.log('  Returning modified Secret with updated annotations');
-      
-      const updatedSecret = {
-        ...req.secret,
-        metadata: {
-          ...req.secret.metadata,
-          annotations: req.updatedAnnotations
-        }
-      };
-      
-      res.send({ object: updatedSecret });
+      // Return only the annotations that changed (decorator format)
+      console.log('  Returning updated annotations');
+      res.send({
+        labels: req.secret.metadata?.labels || {},
+        annotations: req.updatedAnnotations
+      });
     } else {
-      console.log('  No changes needed - returning original Secret');
-      res.send({ object: req.secret });
+      // No changes needed - return current labels/annotations
+      console.log('  No changes needed');
+      res.send({
+        labels: req.secret.metadata?.labels || {},
+        annotations: req.secret.metadata?.annotations || {}
+      });
     }
-    
-    return next();
   }
   
   // Pipeline: chain all stages together

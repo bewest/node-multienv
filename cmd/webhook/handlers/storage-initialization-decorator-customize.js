@@ -23,7 +23,7 @@ function createStorageInitializationDecoratorCustomize(config) {
     
     // Define related resources to fetch
     const relatedResources = [
-      // StorageAccount CRD - to check status conditions and migration intent
+      // StorageAccount CRD - to check status conditions
       {
         apiVersion: 'nightscout.io/v1alpha1',
         resource: 'storageaccounts',
@@ -39,6 +39,17 @@ function createStorageInitializationDecoratorCustomize(config) {
           matchLabels: {
             'storage.nightscout.org/account': storageAccountId,
             'app.kubernetes.io/component': 'init-job',
+          },
+        },
+      },
+      // ComputeInstance CRD - to detect migration annotation origin
+      {
+        apiVersion: 'nightscout.io/v1alpha1',
+        resource: 'computeinstances',
+        namespace: secret.metadata.namespace,
+        labelSelector: {
+          matchLabels: {
+            'storage.nightscout.org/account': storageAccountId,
           },
         },
       },
