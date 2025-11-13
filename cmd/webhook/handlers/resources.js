@@ -953,7 +953,7 @@ function renderInitMongoClusterJob(parent, storageAccount, config) {
                 },
                 {
                   name: 'MONGO_ADMIN_URI',
-                  value: `mongodb://$(MONGO_ADMIN_USERNAME):$(MONGO_ADMIN_PASSWORD)@${mongoHost}:27017/?authSource=admin&replicaSet=rs0`
+                  value: `mongodb://$(MONGO_ADMIN_USERNAME):$(MONGO_ADMIN_PASSWORD)@${serviceName}:27017/?authSource=admin&replicaSet=rs0`
                 }
               ],
               resources: {
