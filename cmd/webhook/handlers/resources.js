@@ -105,7 +105,8 @@ function renderMongoDB(parent, databaseName, config) {
       clusterIP: 'None',
       selector: {
         'app.kubernetes.io/name': 'mongodb',
-        'app.kubernetes.io/instance': storageAccount
+        'ns.mdn.io/composite': 'storage',
+        'storage.nightscout.org/account': storageAccount
       },
       ports: [
         {
@@ -867,18 +868,21 @@ function renderMigrationJob(parent, config) {
  * @returns {object} Job manifest
  */
 function renderInitMongoClusterJob(parent, storageAccount, config) {
+  console.log("RENDER JOB INPUT", parent);
   const namespace = parent.metadata.namespace || 'hosted-tenants';
-  const serviceName = `${storageAccount}-mongo`;
+  // const serviceName = `${storageAccount}-mongo`;
+  const serviceName = `mongo-${parent.status.databaseName}`;
   const secretName = `${storageAccount}-mongo-auth`;
   const jobName = `${storageAccount}-init-mongo-cluster`;
   const mongoHost = `${serviceName}-0.${serviceName}`;
   
   // Standard labels for this storage account
   const standardLabels = {
-    'app.kubernetes.io/name': 'mongodb',
+    'app.kubernetes.io/name': 'mongodb-init-replica',
     'app.kubernetes.io/component': 'init-job',
     'app.kubernetes.io/managed-by': 'metacontroller',
     'storage.nightscout.org/account': storageAccount,
+    'ns.mdn.io/composite': 'storage',
     'ns.mdn.io/tier': parent.metadata.labels?.['ns.mdn.io/tier'] || 'basic'
   };
   
@@ -915,11 +919,11 @@ function renderInitMongoClusterJob(parent, storageAccount, config) {
               name: 'init-replica-set',
               image: utilityImage,
               imagePullPolicy: utilityImagePullPolicy,
-              command: ['/scripts/entrypoints/init-replica-set.sh'],
+              command: ['/app/container-images/ns-utility/scripts/entrypoints/init-replica-set.sh'],
               env: [
                 {
                   name: 'MONGO_HOST',
-                  value: mongoHost
+                  value: serviceName,
                 },
                 {
                   name: 'MONGO_PORT',

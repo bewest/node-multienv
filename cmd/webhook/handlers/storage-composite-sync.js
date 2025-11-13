@@ -295,7 +295,7 @@ function createStorageCompositeSync(config) {
       // No Job exists - render it
       console.log(`  Rendering init-mongo-cluster Job for ${storageAccount}`);
       const initJob = renderInitMongoClusterJob(req.parent, storageAccount, config);
-      // res.children.push(initJob);
+      res.children.push(initJob);
       
       // Set status condition: initialization in progress
       res.status.conditions.push({

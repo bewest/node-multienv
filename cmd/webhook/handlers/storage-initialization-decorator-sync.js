@@ -112,6 +112,7 @@ function createStorageInitializationDecoratorSync(config) {
     if (!req.initJob) {
       console.log(`  Init Job ${initJobName} not found - initialization not started yet`);
       // renderInitMongoClusterJob
+      // const initJob = renderInitMongoClusterJob(req.parent, storageAccount, config);
       return next();
     }
     
@@ -206,6 +207,7 @@ function createStorageInitializationDecoratorSync(config) {
       res.send({
         // labels: req.secret.metadata?.labels || {},
         // annotations: req.secret.metadata?.annotations || {}
+        attachments: [ ]
       });
     }
   }
