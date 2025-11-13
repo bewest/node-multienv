@@ -22,6 +22,7 @@
  *   - spec.migration.sourceConnectionSecret: Secret containing source MongoDB URI
  */
 
+const crypto = require('crypto');
 const _ = require('lodash');
 const { renderMongoDB, renderInitMongoClusterJob } = require('./resources');
 const { ANNOTATIONS, LABELS } = require('./constants');
@@ -92,6 +93,61 @@ function createStorageCompositeSync(config) {
     res.status.phase = 'Pending';
     req.storageSecret = existingAppSecret;
     return next( );
+  }
+
+  function ensureMongoKeyfile(req, res, next) {
+    // Only generate keyfile for dedicated infrastructure
+    if (!req.needsDedicatedInfra) {
+      return next();
+    }
+
+    const storageAccount = req.storageAccount;
+    const keyfileSecretName = `${storageAccount}-mongo-keyfile`;
+    
+    // Check if keyfile Secret already exists (in children, not related)
+    const existingKeyfile = req.children['Secret.v1']?.[keyfileSecretName];
+    
+    if (existingKeyfile) {
+      console.log(`  Keyfile Secret ${keyfileSecretName} already exists`);
+      return next();
+    }
+    
+    // Generate new keyfile Secret
+    console.log(`  Generating keyfile Secret for ${storageAccount}`);
+    
+    // Generate 64 random bytes, base64 encoded
+    const keyfileData = crypto.randomBytes(64).toString('base64');
+    
+    const tier = req.spec.tier || 'basic';
+    
+    const keyfileSecret = {
+      apiVersion: 'v1',
+      kind: 'Secret',
+      type: 'Opaque',
+      metadata: {
+        name: keyfileSecretName,
+        labels: {
+          'app.kubernetes.io/name': 'mongodb',
+          'app.kubernetes.io/component': 'database',
+          'app.kubernetes.io/managed-by': 'metacontroller',
+          'ns.mdn.io/composite': 'storage',
+          'storage.nightscout.org/account': storageAccount
+        },
+        annotations: {
+          'ns.mdn.io/tier': tier,
+          'ns.mdn.io/created-at': new Date().toISOString(),
+          'ns.mdn.io/description': 'MongoDB replica set keyfile for member authentication'
+        }
+      },
+      stringData: {
+        keyfile: keyfileData
+      }
+    };
+    
+    res.children.push(keyfileSecret);
+    console.log(`  Added keyfile Secret to children`);
+    
+    return next();
   }
 
   function template_initial_storage_secret (accountId, storageType, tier, stringData) {
@@ -396,6 +452,7 @@ function createStorageCompositeSync(config) {
     pull_objects,                  // Gather K8s resources and classify provisioning needs
     // collectAttachments,         // NEW - index children and related resources for easy lookup
     ensure_initialization,         // Ensure mongo-auth Secret exists
+    ensureMongoKeyfile,            // Ensure mongo-keyfile Secret exists for dedicated infrastructure
     render_shared_status,          // Handle shared storage type
     render_specified_dedicated,    // Render StatefulSet, Service, PDB for dedicated storage
     planStableReplicaset,          // NEW - Initialize MongoDB replica set via Job

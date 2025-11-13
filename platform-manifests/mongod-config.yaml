@@ -1,0 +1,47 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mongod-config
+  namespace: hosted-tenants
+  labels:
+    app.kubernetes.io/name: nightscout-platform
+    app.kubernetes.io/component: mongodb-config
+    app.kubernetes.io/managed-by: metacontroller
+  annotations:
+    ns.mdn.io/description: "Shared MongoDB configuration for all StorageAccounts"
+data:
+  mongod.conf: |
+    # MongoDB Configuration for Nightscout Multi-Tenant Platform
+    # This configuration is shared across all StorageAccounts
+    
+    # Storage
+    storage:
+      dbPath: /data/db
+      journal:
+        enabled: true
+    
+    # Network interfaces
+    net:
+      port: 27017
+      # bindIpAll allows connections from all interfaces (required for replication)
+      # DigitalOcean private networking is enforced via NetworkPolicy
+      bindIpAll: true
+    
+    # Security
+    security:
+      authorization: enabled
+      keyFile: /data/configdb/keyfile
+    
+    # Replication
+    # replSetName is specified via CLI args
+    replication:
+      oplogSizeMB: 1024
+    
+    # System log
+    systemLog:
+      destination: file
+      logAppend: true
+      path: /data/db/mongod.log
+      component:
+        replication:
+          verbosity: 1

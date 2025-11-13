@@ -152,23 +152,68 @@ function renderMongoDB(parent, databaseName, config) {
           imagePullSecrets: parent.data.IMAGE_PULL_SECRET 
             ? [{ name: parent.data.IMAGE_PULL_SECRET }] 
             : undefined,
+          initContainers: [
+            {
+              name: 'prepare-keyfile',
+              image: config.images.utility,
+              imagePullPolicy: config.imagePullPolicies.utility,
+              command: ['/scripts/entrypoints/prepare-keyfile.sh'],
+              env: [
+                {
+                  name: 'KEYFILE_SOURCE',
+                  value: '/keyfile-secret/keyfile'
+                },
+                {
+                  name: 'KEYFILE_DEST',
+                  value: '/keyfile-prep/keyfile'
+                },
+                {
+                  name: 'KEYFILE_UID',
+                  value: '999'
+                },
+                {
+                  name: 'KEYFILE_GID',
+                  value: '999'
+                }
+              ],
+              volumeMounts: [
+                {
+                  name: 'keyfile-secret',
+                  mountPath: '/keyfile-secret',
+                  readOnly: true
+                },
+                {
+                  name: 'keyfile-prep',
+                  mountPath: '/keyfile-prep'
+                }
+              ],
+              resources: {
+                requests: {
+                  cpu: config.resources.utility.requests.cpu,
+                  memory: config.resources.utility.requests.memory
+                },
+                limits: {
+                  cpu: config.resources.utility.limits.cpu,
+                  memory: config.resources.utility.limits.memory
+                }
+              }
+            }
+          ],
           containers: [
             {
               name: 'mongodb',
               image: mongoImage,
               imagePullPolicy: mongoImagePullPolicy,
-              // command: parent.data.MONGODB_COMMAND ? parent.data.MONGODB_COMMAND.split(',') : config.commands.mongodb,
+              args: [
+                '--config', '/config/mongod.conf',
+                '--replSet', 'rs0'
+              ],
               ports: [
                 {
                   containerPort: 27017,
                   name: 'mongodb'
                 }
               ],
-              /*
-              envFrom: [
-                { secretRef: { name: secretName } }
-              ],
-              */
               env: [
                 {
                   name: 'MONGO_INITDB_ROOT_USERNAME',
@@ -202,8 +247,36 @@ function renderMongoDB(parent, databaseName, config) {
                 {
                   name: 'data',
                   mountPath: '/data/db'
+                },
+                {
+                  name: 'mongod-config',
+                  mountPath: '/config',
+                  readOnly: true
+                },
+                {
+                  name: 'keyfile-prep',
+                  mountPath: '/data/configdb',
+                  readOnly: true
                 }
               ],
+              readinessProbe: {
+                tcpSocket: {
+                  port: 27017
+                },
+                initialDelaySeconds: 10,
+                periodSeconds: 10,
+                timeoutSeconds: 5,
+                failureThreshold: 3
+              },
+              startupProbe: {
+                tcpSocket: {
+                  port: 27017
+                },
+                initialDelaySeconds: 10,
+                periodSeconds: 10,
+                timeoutSeconds: 5,
+                failureThreshold: 30
+              },
               resources: {
                 requests: {
                   cpu: mongoCpuRequest,
@@ -214,6 +287,25 @@ function renderMongoDB(parent, databaseName, config) {
                   memory: mongoMemLimit
                 }
               }
+            }
+          ],
+          volumes: [
+            {
+              name: 'mongod-config',
+              configMap: {
+                name: 'mongod-config'
+              }
+            },
+            {
+              name: 'keyfile-secret',
+              secret: {
+                secretName: `${storageAccount}-mongo-keyfile`,
+                defaultMode: 0o400
+              }
+            },
+            {
+              name: 'keyfile-prep',
+              emptyDir: {}
             }
           ]
         }
