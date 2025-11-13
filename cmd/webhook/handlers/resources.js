@@ -157,7 +157,7 @@ function renderMongoDB(parent, databaseName, config) {
               name: 'mongodb',
               image: mongoImage,
               imagePullPolicy: mongoImagePullPolicy,
-              command: parent.data.MONGODB_COMMAND ? parent.data.MONGODB_COMMAND.split(',') : config.commands.mongodb,
+              // command: parent.data.MONGODB_COMMAND ? parent.data.MONGODB_COMMAND.split(',') : config.commands.mongodb,
               ports: [
                 {
                   containerPort: 27017,
@@ -184,7 +184,7 @@ function renderMongoDB(parent, databaseName, config) {
                   valueFrom: {
                     secretKeyRef: {
                       name: secretName,
-                      key: 'MONGO_INITDB_ROOT_USERNAME'
+                      key: 'MONGO_INITDB_ROOT_PASSWORD'
                     }
                   }
                 },
