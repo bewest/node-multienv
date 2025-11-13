@@ -81,6 +81,9 @@
       webhook_replicas: 2,
       webhook_port: 3000,
       
+      // Shared infrastructure namespace (where tenants and shared configs live)
+      shared_config_namespace: 'hosted-tenants',
+      
       // Service account names (from docs/RBAC-DESIGN.md)
       webhook_metacontroller_sa: 'webhook-metacontroller',
       webhook_provisioner_sa: 'deployment-server',

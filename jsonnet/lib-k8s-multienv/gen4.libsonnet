@@ -19,6 +19,63 @@ local rbac = import 'rbac.libsonnet';
 local crds = import 'crds.libsonnet';
 
 {
+  // Generate shared MongoDB configuration ConfigMap
+  mongodConfig(namespace='hosted-tenants')::
+    {
+      apiVersion: 'v1',
+      kind: 'ConfigMap',
+      metadata: {
+        name: 'mongod-config',
+        namespace: namespace,
+        labels: {
+          'app.kubernetes.io/name': 'nightscout-platform',
+          'app.kubernetes.io/component': 'mongodb-config',
+          'app.kubernetes.io/managed-by': 'metacontroller',
+        },
+        annotations: {
+          'ns.mdn.io/description': 'Shared MongoDB configuration for all StorageAccounts',
+        },
+      },
+      data: {
+        'mongod.conf': |||
+          # MongoDB Configuration for Nightscout Multi-Tenant Platform
+          # This configuration is shared across all StorageAccounts
+          
+          # Storage
+          storage:
+            dbPath: /data/db
+            journal:
+              enabled: true
+          
+          # Network interfaces
+          net:
+            port: 27017
+            # bindIp is overridden via CLI --bind_ip flag in StatefulSet args
+            # Default binds to localhost only for security
+            bindIp: 127.0.0.1
+          
+          # Security
+          security:
+            authorization: enabled
+            keyFile: /data/configdb/keyfile
+          
+          # Replication
+          # replSetName is specified via CLI args
+          replication:
+            oplogSizeMB: 1024
+          
+          # System log
+          systemLog:
+            destination: file
+            logAppend: true
+            path: /data/db/mongod.log
+            component:
+              replication:
+                verbosity: 1
+        |||,
+      },
+    },
+
   // Generate webhook service URL for Metacontroller
   webhookServiceUrl(config)::
     'http://%s.%s.svc.cluster.local:%d' % [
@@ -38,6 +95,8 @@ local crds = import 'crds.libsonnet';
       if cfg.multicomponent.enabled then
         // Multi-component deployment (separate webhook, provisioner, healthcheck)
         {
+          gen4_mongod_config: $.mongodConfig(cfg.shared_config_namespace),
+          
           gen4_webhook_rbac:
             rbac.serviceAccount(cfg.webhook_metacontroller_sa, cfg.webhook_namespace) +
             rbac.fullOrchestrationRole(cfg.webhook_metacontroller_sa) +
@@ -105,6 +164,8 @@ local crds = import 'crds.libsonnet';
         // Uses deploymentControllerRBAC for combined webhook + provisioner permissions
         local deploymentRbac = rbac.deploymentControllerRBAC(cfg.webhook_metacontroller_sa, cfg.webhook_namespace);
         {
+          gen4_mongod_config: $.mongodConfig(cfg.shared_config_namespace),
+          
           gen4_serviceaccount: deploymentRbac.serviceAccount,
           gen4_clusterrole: deploymentRbac.clusterRole,
           gen4_clusterrolebinding: deploymentRbac.clusterRoleBinding,
@@ -271,6 +332,9 @@ local crds = import 'crds.libsonnet';
     {
       // Custom Resource Definitions (StorageAccount and ComputeInstance)
       crds: crds.all(crdGroup, crdVersion),
+      
+      // Shared MongoDB configuration ConfigMap (deployed to target namespace)
+      mongod_config: $.mongodConfig(targetNamespace),
       
       // Webhook ServiceAccount (no special K8s permissions - just HTTP responder)
       webhook_serviceAccount: rbac.serviceAccount(webhookName, webhookNamespace, imagePullSecrets),
