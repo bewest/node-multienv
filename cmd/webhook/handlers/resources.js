@@ -914,12 +914,15 @@ function renderInitMongoClusterJob(parent, storageAccount, config) {
         },
         spec: {
           restartPolicy: 'OnFailure',
+          // needs imagePullSecrets or serviceAccountName with imagePullSecrets
+          // to get pull private registry
+          serviceAccountName: 'multienv-tenantadmin',
           containers: [
             {
               name: 'init-replica-set',
               image: utilityImage,
               imagePullPolicy: utilityImagePullPolicy,
-              command: ['/app/container-images/ns-utility/scripts/entrypoints/init-replica-set.sh'],
+              command: ['/app/multienvctl/entrypoints/init-replica-set.sh'],
               env: [
                 {
                   name: 'MONGO_HOST',

@@ -40,9 +40,9 @@ const config = {
   imagePullPolicies: {
     mongodb: process.env.MONGODB_IMAGE_PULL_POLICY || 'IfNotPresent',
     nightscout: process.env.NIGHTSCOUT_IMAGE_PULL_POLICY || 'IfNotPresent',
-    nsUtility: process.env.NS_UTILITY_IMAGE_PULL_POLICY || 'IfNotPresent',
+    nsUtility: process.env.NS_UTILITY_IMAGE_PULL_POLICY || 'Always',
     podHealthcheck: process.env.POD_HEALTHCHECK_IMAGE_PULL_POLICY || 'IfNotPresent',
-    migrationJob: process.env.MIGRATION_JOB_IMAGE_PULL_POLICY || 'IfNotPresent',
+    migrationJob: process.env.MIGRATION_JOB_IMAGE_PULL_POLICY || 'Always',
   },
 
   // Container commands
@@ -119,7 +119,7 @@ const config = {
   // Storage configuration
   storage: {
     defaultStorageType: process.env.DEFAULT_STORAGE_TYPE || 'shared',
-    defaultStorageClass: process.env.STORAGE_CLASS || 'do-block-storage',
+    defaultStorageClass: process.env.STORAGE_CLASS || 'do-block-storage-xfs',
     defaultMongoStorageGi: process.env.MONGO_STORAGE_GI || '2',
     defaultMongoReplicas: process.env.MONGO_REPLICAS || '1',
   },
