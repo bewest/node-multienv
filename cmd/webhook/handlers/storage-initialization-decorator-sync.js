@@ -33,7 +33,7 @@ function createStorageInitializationDecoratorSync(config) {
    * Extracts Secret (parent), related resources
    */
   function initializeContext(req, res, next) {
-    const { object: secret, related } = req.body;
+    const { object: secret, attachments, related } = req.body;
     
     req.secret = secret;
     req.related = related || {};
@@ -45,9 +45,11 @@ function createStorageInitializationDecoratorSync(config) {
     
     // Check if replica set is already initialized
     req.rsInitialized = secret.metadata?.annotations?.['ns.mdn.io/replica-set-initialized'];
+    req.runtimeRequired = req.secret.metadata.annotations['ns.mdn.io/runtime-required'];
     
     console.log(`Storage initialization decorator sync for Secret: ${req.secretName}`);
     console.log(`  Storage account: ${req.storageAccountId}`);
+    console.log(`  Infrastructure required: ${secret.metadata.annotations['ns.mdn.io/runtime-required']}`);
     console.log(`  Replica set initialized: ${req.rsInitialized ? 'yes' : 'no'}`);
     
     return next();
@@ -97,6 +99,10 @@ function createStorageInitializationDecoratorSync(config) {
       console.log('  Replica set already initialized - skipping Job check');
       return next();
     }
+    if (req.runtimeRequired != 'dedicated') {
+      console.log('  No provisioning job required');
+      return next();
+    }
     
     // Find init Job in related resources
     const jobs = req.related['Job.batch/v1'] || {};
@@ -105,6 +111,7 @@ function createStorageInitializationDecoratorSync(config) {
     
     if (!req.initJob) {
       console.log(`  Init Job ${initJobName} not found - initialization not started yet`);
+      // renderInitMongoClusterJob
       return next();
     }
     
@@ -152,6 +159,10 @@ function createStorageInitializationDecoratorSync(config) {
    * This decorator tracks the migration state on the Secret
    */
   function handleMigrationIntent(req, res, next) {
+    if (req.secret.metadata.annotations['ns.mdn.io/runtime-required'] == 'dedicated') {
+      return next( );
+    }
+
     // Check for migration annotation on ComputeInstance (origin)
     const computeInstances = req.related['ComputeInstance.nightscout.io/v1alpha1'] || {};
     let migrationRequested = false;
@@ -164,37 +175,15 @@ function createStorageInitializationDecoratorSync(config) {
         break;
       }
     }
+
+
+    const isDedicated = req.storageAccount?.spec?.storageType === 'dedicated';
+    const isHybrid = req.storageAccount?.spec?.storageType === 'shared' && migrationRequested;
+    req.updatedAnnotations = req.updatedAnnotations || { ...(req.secret.metadata.annotations || {}) };
+    req.updatedAnnotations['ns.mdn.io/runtime-required'] = isDedicated || isHybrid ? 'dedicated' : 'shared';
+    req.annotationsModified = true;
     
-    const migrationInProgress = req.secret.metadata?.annotations?.['ns.mdn.io/migration-status'];
-    
-    if (migrationRequested) {
-      console.log('  Migration to dedicated storage requested');
-      
-      // Check if StorageAccount is now dedicated (migration infrastructure provisioned)
-      const isDedicated = req.storageAccount?.spec?.storageType === 'dedicated';
-      const isHybrid = req.storageAccount?.spec?.storageType === 'hybrid-migration';
-      
-      if (isDedicated || isHybrid) {
-        console.log(`  Storage is now ${req.storageAccount.spec.storageType} - migration infrastructure available`);
-        
-        // Update migration status if not already set
-        if (migrationInProgress !== 'infrastructure-ready') {
-          console.log('  Marking migration infrastructure as ready');
-          req.updatedAnnotations = req.updatedAnnotations || { ...(req.secret.metadata.annotations || {}) };
-          req.updatedAnnotations['ns.mdn.io/migration-status'] = 'infrastructure-ready';
-          req.updatedAnnotations['ns.mdn.io/migration-infrastructure-timestamp'] = new Date().toISOString();
-          req.annotationsModified = true;
-        }
-      } else {
-        // Migration requested but infrastructure not provisioned yet
-        console.log('  Migration requested but infrastructure not yet provisioned');
-        if (migrationInProgress !== 'pending') {
-          req.updatedAnnotations = req.updatedAnnotations || { ...(req.secret.metadata.annotations || {}) };
-          req.updatedAnnotations['ns.mdn.io/migration-status'] = 'pending';
-          req.annotationsModified = true;
-        }
-      }
-    }
+    console.log("SETTING runtime-required", req.updatedAnnotations);
     
     return next();
   }
@@ -215,8 +204,8 @@ function createStorageInitializationDecoratorSync(config) {
       // No changes needed - return current labels/annotations
       console.log('  No changes needed');
       res.send({
-        labels: req.secret.metadata?.labels || {},
-        annotations: req.secret.metadata?.annotations || {}
+        // labels: req.secret.metadata?.labels || {},
+        // annotations: req.secret.metadata?.annotations || {}
       });
     }
   }
@@ -226,8 +215,8 @@ function createStorageInitializationDecoratorSync(config) {
     initializeContext,
     discoverStorageAccount,
     checkInitJob,
-    updateAnnotations,
     handleMigrationIntent,
+    // updateAnnotations,
     formatResponse,
   ];
 }

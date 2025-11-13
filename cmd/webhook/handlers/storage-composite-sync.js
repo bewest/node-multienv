@@ -49,8 +49,7 @@ function createStorageCompositeSync(config) {
     res.status = { phase: 'Pending', conditions: [ ] };
 
     // Determine provisioning needs upfront (accommodates hybrid migration scenarios)
-    req.needsDedicatedInfra = (storageType === 'dedicated' || storageType === 'hybrid-migration');
-    req.needsSharedAccess = (storageType === 'shared' || storageType === 'hybrid-migration');
+    // req.needsDedicatedInfra = (storageType === 'dedicated' || storageType === 'hybrid-migration');
 
     // Count tenants using this storage account (from related ComputeInstances)
     // const tenantUsage = countTenantUsage(req.related, req.storageAccount);
@@ -88,6 +87,7 @@ function createStorageCompositeSync(config) {
       // res.children.push(mongo_secret);
       return next( );
     }
+    req.needsDedicatedInfra = (existingAppSecret.metadata?.annotations['ns.mdn.io/runtime-required'] == 'dedicated');
 
     res.status.phase = 'Pending';
     req.storageSecret = existingAppSecret;
@@ -202,8 +202,7 @@ function createStorageCompositeSync(config) {
   }
 
   function render_specified_dedicated (req, res, next) {
-    if (req.spec.storageType != 'dedicated') {
-      // if (!migrate-to-dedicated)
+    if (!req.needsDedicatedInfra) {
       return next( );
     }
 
@@ -296,7 +295,7 @@ function createStorageCompositeSync(config) {
       // No Job exists - render it
       console.log(`  Rendering init-mongo-cluster Job for ${storageAccount}`);
       const initJob = renderInitMongoClusterJob(req.parent, storageAccount, config);
-      res.children.push(initJob);
+      // res.children.push(initJob);
       
       // Set status condition: initialization in progress
       res.status.conditions.push({
@@ -332,7 +331,7 @@ function createStorageCompositeSync(config) {
         // Job failed - keep rendering to allow retry (up to backoffLimit)
         console.log(`  Init Job failed (${failed} failures) - keeping Job for retry`);
         const initJob = renderInitMongoClusterJob(req.parent, storageAccount, config);
-        res.children.push(initJob);
+        // res.children.push(initJob);
         
         res.status.conditions.push({
           type: 'ReplicaSetReady',
@@ -343,8 +342,8 @@ function createStorageCompositeSync(config) {
       } else {
         // Job still running - re-add to keep it alive
         console.log(`  Init Job in progress (active=${active}) - keeping Job alive`);
-        const initJob = renderInitMongoClusterJob(req.parent, storageAccount, config);
-        res.children.push(initJob);
+        // const initJob = renderInitMongoClusterJob(req.parent, storageAccount, config);
+        // res.children.push(initJob);
         
         res.status.conditions.push({
           type: 'ReplicaSetReady',

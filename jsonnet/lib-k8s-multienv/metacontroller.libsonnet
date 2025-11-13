@@ -304,9 +304,9 @@
                 operator: 'Exists',
               },
               {
-                key: 'ns.mdn.io/credential-type',
+                key: 'ns.mdn.io/composite',
                 operator: 'In',
-                values: ['mongodb-auth'],
+                values: ['key', 'mongodb-auth'],
               },
             ],
           },
@@ -364,7 +364,7 @@
       crdVersion=crdVersion,
       resyncPeriodSeconds=computeResyncSeconds,
     ),
-    pvcBackup: $.pvcBackupDecorator(
+    pvcBackup:: $.pvcBackupDecorator(
       webhookUrl=webhookServiceUrl + '/decorator/sync',
       resyncPeriodSeconds=pvcResyncSeconds,
     ),
@@ -380,7 +380,7 @@
       crdVersion=crdVersion,
       resyncPeriodSeconds=initializationResyncSeconds,
     ),
-    instanceUserdata: $.instanceUserdataDecorator(
+    instanceUserdata:: $.instanceUserdataDecorator(
       webhookServiceUrl=webhookServiceUrl,
       crdGroup=crdGroup,
       crdVersion=crdVersion,

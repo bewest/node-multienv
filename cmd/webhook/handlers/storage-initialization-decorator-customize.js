@@ -7,7 +7,7 @@
 
 function createStorageInitializationDecoratorCustomize(config) {
   return function(req, res, next) {
-    const { object: secret } = req.body;
+    const { parent: secret } = req.body;
     
     // Extract storage account ID from Secret labels
     const storageAccountId = secret.metadata.labels?.['storage.nightscout.org/account'];
@@ -27,14 +27,20 @@ function createStorageInitializationDecoratorCustomize(config) {
       {
         apiVersion: 'nightscout.io/v1alpha1',
         resource: 'storageaccounts',
-        namespace: secret.metadata.namespace,
-        names: [storageAccountId],
+        // namespace: secret.metadata.namespace,
+        // names: [storageAccountId],
+        labelSelector: {
+          matchLabels: {
+            'storage.nightscout.org/account': storageAccountId,
+            // 'app.kubernetes.io/component': 'init-job',
+          },
+        },
       },
       // init-mongo-cluster Jobs - to detect completion
       {
         apiVersion: 'batch/v1',
         resource: 'jobs',
-        namespace: secret.metadata.namespace,
+        // namespace: secret.metadata.namespace,
         labelSelector: {
           matchLabels: {
             'storage.nightscout.org/account': storageAccountId,
@@ -46,7 +52,7 @@ function createStorageInitializationDecoratorCustomize(config) {
       {
         apiVersion: 'nightscout.io/v1alpha1',
         resource: 'computeinstances',
-        namespace: secret.metadata.namespace,
+        // namespace: secret.metadata.namespace,
         labelSelector: {
           matchLabels: {
             'storage.nightscout.org/account': storageAccountId,
