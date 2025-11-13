@@ -23,9 +23,9 @@ data:
     # Network interfaces
     net:
       port: 27017
-      # bindIpAll allows connections from all interfaces (required for replication)
-      # DigitalOcean private networking is enforced via NetworkPolicy
-      bindIpAll: true
+      # bindIp is overridden via CLI --bind_ip flag in StatefulSet args
+      # Default binds to localhost only for security
+      bindIp: 127.0.0.1
     
     # Security
     security:

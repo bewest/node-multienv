@@ -56,6 +56,7 @@ The platform utilizes a **CRD-based two-composite architecture** (Storage and Co
 - **Two-Secret Architecture**: Separates root MongoDB credentials from application credentials for enhanced security.
 - **Selector-Based Resource Protection**: Implements a hybrid lifecycle pattern using selectors to protect critical resources (e.g., PVCs, secrets) from accidental deletion, allowing them to survive parent CRD deletion.
 - **URI-Based Authentication**: MongoDB utility Jobs (init-replica-set, create-user) use complete connection URIs with admin authentication, ensuring retry reliability and proper credential isolation with `authSource=admin`.
+- **Keyfile-Based Replica Authentication**: MongoDB replica sets use shared keyfile Secrets (per StorageAccount) for member authentication. Keyfiles are child resources (deleted with parent CR, regenerable from webhook). Init containers prepare keyfile permissions (chmod 400, chown 999:999) before MongoDB startup. Protection mechanism for keyfiles is deferred to future implementation.
 
 ## External Dependencies
 - **Strimzi Kafka Operator**: Manages Kafka clusters and KafkaConnect.

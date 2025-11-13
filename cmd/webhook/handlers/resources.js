@@ -206,7 +206,8 @@ function renderMongoDB(parent, databaseName, config) {
               imagePullPolicy: mongoImagePullPolicy,
               args: [
                 '--config', '/config/mongod.conf',
-                '--replSet', 'rs0'
+                '--replSet', 'rs0',
+                '--bind_ip', '127.0.0.1,$(POD_IP)'
               ],
               ports: [
                 {
@@ -215,6 +216,14 @@ function renderMongoDB(parent, databaseName, config) {
                 }
               ],
               env: [
+                {
+                  name: 'POD_IP',
+                  valueFrom: {
+                    fieldRef: {
+                      fieldPath: 'status.podIP'
+                    }
+                  }
+                },
                 {
                   name: 'MONGO_INITDB_ROOT_USERNAME',
                   valueFrom: {
