@@ -869,7 +869,9 @@ function renderMigrationJob(parent, config) {
 function renderInitMongoClusterJob(parent, storageAccount, config) {
   const namespace = parent.metadata.namespace || 'hosted-tenants';
   const serviceName = `${storageAccount}-mongo`;
+  const secretName = `${storageAccount}-mongo-auth`;
   const jobName = `${storageAccount}-init-mongo-cluster`;
+  const mongoHost = `${serviceName}-0.${serviceName}`;
   
   // Standard labels for this storage account
   const standardLabels = {
@@ -917,7 +919,7 @@ function renderInitMongoClusterJob(parent, storageAccount, config) {
               env: [
                 {
                   name: 'MONGO_HOST',
-                  value: `${serviceName}-0.${serviceName}`
+                  value: mongoHost
                 },
                 {
                   name: 'MONGO_PORT',
@@ -926,6 +928,28 @@ function renderInitMongoClusterJob(parent, storageAccount, config) {
                 {
                   name: 'MONGO_RS_NAME',
                   value: 'rs0'
+                },
+                {
+                  name: 'MONGO_ADMIN_USERNAME',
+                  valueFrom: {
+                    secretKeyRef: {
+                      name: secretName,
+                      key: 'MONGO_INITDB_ROOT_USERNAME'
+                    }
+                  }
+                },
+                {
+                  name: 'MONGO_ADMIN_PASSWORD',
+                  valueFrom: {
+                    secretKeyRef: {
+                      name: secretName,
+                      key: 'MONGO_INITDB_ROOT_PASSWORD'
+                    }
+                  }
+                },
+                {
+                  name: 'MONGO_ADMIN_URI',
+                  value: `mongodb://$(MONGO_ADMIN_USERNAME):$(MONGO_ADMIN_PASSWORD)@${mongoHost}:27017/?authSource=admin&replicaSet=rs0`
                 }
               ],
               resources: {
