@@ -76,7 +76,7 @@ create_nightscout_user() {
   
   # Check if user exists
   local user_exists
-  user_exists=$(mongosh "${admin_uri}" --quiet --eval "
+  user_exists=$(mongo "${admin_uri}" --quiet --eval "
     try {
       const users = db.getSiblingDB('${database}').getUsers();
       const user = users.users.find(u => u.user === '${username}');
@@ -96,7 +96,7 @@ create_nightscout_user() {
       log_info "User exists - dropping and recreating (force mode)"
       
       local drop_result
-      drop_result=$(mongosh "${admin_uri}" --quiet --eval "
+      drop_result=$(mongo "${admin_uri}" --quiet --eval "
         try {
           db.getSiblingDB('${database}').dropUser('${username}');
           print('DROPPED');
@@ -119,7 +119,7 @@ create_nightscout_user() {
   log_info "Creating user with readWrite and dbAdmin roles"
   
   local create_result
-  create_result=$(mongosh "${admin_uri}" --quiet --eval "
+  create_result=$(mongo "${admin_uri}" --quiet --eval "
     try {
       db.getSiblingDB('${database}').createUser({
         user: '${username}',
@@ -154,7 +154,7 @@ verify_user_access() {
   local user_uri="mongodb://${username}:${password}@${host}:${port}/${database}?authSource=${database}"
   
   local verify_result
-  verify_result=$(mongosh "${user_uri}" --quiet --eval "
+  verify_result=$(mongo "${user_uri}" --quiet --eval "
     try {
       db.adminCommand('ping');
       const stats = db.stats();

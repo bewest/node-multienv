@@ -7,6 +7,7 @@ LIB_DIR="${SCRIPT_DIR}/../lib"
 source "${LIB_DIR}/common.sh"
 source "${LIB_DIR}/mongodb-utils.sh"
 
+set -x;
 main() {
   log_info "Starting MongoDB replica set initialization"
   

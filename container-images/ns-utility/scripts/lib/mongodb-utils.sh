@@ -3,7 +3,6 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/common.sh"
-alias mongosh=mongo
 
 wait_for_mongodb() {
   local host="${1}"
@@ -18,10 +17,10 @@ wait_for_mongodb() {
     
     # Use || true to prevent set -e from killing the script on connection failure
     local result
-    result=$(mongosh --host "${host}" --port "${port}" --eval "db.adminCommand('ping')" --quiet 2>&1 || true)
+    result=$(mongo --host "${host}" --port "${port}" --eval "db.adminCommand('ping')" --quiet 2>&1 || true)
     local exit_code=$?
     
-    # Check if ping was successful (mongosh returns 0 and output contains "ok")
+    # Check if ping was successful (mongo returns 0 and output contains "ok")
     if [[ ${exit_code} -eq 0 ]] && echo "${result}" | grep -q "ok.*1"; then
       log_info "MongoDB is ready at ${host}:${port}"
       return 0
@@ -58,21 +57,21 @@ EOF
 )
   
   local result
-  result=$(mongosh --host "${host}" --port "${port}" --quiet --eval "
+  result=$(mongo --host "${host}" --port "${port}" --quiet --eval "
     try {
       const status = rs.status();
-      print('ALREADY_INITIALIZED');
-    } catch(e) {
-      if (e.codeName === 'NotYetInitialized') {
+      if (status.ok) {
+        print('ALREADY_INITIALIZED');
+      } else if (status.codeName == 'NotYetInitialized') {
         const result = rs.initiate(${rs_config});
         if (result.ok === 1) {
           print('INITIALIZED');
         } else {
           print('ERROR: ' + JSON.stringify(result));
         }
-      } else {
-        print('ERROR: ' + e.message);
       }
+    } catch(e) {
+      print('ERROR: ' + e.message);
     }
   " 2>&1)
   
@@ -107,7 +106,7 @@ wait_for_replica_set_ready() {
   
   while [[ ${elapsed} -lt ${timeout} ]]; do
     local status
-    status=$(mongosh --host "${host}" --port "${port}" --quiet --eval "
+    status=$(mongo --host "${host}" --port "${port}" --quiet --eval "
       try {
         const status = rs.status();
         const primary = status.members.find(m => m.state === 1);
@@ -142,7 +141,7 @@ verify_mongodb_health() {
   log_info "Verifying MongoDB health at ${host}:${port}"
   
   local ping_result
-  ping_result=$(mongosh --host "${host}" --port "${port}" --quiet --eval "
+  ping_result=$(mongo --host "${host}" --port "${port}" --quiet --eval "
     const result = db.adminCommand('ping');
     print(result.ok === 1 ? 'OK' : 'FAILED');
   " 2>&1)
@@ -171,10 +170,10 @@ wait_for_mongodb_uri() {
     
     # Use || true to prevent set -e from killing the script on connection failure
     local result
-    result=$(mongosh "${uri}" --eval "db.adminCommand('ping')" --quiet 2>&1 || true)
+    result=$(mongo "${uri}" --eval "db.adminCommand('ping')" --quiet 2>&1 || true)
     local exit_code=$?
     
-    # Check if ping was successful (mongosh returns 0 and output contains "ok")
+    # Check if ping was successful (mongo returns 0 and output contains "ok")
     if [[ ${exit_code} -eq 0 ]] && echo "${result}" | grep -q "ok.*1"; then
       log_info "MongoDB is ready via URI"
       return 0
@@ -212,21 +211,21 @@ EOF
 )
   
   local result
-  result=$(mongosh "${uri}" --quiet --eval "
+  result=$(mongo "${uri}" --quiet --eval "
     try {
       const status = rs.status();
-      print('ALREADY_INITIALIZED');
-    } catch(e) {
-      if (e.codeName === 'NotYetInitialized') {
+      if (status.ok) {
+        print('ALREADY_INITIALIZED');
+      } else if (status.codeName == 'NotYetInitialized') {
         const result = rs.initiate(${rs_config});
         if (result.ok === 1) {
           print('INITIALIZED');
         } else {
           print('ERROR: ' + JSON.stringify(result));
         }
-      } else {
-        print('ERROR: ' + e.message);
       }
+    } catch(e) {
+      print('ERROR: ' + e.message);
     }
   " 2>&1)
   
@@ -260,7 +259,7 @@ wait_for_replica_set_ready_uri() {
   
   while [[ ${elapsed} -lt ${timeout} ]]; do
     local status
-    status=$(mongosh "${uri}" --quiet --eval "
+    status=$(mongo "${uri}" --quiet --eval "
       try {
         const status = rs.status();
         const primary = status.members.find(m => m.state === 1);
@@ -294,7 +293,7 @@ verify_mongodb_health_uri() {
   log_info "Verifying MongoDB health via URI"
   
   local ping_result
-  ping_result=$(mongosh "${uri}" --quiet --eval "
+  ping_result=$(mongo "${uri}" --quiet --eval "
     const result = db.adminCommand('ping');
     print(result.ok === 1 ? 'OK' : 'FAILED');
   " 2>&1)
@@ -312,7 +311,7 @@ get_replica_set_status() {
   local host="$1"
   local port="${2:-27017}"
   
-  mongosh --host "${host}" --port "${port}" --quiet --eval "
+  mongo --host "${host}" --port "${port}" --quiet --eval "
     try {
       const status = rs.status();
       print(JSON.stringify({
@@ -335,7 +334,7 @@ create_user() {
   
   log_info "Creating user '${username}' in database '${database}'"
   
-  mongosh --host "${host}" --port "${port}" --quiet --eval "
+  mongo --host "${host}" --port "${port}" --quiet --eval "
     db = db.getSiblingDB('${database}');
     try {
       db.createUser({
@@ -359,7 +358,7 @@ get_database_size() {
   local port="$2"
   local database="$3"
   
-  mongosh --host "${host}" --port "${port}" --quiet --eval "
+  mongo --host "${host}" --port "${port}" --quiet --eval "
     db = db.getSiblingDB('${database}');
     const stats = db.stats();
     print(JSON.stringify({

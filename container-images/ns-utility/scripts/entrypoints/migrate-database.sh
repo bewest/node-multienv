@@ -110,7 +110,7 @@ verify_migration() {
   local critical_collections=("entries" "treatments")
   for collection in "${critical_collections[@]}"; do
     local count
-    count=$(mongosh --host="${host}" --port="${port}" --quiet --eval "
+    count=$(mongo --host="${host}" --port="${port}" --quiet --eval "
       db = db.getSiblingDB('${database}');
       print(db.${collection}.countDocuments());
     " 2>/dev/null)

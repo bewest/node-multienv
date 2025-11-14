@@ -46,7 +46,7 @@ cat <<'EOF'
 ║     KAFKA_CONNECT_URL: ${KAFKA_CONNECT_URL:-<not set>}
 ║                                                               ║
 ║   Tools Available:                                            ║
-║     mongosh, mongodump, mongorestore, kafka-*.sh             ║
+║     mongo, mongodump, mongorestore, kafka-*.sh             ║
 ║     curl, jq, kubectl (if kubeconfig available)              ║
 ║                                                               ║
 ╚═══════════════════════════════════════════════════════════════╝
