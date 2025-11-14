@@ -22,43 +22,6 @@
  * This renderMongoDB function creates a legacy Secret that is NOT used in Gen 4.
  * It remains for backward compatibility during migration from Gen 3.
  */
-
-/**
- * Helper: Compute MongoDB hostnames for StatefulSet-based deployments
- * 
- * Returns canonical hostnames for MongoDB replica sets:
- * - podHostname: FQDN of pod-0 (for admin operations and rs.initiate)
- * - headlessServiceName: Service name (for app connections after initialization)
- * 
- * StatefulSet pods get stable network identities. For replica sets, we must use
- * the FQDN that MongoDB will store in its replica set configuration.
- * 
- * @param {string} storageAccount - Storage account ID  
- * @param {string} databaseName - Database name from CRD status
- * @param {string} namespace - Kubernetes namespace
- * @returns {object} { podHostname, headlessServiceName, podFQDN, serviceFQDN }
- */
-function getMongoDBHostnames(storageAccount, databaseName, namespace) {
-  const headlessServiceName = `mongo-${databaseName}`;
-  const podName = `${storageAccount}-mongo-0`;
-  
-  // Fully qualified domain names
-  const serviceFQDN = `${headlessServiceName}.${namespace}.svc.cluster.local`;
-  const podFQDN = `${podName}.${serviceFQDN}`;
-  
-  return {
-    // For admin operations (init, bootstrap) - always connect to pod-0
-    podHostname: podFQDN,
-    
-    // For application connections (after rs initialized) - connect via service
-    headlessServiceName: headlessServiceName,
-    
-    // Full FQDNs for explicit use
-    podFQDN: podFQDN,
-    serviceFQDN: serviceFQDN
-  };
-}
-
 function renderMongoDB(parent, databaseName, config, storage) {
   // Storage account ID from parent labels/annotation?
   const storageAccount = parent.metadata.labels?.['storage.nightscout.org/account'];
@@ -1007,14 +970,11 @@ function renderMigrationJob(parent, config) {
 function renderInitMongoClusterJob(parent, storageAccount, config) {
   console.log("RENDER JOB INPUT", parent);
   const namespace = parent.metadata.namespace || 'hosted-tenants';
-  const databaseName = parent.status.databaseName;
+  // const serviceName = `${storageAccount}-mongo`;
+  const serviceName = `mongo-${parent.status.databaseName}`;
   const secretName = `${storageAccount}-mongo-auth`;
   const jobName = `${storageAccount}-init-mongo-cluster`;
-  
-  // Get canonical MongoDB hostnames
-  const mongoHostnames = getMongoDBHostnames(storageAccount, databaseName, namespace);
-  const podHostname = mongoHostnames.podHostname;  // FQDN for pod-0
-  const headlessServiceName = mongoHostnames.headlessServiceName;
+  const mongoHost = `${storageAccount}-mongo-0.${serviceName}.${namespace}.svc.cluster.local`;
   
   // Standard labels for this storage account
   const standardLabels = {
@@ -1066,7 +1026,7 @@ function renderInitMongoClusterJob(parent, storageAccount, config) {
               env: [
                 {
                   name: 'MONGO_HOST',
-                  value: podHostname,  // Full FQDN for pod-0
+                  value: mongoHost,
                 },
                 {
                   name: 'MONGO_PORT',
@@ -1096,9 +1056,7 @@ function renderInitMongoClusterJob(parent, storageAccount, config) {
                 },
                 {
                   name: 'MONGO_ADMIN_URI',
-                  // Connect via headless service (any pod works for connection)
-                  // MONGO_HOST env var contains the FQDN used for rs.initiate() member config
-                  value: `mongodb://$(MONGO_ADMIN_USERNAME):$(MONGO_ADMIN_PASSWORD)@${headlessServiceName}:27017/?authSource=admin`
+                  value: `mongodb://$(MONGO_ADMIN_USERNAME):$(MONGO_ADMIN_PASSWORD)@${serviceName}:27017/?authSource=admin`
                 }
               ],
               resources: {
