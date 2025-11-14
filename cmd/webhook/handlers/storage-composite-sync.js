@@ -118,7 +118,7 @@ function createStorageCompositeSync(config) {
     // Generate 64 random bytes, base64 encoded
     const keyfileData = crypto.randomBytes(64).toString('base64');
     
-    const tier = req.spec.tier || 'basic';
+    // const tier = req.spec.tier || 'basic';
     
     const keyfileSecret = {
       apiVersion: 'v1',
@@ -127,14 +127,14 @@ function createStorageCompositeSync(config) {
       metadata: {
         name: keyfileSecretName,
         labels: {
-          'app.kubernetes.io/name': 'mongodb',
+          'app.kubernetes.io/name': 'mongodb-keyfile',
           'app.kubernetes.io/component': 'database',
           'app.kubernetes.io/managed-by': 'metacontroller',
           'ns.mdn.io/composite': 'storage',
           'storage.nightscout.org/account': storageAccount
         },
         annotations: {
-          'ns.mdn.io/tier': tier,
+          // 'ns.mdn.io/tier': tier,
           'ns.mdn.io/created-at': new Date().toISOString(),
           'ns.mdn.io/description': 'MongoDB replica set keyfile for member authentication'
         }

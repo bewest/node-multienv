@@ -20,7 +20,9 @@ main() {
     local rs_name="${MONGO_RS_NAME:-rs0}"
     
     log_info "Configuration:"
-    log_info "  URI: ${mongo_uri%%:*}://***:***@${mongo_host}:${mongo_port}/?authSource=admin&replicaSet=${rs_name}"
+    # log_info "  URI: ${mongo_uri%%:*}://***:***@${mongo_host}:${mongo_port}/?authSource=admin&replicaSet=${rs_name}"
+    # mongo_uri="${MONGO_ADMIN_URI}"
+    log_info "  URI: $mongo_uri"
     
     if ! wait_for_mongodb_uri "${mongo_uri}" 120; then
       die "MongoDB is not available at URI"

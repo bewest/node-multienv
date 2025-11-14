@@ -28,6 +28,9 @@ const config = {
   },
 
   // Container images
+  multienv: {
+    imagePullSecrets: parseArray(process.env.MULTIENV_IMAGE_PULLSECRETS) || [],
+  },
   images: {
     mongodb: process.env.MONGODB_IMAGE || 'mongo:6',
     nightscout: process.env.NIGHTSCOUT_IMAGE || 'nightscout/cgm-remote-monitor:latest',
@@ -35,7 +38,6 @@ const config = {
     podHealthcheck: process.env.POD_HEALTHCHECK_IMAGE || 'pod-healthcheck:latest',
     migrationJob: process.env.MIGRATION_JOB_IMAGE || 'ns-utility:latest',
   },
-
   // Image pull policies
   imagePullPolicies: {
     mongodb: process.env.MONGODB_IMAGE_PULL_POLICY || 'IfNotPresent',
@@ -81,6 +83,17 @@ const config = {
     
     // Pod healthcheck sidecar
     podHealthcheck: {
+      requests: {
+        cpu: process.env.POD_HEALTHCHECK_REQUESTS_CPU || '10m',
+        memory: process.env.POD_HEALTHCHECK_REQUESTS_MEMORY || '32Mi',
+      },
+      limits: {
+        cpu: process.env.POD_HEALTHCHECK_LIMITS_CPU || '50m',
+        memory: process.env.POD_HEALTHCHECK_LIMITS_MEMORY || '64Mi',
+      },
+    },
+    // Utility container
+    utility: {
       requests: {
         cpu: process.env.POD_HEALTHCHECK_REQUESTS_CPU || '10m',
         memory: process.env.POD_HEALTHCHECK_REQUESTS_MEMORY || '32Mi',

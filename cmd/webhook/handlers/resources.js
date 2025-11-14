@@ -151,13 +151,12 @@ function renderMongoDB(parent, databaseName, config) {
         spec: {
           imagePullSecrets: parent.data.IMAGE_PULL_SECRET 
             ? [{ name: parent.data.IMAGE_PULL_SECRET }] 
-            : undefined,
+            : config.multienv.imagePullSecrets.map(function (el, v) { return { name: el }; }),
           initContainers: [
             {
               name: 'prepare-keyfile',
-              image: config.images.utility,
-              imagePullPolicy: config.imagePullPolicies.utility,
-              command: ['/scripts/entrypoints/prepare-keyfile.sh'],
+              image: config.images.nsUtility,
+              command: ['/app/multienvctl/entrypoints/prepare-keyfile.sh'],
               env: [
                 {
                   name: 'KEYFILE_SOURCE',
@@ -265,7 +264,7 @@ function renderMongoDB(parent, databaseName, config) {
                 {
                   name: 'keyfile-prep',
                   mountPath: '/data/configdb',
-                  readOnly: true
+                  // readOnly: true
                 }
               ],
               readinessProbe: {
@@ -1057,7 +1056,7 @@ function renderInitMongoClusterJob(parent, storageAccount, config) {
                 },
                 {
                   name: 'MONGO_ADMIN_URI',
-                  value: `mongodb://$(MONGO_ADMIN_USERNAME):$(MONGO_ADMIN_PASSWORD)@${serviceName}:27017/?authSource=admin&replicaSet=rs0`
+                  value: `mongodb://$(MONGO_ADMIN_USERNAME):$(MONGO_ADMIN_PASSWORD)@${serviceName}:27017/?authSource=admin`
                 }
               ],
               resources: {
