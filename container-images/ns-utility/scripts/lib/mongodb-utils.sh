@@ -14,16 +14,29 @@ wait_for_mongodb() {
   log_info "Waiting for MongoDB at ${host}:${port} (timeout: ${timeout}s)"
   
   while [[ ${elapsed} -lt ${timeout} ]]; do
-    if mongosh --host "${host}" --port "${port}" --eval "db.adminCommand('ping')" --quiet &>/dev/null; then
+    log_info "Attempt ${elapsed}s: Testing MongoDB connection..."
+    
+    # Use || true to prevent set -e from killing the script on connection failure
+    local result
+    result=$(mongosh --host "${host}" --port "${port}" --eval "db.adminCommand('ping')" --quiet 2>&1 || true)
+    local exit_code=$?
+    
+    # Check if ping was successful (mongosh returns 0 and output contains "ok")
+    if [[ ${exit_code} -eq 0 ]] && echo "${result}" | grep -q "ok.*1"; then
       log_info "MongoDB is ready at ${host}:${port}"
       return 0
     fi
     
+    # Log first failure for debugging
+    if [[ ${elapsed} -eq 0 ]]; then
+      log_warn "Initial connection failed (will retry): ${result}"
+    fi
+    
     sleep 3
-    ((elapsed+=3))
+    elapsed=$((elapsed + 3))
   done
   
-  log_error "Timeout waiting for MongoDB at ${host}:${port}"
+  log_error "Timeout waiting for MongoDB at ${host}:${port} after ${timeout}s"
   return 1
 }
 
@@ -106,18 +119,19 @@ wait_for_replica_set_ready() {
       } catch(e) {
         print('ERROR');
       }
-    " 2>&1)
+    " 2>&1 || true)
     
     if [[ "${status}" == "READY" ]]; then
       log_info "Replica set is ready with primary elected"
       return 0
     fi
     
+    log_info "Replica set status: ${status} (elapsed: ${elapsed}s)"
     sleep 2
-    ((elapsed+=2))
+    elapsed=$((elapsed + 2))
   done
   
-  log_error "Timeout waiting for replica set to become ready"
+  log_error "Timeout waiting for replica set to become ready after ${timeout}s"
   return 1
 }
 
@@ -153,16 +167,29 @@ wait_for_mongodb_uri() {
   log_info "Waiting for MongoDB via URI (timeout: ${timeout}s)"
   
   while [[ ${elapsed} -lt ${timeout} ]]; do
-    if mongosh "${uri}" --eval "db.adminCommand('ping')" --quiet &>/dev/null; then
+    log_info "Attempt ${elapsed}s: Testing MongoDB connection..."
+    
+    # Use || true to prevent set -e from killing the script on connection failure
+    local result
+    result=$(mongosh "${uri}" --eval "db.adminCommand('ping')" --quiet 2>&1 || true)
+    local exit_code=$?
+    
+    # Check if ping was successful (mongosh returns 0 and output contains "ok")
+    if [[ ${exit_code} -eq 0 ]] && echo "${result}" | grep -q "ok.*1"; then
       log_info "MongoDB is ready via URI"
       return 0
     fi
     
+    # Log first failure for debugging
+    if [[ ${elapsed} -eq 0 ]]; then
+      log_warn "Initial connection failed (will retry): ${result}"
+    fi
+    
     sleep 3
-    ((elapsed+=3))
+    elapsed=$((elapsed + 3))
   done
   
-  log_error "Timeout waiting for MongoDB via URI"
+  log_error "Timeout waiting for MongoDB via URI after ${timeout}s"
   return 1
 }
 
@@ -245,18 +272,19 @@ wait_for_replica_set_ready_uri() {
       } catch(e) {
         print('ERROR');
       }
-    " 2>&1)
+    " 2>&1 || true)
     
     if [[ "${status}" == "READY" ]]; then
       log_info "Replica set is ready with primary elected"
       return 0
     fi
     
+    log_info "Replica set status: ${status} (elapsed: ${elapsed}s)"
     sleep 2
-    ((elapsed+=2))
+    elapsed=$((elapsed + 2))
   done
   
-  log_error "Timeout waiting for replica set to become ready"
+  log_error "Timeout waiting for replica set to become ready after ${timeout}s"
   return 1
 }
 
