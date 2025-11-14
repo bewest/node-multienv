@@ -1096,9 +1096,9 @@ function renderInitMongoClusterJob(parent, storageAccount, config) {
                 },
                 {
                   name: 'MONGO_ADMIN_URI',
-                  // CRITICAL: Use pod FQDN (same as MONGO_HOST) for replica set initialization
-                  // MongoDB stores this hostname in rs.initiate() and other members must connect to it
-                  value: `mongodb://$(MONGO_ADMIN_USERNAME):$(MONGO_ADMIN_PASSWORD)@${podHostname}:27017/?authSource=admin`
+                  // Connect via headless service (any pod works for connection)
+                  // MONGO_HOST env var contains the FQDN used for rs.initiate() member config
+                  value: `mongodb://$(MONGO_ADMIN_USERNAME):$(MONGO_ADMIN_PASSWORD)@${headlessServiceName}:27017/?authSource=admin`
                 }
               ],
               resources: {
