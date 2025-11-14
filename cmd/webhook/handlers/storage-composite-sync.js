@@ -104,9 +104,10 @@ function createStorageCompositeSync(config) {
     const storageAccount = req.storageAccount;
     const keyfileSecretName = `${storageAccount}-mongo-keyfile`;
     
-    // Check if keyfile Secret already exists (in children, not related)
-    const existingKeyfile = req.children['Secret.v1']?.[keyfileSecretName];
+    // Check if keyfile Secret already exists (in children, or related)
+    const existingKeyfile = req.children['Secret.v1']?.[keyfileSecretName] || req.related['Secret.v1']?.[keyfileSecretName];
     
+    req.existingKeyfile = existingKeyfile;
     if (existingKeyfile) {
       console.log(`  Keyfile Secret ${keyfileSecretName} already exists`);
       return next();
@@ -274,7 +275,7 @@ function createStorageCompositeSync(config) {
       // var nsuserPassword = Buffer.from(secretData.MONGO_PASSWORD || '', 'base64').toString('utf-8');
       // res.children.push(updated_secret);
 
-      const mongoResources = renderMongoDB(req.storageConfig, databaseName, config);
+      const mongoResources = renderMongoDB(req.storageConfig, databaseName, config, req.parent);
       res.children.push(...mongoResources);
       // Check if NS user creation is needed
       
@@ -321,6 +322,9 @@ function createStorageCompositeSync(config) {
     // Check if we have a storage Secret
     if (!req.storageSecret) {
       console.log(`  Replica set init: No storage Secret yet, skipping`);
+      return next();
+    }
+    if (!req.parent?.status?.databaseName) {
       return next();
     }
 

@@ -22,7 +22,7 @@
  * This renderMongoDB function creates a legacy Secret that is NOT used in Gen 4.
  * It remains for backward compatibility during migration from Gen 3.
  */
-function renderMongoDB(parent, databaseName, config) {
+function renderMongoDB(parent, databaseName, config, storage) {
   // Storage account ID from parent labels/annotation?
   const storageAccount = parent.metadata.labels?.['storage.nightscout.org/account'];
   const namespace = parent.metadata.namespace;
@@ -34,7 +34,7 @@ function renderMongoDB(parent, databaseName, config) {
   // MongoDB configuration
   const mongoImage = config.images.mongodb;
   const mongoImagePullPolicy = config.imagePullPolicies.mongodb;
-  const mongoReplicas = parseInt(config.storage.defaultMongoReplicas);
+  const mongoReplicas = parseInt(storage.spec.replicas || parent.config.storage.defaultMongoReplicas);
   
   // Extract version from image
   const mongoVersion = mongoImage.split(':')[1] || 'latest';
@@ -974,7 +974,7 @@ function renderInitMongoClusterJob(parent, storageAccount, config) {
   const serviceName = `mongo-${parent.status.databaseName}`;
   const secretName = `${storageAccount}-mongo-auth`;
   const jobName = `${storageAccount}-init-mongo-cluster`;
-  const mongoHost = `${serviceName}-0.${serviceName}`;
+  const mongoHost = `${storageAccount}-mongo-0.${serviceName}.${namespace}.svc.cluster.local`;
   
   // Standard labels for this storage account
   const standardLabels = {
@@ -1014,7 +1014,7 @@ function renderInitMongoClusterJob(parent, storageAccount, config) {
         },
         spec: {
           restartPolicy: 'OnFailure',
-          // needs imagePullSecrets or serviceAccountName with imagePullSecrets
+          // XXX: needs imagePullSecrets or serviceAccountName with imagePullSecrets
           // to get pull private registry
           serviceAccountName: 'multienv-tenantadmin',
           containers: [
@@ -1026,7 +1026,7 @@ function renderInitMongoClusterJob(parent, storageAccount, config) {
               env: [
                 {
                   name: 'MONGO_HOST',
-                  value: serviceName,
+                  value: mongoHost,
                 },
                 {
                   name: 'MONGO_PORT',

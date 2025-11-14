@@ -64,14 +64,6 @@ local crds = import 'crds.libsonnet';
           replication:
             oplogSizeMB: 1024
           
-          # System log
-          systemLog:
-            destination: file
-            logAppend: true
-            path: /data/db/mongod.log
-            component:
-              replication:
-                verbosity: 1
         |||,
       },
     },
