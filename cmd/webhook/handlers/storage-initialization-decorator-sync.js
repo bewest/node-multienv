@@ -7,18 +7,16 @@
  * Related Resources:
  *   - StorageAccount CRD (to read status conditions)
  *   - init-mongo-cluster Job (to detect completion)
+ *   - ComputeInstance CRDs (to detect migration requests)
  * 
  * Responsibilities:
- *   1. Track replica set initialization state via Secret annotations
- *   2. Update ns.mdn.io/replica-set-initialized when init Job succeeds
- *   3. Coordinate migration intent via nightscout.io/migrate-to-dedicated annotation
- *   4. Preserve protected Secret lifecycle (no ownership changes)
+ *   1. Set ns.mdn.io/runtime-required (shared/dedicated) based on StorageAccount spec and migration requests
+ *   2. Track replica set initialization state via ns.mdn.io/replica-set-initialized annotation
+ *   3. Preserve protected Secret lifecycle (no ownership changes)
  * 
- * Key Design Points:
- *   - Decorator pattern: only manages annotations/labels, doesn't own resources
- *   - Durable state: annotations survive CRD deletion/recreation
- *   - Separation of concerns: Storage Composite owns infrastructure, decorator owns metadata
- *   - Migration support: detects shared → dedicated transitions
+ * Response Format:
+ *   - Changes needed: { labels?, annotations? } (patch format)
+ *   - No changes: { attachments: [] } (no-op)
  */
 
 const { ANNOTATIONS, LABELS } = require('./constants');
@@ -29,197 +27,158 @@ const { ANNOTATIONS, LABELS } = require('./constants');
 function createStorageInitializationDecoratorSync(config) {
   
   /**
-   * Stage 1: Initialize context from webhook request
-   * Extracts Secret (parent), related resources
+   * Initialize request context and response containers
    */
-  function initializeContext(req, res, next) {
-    const { object: secret, attachments, related } = req.body;
+  function initialize(req, res, next) {
+    const { object: secret, related } = req.body;
     
     req.secret = secret;
     req.related = related || {};
-    req.secretName = secret.metadata.name;
-    req.namespace = secret.metadata.namespace;
-    
-    // Extract storage account ID from labels
     req.storageAccountId = secret.metadata.labels?.['storage.nightscout.org/account'];
     
-    // Check if replica set is already initialized
-    req.rsInitialized = secret.metadata?.annotations?.['ns.mdn.io/replica-set-initialized'];
-    req.runtimeRequired = req.secret.metadata.annotations['ns.mdn.io/runtime-required'];
+    // Response containers - only set if we need to patch
+    res.labels = undefined;
+    res.annotations = undefined;
     
-    console.log(`Storage initialization decorator sync for Secret: ${req.secretName}`);
-    console.log(`  Storage account: ${req.storageAccountId}`);
-    console.log(`  Infrastructure required: ${secret.metadata.annotations['ns.mdn.io/runtime-required']}`);
-    console.log(`  Replica set initialized: ${req.rsInitialized ? 'yes' : 'no'}`);
+    console.log(`Storage Init Decorator: ${secret.metadata.name}`);
+    console.log(`  Account: ${req.storageAccountId}`);
     
     return next();
   }
   
   /**
-   * Stage 2: Discover StorageAccount from related resources
-   * Needed to check migration intent and status conditions
+   * Discover related StorageAccount CRD
    */
   function discoverStorageAccount(req, res, next) {
     if (!req.storageAccountId) {
-      console.log('  WARNING: Secret missing storage.nightscout.org/account label');
-      // Return current labels/annotations unchanged
-      res.send({
-        labels: req.secret.metadata?.labels || {},
-        annotations: req.secret.metadata?.annotations || {}
-      });
-      return;
+      console.log('  No storage account label - skipping');
+      return next();
     }
     
-    // Find StorageAccount in related resources
     const storageAccounts = req.related['StorageAccount.nightscout.io/v1alpha1'] || {};
     req.storageAccount = storageAccounts[req.storageAccountId];
     
     if (!req.storageAccount) {
-      console.log(`  StorageAccount ${req.storageAccountId} not found in related resources`);
-      // Return current labels/annotations unchanged - StorageAccount may not exist yet
-      res.send({
-        labels: req.secret.metadata?.labels || {},
-        annotations: req.secret.metadata?.annotations || {}
-      });
-      return;
+      console.log('  StorageAccount not found in related resources');
     }
-    
-    console.log(`  StorageAccount found: ${req.storageAccountId}`);
     
     return next();
   }
   
   /**
-   * Stage 3: Check init-mongo-cluster Job status
-   * Detects when replica set initialization has completed
+   * Determine infrastructure requirements (shared vs dedicated)
+   * Sets ns.mdn.io/runtime-required annotation based on:
+   * - StorageAccount spec.storageType
+   * - Migration requests from ComputeInstances
    */
-  function checkInitJob(req, res, next) {
-    // If already initialized, skip Job checking
-    if (req.rsInitialized) {
-      console.log('  Replica set already initialized - skipping Job check');
+  function determineRuntimeRequirements(req, res, next) {
+    const currentValue = req.secret.metadata.annotations?.['ns.mdn.io/runtime-required'];
+    
+    // Skip if already set to dedicated
+    if (currentValue === 'dedicated') {
+      console.log('  Runtime already dedicated');
       return next();
     }
-    if (req.runtimeRequired != 'dedicated') {
-      console.log('  No provisioning job required');
+    
+    // Check StorageAccount spec
+    const isDedicated = req.storageAccount?.spec?.storageType === 'dedicated';
+    
+    // Check for migration requests from ComputeInstances
+    const computeInstances = req.related['ComputeInstance.nightscout.io/v1alpha1'] || {};
+    let migrationRequested = false;
+    
+    for (const [name, instance] of Object.entries(computeInstances)) {
+      if (instance.metadata?.annotations?.['nightscout.io/migrate-to-dedicated'] === 'true') {
+        console.log(`  Migration requested by ComputeInstance: ${name}`);
+        migrationRequested = true;
+        break;
+      }
+    }
+    
+    // Determine required value
+    const requiredValue = (isDedicated || migrationRequested) ? 'dedicated' : 'shared';
+    
+    // Only update if different from current
+    if (requiredValue !== currentValue) {
+      console.log(`  Setting runtime-required: ${currentValue} → ${requiredValue}`);
+      res.annotations = res.annotations || {};
+      res.annotations['ns.mdn.io/runtime-required'] = requiredValue;
+    }
+    
+    return next();
+  }
+  
+  /**
+   * Track replica set initialization completion
+   * Sets ns.mdn.io/replica-set-initialized when init Job succeeds
+   */
+  function trackReplicaSetInitialization(req, res, next) {
+    const rsInitialized = req.secret.metadata.annotations?.['ns.mdn.io/replica-set-initialized'];
+    const runtimeRequired = req.secret.metadata.annotations?.['ns.mdn.io/runtime-required'];
+    
+    // Skip if already initialized or not dedicated infrastructure
+    if (rsInitialized) {
+      console.log('  Replica set already initialized');
+      return next();
+    }
+    
+    if (runtimeRequired !== 'dedicated') {
+      console.log('  Shared infrastructure - no replica set initialization needed');
       return next();
     }
     
     // Find init Job in related resources
     const jobs = req.related['Job.batch/v1'] || {};
     const initJobName = `${req.storageAccountId}-init-mongo-cluster`;
-    req.initJob = jobs[initJobName];
+    const initJob = jobs[initJobName];
     
-    if (!req.initJob) {
-      console.log(`  Init Job ${initJobName} not found - initialization not started yet`);
-      // renderInitMongoClusterJob
-      // const initJob = renderInitMongoClusterJob(req.parent, storageAccount, config);
+    if (!initJob) {
+      console.log('  Init Job not found - initialization not started');
       return next();
     }
     
-    // Check Job status
-    const jobStatus = req.initJob.status || {};
-    req.jobSucceeded = (jobStatus.succeeded || 0) > 0;
-    req.jobFailed = (jobStatus.failed || 0) > 0;
-    req.jobActive = (jobStatus.active || 0) > 0;
+    // Check if Job succeeded
+    const jobStatus = initJob.status || {};
+    const succeeded = (jobStatus.succeeded || 0) > 0;
     
-    console.log(`  Init Job status: succeeded=${req.jobSucceeded}, failed=${req.jobFailed}, active=${req.jobActive}`);
+    if (succeeded) {
+      console.log('  Init Job succeeded - marking replica set initialized');
+      res.annotations = res.annotations || {};
+      res.annotations['ns.mdn.io/replica-set-initialized'] = new Date().toISOString();
+    } else {
+      console.log(`  Init Job status: active=${jobStatus.active || 0}, failed=${jobStatus.failed || 0}`);
+    }
     
     return next();
   }
   
   /**
-   * Stage 4: Update Secret annotations based on Job status
-   * Sets replica-set-initialized marker when Job succeeds
-   */
-  function updateAnnotations(req, res, next) {
-    let modified = false;
-    const annotations = { ...(req.secret.metadata.annotations || {}) };
-    
-    // Update replica set initialization marker
-    if (!req.rsInitialized && req.jobSucceeded) {
-      console.log('  Init Job succeeded - marking Secret as initialized');
-      annotations['ns.mdn.io/replica-set-initialized'] = new Date().toISOString();
-      modified = true;
-    }
-    
-    // Store whether we modified anything
-    req.annotationsModified = modified;
-    req.updatedAnnotations = annotations;
-    
-    return next();
-  }
-  
-  /**
-   * Stage 5: Handle migration intent detection
-   * Detects and tracks migration requests for shared → dedicated transitions
-   * 
-   * Migration annotation originates from ComputeInstance:
-   *   nightscout.io/migrate-to-dedicated=true
-   * 
-   * When detected, the Storage Composite provisions dedicated infrastructure
-   * This decorator tracks the migration state on the Secret
-   */
-  function handleMigrationIntent(req, res, next) {
-    if (req.secret.metadata.annotations['ns.mdn.io/runtime-required'] == 'dedicated') {
-      return next( );
-    }
-
-    // Check for migration annotation on ComputeInstance (origin)
-    const computeInstances = req.related['ComputeInstance.nightscout.io/v1alpha1'] || {};
-    let migrationRequested = false;
-    
-    // Check all ComputeInstances associated with this storage account
-    for (const [name, instance] of Object.entries(computeInstances)) {
-      if (instance.metadata?.annotations?.['nightscout.io/migrate-to-dedicated'] === 'true') {
-        console.log(`  Migration annotation found on ComputeInstance: ${name}`);
-        migrationRequested = true;
-        break;
-      }
-    }
-
-
-    const isDedicated = req.storageAccount?.spec?.storageType === 'dedicated';
-    const isHybrid = req.storageAccount?.spec?.storageType === 'shared' && migrationRequested;
-    req.updatedAnnotations = req.updatedAnnotations || { ...(req.secret.metadata.annotations || {}) };
-    req.updatedAnnotations['ns.mdn.io/runtime-required'] = isDedicated || isHybrid ? 'dedicated' : 'shared';
-    req.annotationsModified = true;
-    
-    console.log("SETTING runtime-required", req.updatedAnnotations);
-    
-    return next();
-  }
-  
-  /**
-   * Stage 6: Format response
-   * Returns only labels and annotations (decorator response format)
+   * Format decorator response
+   * Returns patch (labels/annotations) or no-op (empty attachments)
    */
   function formatResponse(req, res, next) {
-    if (req.annotationsModified) {
-      // Return only the annotations that changed (decorator format)
-      console.log('  Returning updated annotations');
-      res.send({
-        labels: req.secret.metadata?.labels || {},
-        annotations: req.updatedAnnotations
-      });
+    const hasChanges = res.labels || res.annotations;
+    
+    if (hasChanges) {
+      const response = {};
+      if (res.labels) response.labels = res.labels;
+      if (res.annotations) response.annotations = res.annotations;
+      
+      console.log('  Returning patch:', JSON.stringify(response, null, 2));
+      res.send(response);
     } else {
-      // No changes needed - return current labels/annotations
-      console.log('  No changes needed');
-      res.send({
-        // labels: req.secret.metadata?.labels || {},
-        // annotations: req.secret.metadata?.annotations || {}
-        attachments: [ ]
-      });
+      console.log('  No changes - returning no-op');
+      res.send({ attachments: [] });
     }
   }
   
-  // Pipeline: chain all stages together
+  // Pipeline: clean, sequential flow
   return [
-    initializeContext,
+    initialize,
     discoverStorageAccount,
-    checkInitJob,
-    handleMigrationIntent,
-    // updateAnnotations,
-    formatResponse,
+    determineRuntimeRequirements,
+    trackReplicaSetInitialization,
+    formatResponse
   ];
 }
 

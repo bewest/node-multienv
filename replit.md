@@ -25,7 +25,7 @@ All tenants are deployed within a single `hosted-tenants` namespace, with resour
 - **Storage CompositeController**: Manages MongoDB StatefulSets, Services, and Migration Jobs.
 - **Compute CompositeController**: Manages Nightscout Deployments, Services, and optional Kafka components.
 - **Storage-Credentials DecoratorController**: Manages per-tenant application credentials and user initialization.
-- **Storage-Initialization DecoratorController**: Manages replica set initialization state on mongo-auth Secrets. Observes init-mongo-cluster Jobs and sets durable state markers (`ns.mdn.io/replica-set-initialized`) when replica set initialization completes. Coordinates migration intent detection.
+- **Storage-Initialization DecoratorController**: Manages durable state on mongo-auth Secrets using clean pipeline pattern with patch-based responses. Sets `ns.mdn.io/runtime-required` (shared/dedicated) based on StorageAccount spec and migration requests. Tracks replica set initialization by observing init-mongo-cluster Jobs and setting `ns.mdn.io/replica-set-initialized` timestamp marker on completion.
 - **Instance-Userdata DecoratorController**: Manages Gen 3 to Gen 4 ConfigMap migration and cutover orchestration.
 - **PVC-Backup DecoratorController**: Enforces backup policies for MongoDB Persistent Volume Claims.
 
@@ -58,6 +58,8 @@ The platform utilizes a **CRD-based two-composite architecture** (Storage and Co
 - **URI-Based Authentication**: MongoDB utility Jobs (init-replica-set, create-user) use complete connection URIs with admin authentication, ensuring retry reliability and proper credential isolation with `authSource=admin`.
 - **Keyfile-Based Replica Authentication**: MongoDB replica sets use shared keyfile Secrets (per StorageAccount) for member authentication. Keyfiles are child resources (deleted with parent CR, regenerable from webhook). Init containers prepare keyfile permissions (chmod 400, chown 999:999) before MongoDB startup. Protection mechanism for keyfiles is deferred to future implementation.
 - **Shared MongoDB Configuration**: Single `mongod-config` ConfigMap for all StorageAccounts (1,300+ tenants), generated via jsonnet and deployed to `hosted-tenants` namespace. Provides replication, security, and logging configuration. StatefulSet CLI args override `net.bindIp` to bind only to `127.0.0.1,$(POD_IP)` for DigitalOcean private networking.
+- **MongoDB FQDN Consistency**: Helper function `getMongoDBHostnames()` provides canonical hostnames for replica sets. Init Jobs use pod FQDN (e.g., `myaccount-mongo-0.mongo-dbname.namespace.svc.cluster.local`) for both connection and rs.initiate() member configuration to ensure MongoDB stores stable network identities.
+- **Decorator Response Pattern**: Decorators follow clean ergonomics - set `res.labels` and `res.annotations` only when patches are needed, return `{ attachments: [] }` for no-op. All handlers flow through to final formatter, no early exits with full object copies.
 
 ## External Dependencies
 - **Strimzi Kafka Operator**: Manages Kafka clusters and KafkaConnect.
