@@ -205,7 +205,11 @@
         }
       },
       childResources=[
-        { apiVersion: 'apps/v1', resource: 'deployments' },
+        { apiVersion: 'apps/v1', resource: 'deployments',
+          updateStrategy: {
+            method: 'InPlace'
+          }
+        },
         // { apiVersion: 'v1', resource: 'services' },
         // { apiVersion: 'kafka.strimzi.io/v1beta2', resource: 'kafkatopics' },
         // { apiVersion: 'kafka.strimzi.io/v1beta2', resource: 'kafkaconnectors' },
@@ -246,6 +250,7 @@
     $.decoratorController(
       name='storage-credentials-decorator',
       webhookUrl=webhookServiceUrl + '/decorator/storage-credentials/sync',
+      customizeUrl=webhookServiceUrl + '/decorator/storage-credentials/customize',
       resources=[
         {
           apiVersion: crdGroup + '/' + crdVersion,
@@ -368,7 +373,7 @@
       webhookUrl=webhookServiceUrl + '/decorator/sync',
       resyncPeriodSeconds=pvcResyncSeconds,
     ),
-    storageCredentials:: $.storageCredentialsDecorator(
+    storageCredentials: $.storageCredentialsDecorator(
       webhookServiceUrl=webhookServiceUrl,
       crdGroup=crdGroup,
       crdVersion=crdVersion,

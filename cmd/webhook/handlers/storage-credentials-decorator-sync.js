@@ -61,9 +61,11 @@ function createStorageCredentialsDecoratorSync(config) {
     req.storageAccountLabel = computeInstance.metadata.labels?.['storage.nightscout.org/account'];
     
     // Initialize response
-    res.attachments = [];
+    res.attachments = [ ];
+    res.labels = { };
+    res.annotations = { };
     
-    console.log('Storage credentials decorator sync for tenant:', req.tenantId);
+    console.log('TENANT credentials decorator Storage credentials decorator sync for tenant:', req.tenantId);
     
     return next();
   }
@@ -97,10 +99,13 @@ function createStorageCredentialsDecoratorSync(config) {
     req.storageAccount = storageAccount;
     req.storageType = storageAccount.spec?.storageType;
     req.credentialsRequested = req.storageType == 'dedicated' || req.migrationRequested;
-    req.storageAccountId = storageAccount.metadata.name;
-    req.databaseName = generateDatabaseName(req.storageAccountId);
+    req.storageAccountId = storageAccount.metadata.name; // TODO: look at annotation?
+    // req.databaseName = generateDatabaseName(req.storageAccountId);
+    req.databaseName = req.storageAccount.status.databaseName;
     
     console.log(`  Storage account: ${req.storageAccountId}, type: ${req.storageType}, database: ${req.databaseName}`);
+    console.log(`  Storage account:`, req.storageAccount);
+    req.mongoAuthName = req.storageAccount.status.connectionSecret;
     
     return next();
   }
@@ -114,7 +119,7 @@ function createStorageCredentialsDecoratorSync(config) {
     req.existingJobs = req.attachments['Job.batch/v1'] || {};
     
     req.appCredentialsSecretName = `${req.tenantId}-app-credentials`;
-    req.existingSecret = req.existingSecrets[req.appCredentialsSecretName];
+    req.existingSecret = req.existingSecrets[req.appCredentialsSecretName] || req.related['Secret.v1'][req.appCredentialsSecretName];
     
     console.log(`  Existing app-credentials Secret: ${req.existingSecret ? 'found' : 'not found'}`);
     
@@ -133,45 +138,39 @@ function createStorageCredentialsDecoratorSync(config) {
       req.credentials = null;
       return next();
     }
-    
     console.log(`  Dedicated storage mode - managing app credentials`);
-    
-    let username, password;
-    
+
     if (req.existingSecret) {
       // Existing Secret found - preserve credentials and add protections
-      console.log(`  Updating existing app-credentials Secret: ${req.appCredentialsSecretName}`);
+      console.log(`  compute credentials decorator Found existing app-credentials Secret: ${req.appCredentialsSecretName}`);
+      res.attachments.push(req.existingSecret);
+      // res.attachments.push(updatedSecret);
       
-      // Clone Secret and strip garbage collection metadata
-      const updatedSecret = {
-        ...req.existingSecret,
-        metadata: {
-          ...req.existingSecret.metadata,
-          labels: {
-            ...(req.existingSecret.metadata.labels || {}),
-            [LABELS.RESOURCE_TYPE]: RESOURCE_TYPES.APP_CREDENTIALS_SECRET
-          },
-          annotations: {
-            ...(req.existingSecret.metadata.annotations || {}),
-          },
-        }
-      };
-      
-      res.attachments.push(updatedSecret);
-      
+      /*
       // Extract credentials for Job rendering
       const secretData = req.existingSecret.data || {};
       // VERIFY
       username = Buffer.from(secretData.MONGO_USERNAME || '', 'base64').toString('utf-8');
       password = Buffer.from(secretData.MONGO_PASSWORD || '', 'base64').toString('utf-8');
       req.credentials = username && password ? { username, password } : null;
+      */
       
     } else {
       // First cycle - generate new credentials
       console.log(`  First cycle - generating new app credentials`);
+      console.log(`MISSING APP SECRET`);
+      console.log('MISSING FROM RELATED?', req.related);
+      /*
+      const namespace = parent.metadata.namespace || 'hosted-tenants';
+      // const serviceName = `${storageAccount}-mongo`;
+      const serviceName = `mongo-${parent.status.databaseName}`;
+      const secretName = `${storageAccount}-mongo-auth`;
+      const jobName = `${storageAccount}-init-mongo-cluster`;
+      const mongoHost = `${storageAccount}-mongo-0.${serviceName}.${namespace}.svc.cluster.local`;
+      */
       
       username = generateUsername(req.tenantId);
-      password = generateSecurePassword(32);
+      password = generateSecurePassword(16);
       
       const mongoHost = `mongo-${req.databaseName}`;
       const mongoPort = '27017';
@@ -208,30 +207,34 @@ function createStorageCredentialsDecoratorSync(config) {
    */
   function planUserInitJob(req, res, next) {
     // Skip if no credentials (shared storage or missing data)
-    if (!req.credentials) {
+    if (!req.existingSecret) {
       return next();
     }
     
+    if (req.computeInstance.metadata.annotations?.['nightscout.io/user-initialized-at']) {
+      console.log(`  User already initialized - skipping Job creation`);
+      return next();
+    }
     // Check if user already initialized
     const userInitialized = req.status.conditions?.find(
       c => c.type === 'UserInitialized' && c.status === 'True'
     );
     
     if (userInitialized) {
-      console.log(`  User already initialized - skipping Job creation`);
+      console.log(`  User successfully initialized - marking completed`);
+      // TODO: ensure user-provisioned annotation is set if missing.
+      res.annotations['nightscout.io/user-initialized-at'] = (new Date( )).toISOString( );
       return next();
     }
     
     console.log(`  User not initialized - rendering create-user Job`);
     
     const createUserJob = renderCreateUserJob(
+      req.mongoAuthName,
+      req.existingSecret,
       req.tenantId,
       req.namespace,
       req.storageAccountId,
-      req.databaseName,
-      req.credentials.username,
-      req.credentials.password,
-      req.computeInstance.metadata.labels,
       config
     );
     
@@ -307,7 +310,73 @@ function createStorageCredentialsDecoratorSync(config) {
     planMigrationJob,
     assembleResponse
   ];
-  return pipeline;
+
+
+  function handle_customize (req, res, next) {
+    const { parent: computeInstance } = req.body;
+    
+    // Extract storage account ID from Secret labels
+    const storageAccountId = computeInstance.metadata.labels?.['storage.nightscout.org/account'];
+    const tenantId = computeInstance.metadata.labels?.['nightscout.io/tenant'];
+    
+    console.log(`CREDENTIAL decorator customize for compute: ${computeInstance.metadata.name}`);
+    console.log(`  Storage account: ${storageAccountId}`);
+    
+    if (!storageAccountId) {
+      // No storage account label - return empty related resources
+      res.send({ relatedResources: [] });
+      return next();
+    }
+    
+    // Define related resources to fetch
+    const relatedResources = [
+      // StorageAccount CRD - to check status conditions
+      {
+        apiVersion: 'nightscout.io/v1alpha1',
+        resource: 'storageaccounts',
+        labelSelector: {
+          matchLabels: {
+            'storage.nightscout.org/account': storageAccountId,
+            // 'app.kubernetes.io/component': 'init-job',
+          },
+        },
+      },
+      {
+        apiVersion: 'batch/v1',
+        resource: 'jobs',
+        // namespace: secret.metadata.namespace,
+        labelSelector: {
+          matchLabels: {
+            'storage.nightscout.org/account': storageAccountId,
+            'ns.mdn.io/composite': 'storage-create-user',
+          },
+        },
+      },
+      // Detect per tenant secret connection.
+      {
+        apiVersion: 'v1',
+        resource: 'secrets',
+        // namespace: secret.metadata.namespace,
+        labelSelector: {
+          matchLabels: {
+            'storage.nightscout.org/account': storageAccountId,
+            'ns.mdn.io/decorator': 'storage-credentials',
+            'nightscout.io/tenant': tenantId,
+          },
+        },
+      },
+      /*
+      */
+    ];
+    
+    console.log(`  Requesting ${relatedResources.length} related resource types`);
+    
+    res.send({ relatedResources });
+    return next();
+  }
+
+  return { sync: pipeline, customize: handle_customize };
+
   
 }
 
@@ -377,7 +446,7 @@ function collectExistingAttachments(attachments) {
  * Generate secure random password
  */
 function generateSecurePassword(length = 32) {
-  const charset = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%^&*';
+  const charset = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.~';
   const randomBytes = crypto.randomBytes(length);
   let password = '';
   
@@ -557,11 +626,23 @@ function renderMigrationJob(tenantId, namespace, storageAccount, databaseName, u
 }
 
 /**
- * Render create-user Job
+ * Render create-user Job to create MongoDB user with NS app credentials
+    const createUserJob = renderCreateUserJob(
+      req.mongoAuthName,
+      req.existingSecret,
+      req.tenantId,
+      req.namespace,
+      req.storageAccountId,
+      config
+    );
+    
  */
-function renderCreateUserJob(tenantId, namespace, storageAccount, databaseName, username, password, labels, config) {
-  const jobName = `${tenantId}-create-user`;
-  const targetHost = `mongo-${databaseName}`;
+function renderCreateUserJob(adminRefName, secret, tenantId, namespace, storageAccount, config) {
+  // const namespace = secret.metadata.namespace;
+  const secretName = secret.metadata.name;
+  const jobName = `${storageAccount}-create-user`;
+  const forceCreate = true;
+  const utilityImagePullSecret = config.imagePullSecrets;
   
   return {
     apiVersion: 'batch/v1',
@@ -570,45 +651,70 @@ function renderCreateUserJob(tenantId, namespace, storageAccount, databaseName, 
       name: jobName,
       namespace: namespace,
       labels: {
-        ...labels,
+        'storage.nightscout.org/account': storageAccount,
         'app.kubernetes.io/component': 'user-initialization',
-        'app.kubernetes.io/managed-by': 'metacontroller',
-        'ns.mdn.io/decorator': 'storage-credentials',
-        'storage.nightscout.org/account': storageAccount
+        'ns.mdn.io/composite': 'storage-create-user'
       },
       annotations: {
-        'ns.mdn.io/created-at': new Date().toISOString(),
-        'ns.mdn.io/tenant': tenantId,
-        'ns.mdn.io/target-user': username,
-        'ns.mdn.io/target-db': databaseName
+        // 'ns.mdn.io/created-at': new Date().toISOString(),
+        // 'ns.mdn.io/force-create': forceCreate.toString(),
+        // 'ns.mdn.io/target-user': nsuserUsername,
+        // 'ns.mdn.io/target-db': targetDb
       }
     },
     spec: {
-      ttlSecondsAfterFinished: 3600,
+      ttlSecondsAfterFinished: 3600, // 1 hour
       backoffLimit: 3,
       template: {
         metadata: {
           labels: {
-            ...labels,
-            'app.kubernetes.io/component': 'user-initialization',
-            'ns.mdn.io/decorator': 'storage-credentials'
+            'storage.nightscout.org/account': storageAccount,
+            'app.kubernetes.io/component': 'user-initialization'
           }
         },
         spec: {
+          imagePullSecrets: config.multienv.imagePullSecrets.map(function (el, v) { return { name: el }; }),
           restartPolicy: 'OnFailure',
-          serviceAccountName: 'migration-job',
+          backoffLimit: 4,
           containers: [{
             name: 'create-user',
             image: config.images.nsUtility,
-            imagePullPolicy: config.imagePullPolicies.nsUtility || 'IfNotPresent',
+            imagePullPolicy: config.images.nsUtilityPullPolicy,
+            command: ['/app/multienvctl/entrypoints/create-mongodb-user.sh'],
             env: [
-              { name: 'MONGO_HOST', value: targetHost },
               { name: 'MONGO_PORT', value: '27017' },
-              { 
+              { name: 'FORCE_USER_CREATE', value: forceCreate ? 'true' : 'false' },
+              {
+                name: 'MONGO_PORT',
+                value: '27017'
+              },
+              {
+                name: 'MONGO_RS_NAME',
+                value: 'rs0'
+              },
+              {
+                name: 'NSUSER_USERNAME',
+                valueFrom: {
+                  secretKeyRef: {
+                    name: secretName,
+                    key: 'MONGO_USERNAME'
+                  }
+                }
+              },
+              {
+                name: 'NSUSER_PASSWORD',
+                valueFrom: {
+                  secretKeyRef: {
+                    name: secretName,
+                    key: 'MONGO_PASSWORD'
+                  }
+                }
+              },
+              {
                 name: 'MONGO_ADMIN_USERNAME',
                 valueFrom: {
                   secretKeyRef: {
-                    name: `${storageAccount}-mongo-auth`,
+                    name: adminRefName,
                     key: 'MONGO_INITDB_ROOT_USERNAME'
                   }
                 }
@@ -617,44 +723,38 @@ function renderCreateUserJob(tenantId, namespace, storageAccount, databaseName, 
                 name: 'MONGO_ADMIN_PASSWORD',
                 valueFrom: {
                   secretKeyRef: {
-                    name: `${storageAccount}-mongo-auth`,
+                    name: adminRefName,
                     key: 'MONGO_INITDB_ROOT_PASSWORD'
                   }
                 }
               },
-              { name: 'NSUSER_USERNAME', value: username },
-              { name: 'NSUSER_PASSWORD', value: password },
-              { name: 'NSUSER_DATABASE', value: databaseName },
+              {
+                name: 'NSUSER_DATABASE',
+                valueFrom: {
+                  secretKeyRef: {
+                    name: adminRefName,
+                    key: 'MONGO_INITDB_DATABASE'
+                  }
+                }
+              },
+              {
+                name: 'MONGO_HOST',
+                value: 'mongo-$(NSUSER_DATABASE)',
+              },
+              {
+                name: 'MONGO_ADMIN_URI',
+                value: 'mongodb://$(MONGO_ADMIN_USERNAME):$(MONGO_ADMIN_PASSWORD)@$(MONGO_HOST):27017/?authSource=admin'
+              },
               { name: 'STORAGE_ACCOUNT', value: storageAccount }
             ],
-            command: ['sh', '-c'],
-            args: [`
-              echo "Creating MongoDB user ${username} for database ${databaseName}..."
-              
-              MONGO_ADMIN_URI="mongodb://\${MONGO_ADMIN_USERNAME}:\${MONGO_ADMIN_PASSWORD}@\${MONGO_HOST}:\${MONGO_PORT}/admin"
-              
-              mongosh "\${MONGO_ADMIN_URI}" --eval "
-                use ${databaseName};
-                db.createUser({
-                  user: '${username}',
-                  pwd: '${password}',
-                  roles: [
-                    { role: 'readWrite', db: '${databaseName}' },
-                    { role: 'dbAdmin', db: '${databaseName}' }
-                  ]
-                });
-              "
-              
-              echo "User creation completed"
-            `],
             resources: {
               requests: {
-                cpu: config.resources?.nsUtility?.cpuRequest || '100m',
-                memory: config.resources?.nsUtility?.memRequest || '128Mi'
+                cpu: config.resources.utility.cpuRequest,
+                memory: config.resources.utility.memRequest
               },
               limits: {
-                cpu: config.resources?.nsUtility?.cpuLimit || '200m',
-                memory: config.resources?.nsUtility?.memLimit || '256Mi'
+                cpu: config.resources.utility.cpuLimit,
+                memory: config.resources.utility.memLimit
               }
             }
           }]

@@ -495,6 +495,12 @@ function renderNightscout(parent, config) {
         ] : []).concat([
           {
             secretRef: {
+              name: `${tenantId}-app-credentials`
+            , optional: true
+            },
+          },
+          {
+            secretRef: {
               name: `${tenantId}-secrets`
             , optional: true
             },
@@ -509,37 +515,6 @@ function renderNightscout(parent, config) {
         // Legacy Gen 3 fallback: Individual env vars with secretKeyRef
         // Kept for backward compatibility during migration
         env: !parent.data.APP_CREDENTIALS_SECRET ? [ ] : [
-          {
-            name: 'MONGO_CONNECTION',
-            value: `mongodb://$(MONGO_USER):$(MONGO_PASS)@${mongoHost}:27017/$(MONGO_DB)?replicaSet=rs0`
-          },
-          {
-            name: 'MONGO_USER',
-            valueFrom: {
-              secretKeyRef: {
-                name: secretName,
-                key: 'username'
-              }
-            }
-          },
-          {
-            name: 'MONGO_PASS',
-            valueFrom: {
-              secretKeyRef: {
-                name: secretName,
-                key: 'password'
-              }
-            }
-          },
-          {
-            name: 'MONGO_DB',
-            valueFrom: {
-              secretKeyRef: {
-                name: secretName,
-                key: 'database'
-              }
-            }
-          }
         ],
         resources: {
           requests: {

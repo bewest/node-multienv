@@ -79,7 +79,7 @@ create_nightscout_user() {
   user_exists=$(mongo "${admin_uri}" --quiet --eval "
     try {
       const users = db.getSiblingDB('${database}').getUsers();
-      const user = users.users.find(u => u.user === '${username}');
+      const user = users.find(u => u.user === '${username}');
       print(user ? 'true' : 'false');
     } catch(e) {
       print('error: ' + e.message);
@@ -135,9 +135,16 @@ create_nightscout_user() {
     }
   " 2>&1)
   
-  if [[ "${create_result}" != "CREATED" ]]; then
-    die "Failed to create user: ${create_result}"
-  fi
+  case "${create_result}" in
+    CREATED)
+      ;;
+    "Successfully added user:"*)
+      ;;
+    *)
+      die "Failed to create user: ${create_result}"
+      ;;
+      
+  esac
   
   log_info "User '${username}' created successfully"
 }

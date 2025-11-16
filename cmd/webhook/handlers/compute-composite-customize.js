@@ -32,7 +32,7 @@ function createComputeCompositeCustomize(config) {
             labelSelector: {
               matchLabels: {
                 'storage.nightscout.org/account': storageAccountLabel,
-                'tenant': tenantId,
+                'nightscout.io/tenant': tenantId,
                 'ns.mdn.io/credential-type': 'application'
               }
             }

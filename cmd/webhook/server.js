@@ -21,7 +21,7 @@ const computeCompositeSync = createComputeCompositeSync(config);
 const computeCompositeCustomize = createComputeCompositeCustomize(config);
 const decoratorSync = createDecoratorSync(config);
 const decoratorFinalize = createDecoratorFinalize(config);
-const storageCredentialsDecoratorSync = createStorageCredentialsDecoratorSync(config);
+const { sync: storageCredentialsDecoratorSync, customize: storageCredentialsDecoratorCustomize } = createStorageCredentialsDecoratorSync(config);
 const storageInitializationDecoratorSync = createStorageInitializationDecoratorSync(config);
 const storageInitializationDecoratorCustomize = createStorageInitializationDecoratorCustomize(config);
 const instanceUserdataDecorator = createInstanceUserdataDecorator(config);
@@ -64,6 +64,7 @@ server.post('/decorator/sync', decoratorSync);
 server.post('/decorator/finalize', decoratorFinalize);
 
 // Decorator: Storage credentials management (ComputeInstance → App Credentials + User Init)
+server.post('/decorator/storage-credentials/customize', storageCredentialsDecoratorCustomize);
 server.post('/decorator/storage-credentials/sync', storageCredentialsDecoratorSync);
 
 // Decorator: Storage initialization state (mongo-auth Secret → Replica Set Init Tracking)
