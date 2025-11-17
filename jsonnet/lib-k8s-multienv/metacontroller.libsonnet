@@ -56,6 +56,7 @@
     name,
     webhookUrl,
     resources,  // Array of { apiVersion, resource, labelSelector }
+    attachments=[],  // Array of { apiVersion, resource, updateStrategy }
     relatedResources=[],  // Optional related resources for discovery
     customizeUrl=null,  // Optional customize hook URL
     resyncPeriodSeconds=30,
@@ -68,6 +69,7 @@
     spec: {
       resources: resources,
       [if std.length(relatedResources) > 0 then 'relatedResources']: relatedResources,
+      [if std.length(attachments) > 0 then 'attachments']: attachments,
       hooks: {
         [if customizeUrl != null then 'customize']: {
           webhook: {
@@ -264,6 +266,15 @@
             ],
           },
         },
+      ],
+      attachments=[
+        {
+          apiVersion: 'v1',
+          resource: 'secrets',
+          updateStrategy: {
+            method: 'InPlace',
+          }
+        }
       ],
       /*
       relatedResources=[

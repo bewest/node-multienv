@@ -144,7 +144,6 @@ function createStorageCredentialsDecoratorSync(config) {
       // Existing Secret found - preserve credentials and add protections
       console.log(`  compute credentials decorator Found existing app-credentials Secret: ${req.appCredentialsSecretName}`);
       res.attachments.push(req.existingSecret);
-      // res.attachments.push(updatedSecret);
 
     } else {
       // First cycle - generate new credentials
@@ -218,28 +217,16 @@ function createStorageCredentialsDecoratorSync(config) {
     const succeeded = (jobStatus.succeeded || 0) > 0;
     
     if (succeeded) {
-      console.log(`  Create-user Job succeeded - marking user initialized on Secret`);
+      console.log(`  CREATE-USER JOB SUCCEEDED - marking user initialized on Secret`);
       
       // Update annotation on the Secret object (req.existingSecret)
       // This works whether Secret came from attachments or related
       req.existingSecret.metadata.annotations = req.existingSecret.metadata.annotations || {};
       req.existingSecret.metadata.annotations['ns.mdn.io/user-initialized'] = new Date().toISOString();
       
-      // Ensure the updated Secret is in res.attachments
-      // Check if already attached (by planCredentialsSecret)
-      const secretInAttachments = res.attachments.find(
-        att => att.kind === 'Secret' && att.metadata.name === req.appCredentialsSecretName
-      );
-      
-      if (!secretInAttachments) {
-        // Not yet attached - add it now with the annotation
-        console.log(`  Secret not in attachments - adding with user-initialized annotation`);
-        res.attachments.push(req.existingSecret);
-      } else {
-        console.log(`  Updated Secret ${req.appCredentialsSecretName} with user-initialized annotation`);
-      }
+      console.log(`  Updated Secret ${req.appCredentialsSecretName} with user-initialized annotation`);
     } else {
-      console.log(`  Create-user Job status: active=${jobStatus.active || 0}, failed=${jobStatus.failed || 0}`);
+      console.log(`  CREATE-USER JOB STATUS: active=${jobStatus.active || 0}, failed=${jobStatus.failed || 0}`);
     }
     
     return next();
@@ -256,6 +243,11 @@ function createStorageCredentialsDecoratorSync(config) {
       console.log(`  Shared storage mode - skipping user init Job`);
       return next();
     }
+
+    if (!req.existingSecret) {
+      console.log(`  No app credential secret - skipping user init Job`);
+      return next();
+    }
     
     // Check if Secret exists and has user-initialized annotation
     // The annotation is set by trackUserInitialization when Job succeeds
@@ -265,35 +257,25 @@ function createStorageCredentialsDecoratorSync(config) {
       console.log(`  User already initialized at ${userInitialized} - skipping Job creation`);
       return next();
     }
-    
+
     // User not initialized - render create-user Job
     // This handles both first-time creation and Secret recreation scenarios
     console.log(`  User not initialized - rendering create-user Job`);
-    
-    // Need to reference the Secret (either existing or newly created in this cycle)
-    const secret = req.existingSecret || res.attachments.find(
-      att => att.kind === 'Secret' && att.metadata.name === req.appCredentialsSecretName
-    );
-    
-    if (!secret) {
-      console.log(`  Warning: No Secret found to reference for create-user Job - skipping`);
-      return next();
-    }
-    
+
     const createUserJob = renderCreateUserJob(
       req.mongoAuthName,
-      secret,
+      req.existingSecret,
       req.tenantId,
       req.namespace,
       req.storageAccountId,
       config
     );
-    
+
     res.attachments.push(createUserJob);
-    
+
     return next();
   }
-  
+
   /**
    * Stage 6: Plan migration Job (shared → dedicated storage transition)
    * Detects migration annotation and renders migration Job
