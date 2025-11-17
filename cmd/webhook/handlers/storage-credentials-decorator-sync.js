@@ -184,41 +184,105 @@ function createStorageCredentialsDecoratorSync(config) {
   }
   
   /**
-   * Stage 5: Plan user initialization Job (create/skip)
-   * Only renders Job if UserInitialized condition is not True
-   * Preserves completed/running/failed Jobs
+   * Stage 5: Track user initialization Job completion
+   * Sets ns.mdn.io/user-initialized annotation on Secret when Job succeeds
+   * This ties Job lifecycle to Secret lifecycle
    */
-  function planUserInitJob(req, res, next) {
-    // Skip if no credentials (shared storage or missing data)
+  function trackUserInitialization(req, res, next) {
+    // Skip if no app-credentials Secret exists yet
     if (!req.existingSecret) {
+      console.log(`  No Secret exists yet - skipping user initialization tracking`);
       return next();
     }
     
-    if (req.computeInstance.metadata.annotations?.['nightscout.io/user-initialized-at']) {
-      console.log(`  User already initialized - skipping Job creation`);
-      return next();
-    }
-    // Check if user already initialized
-    // TODO: this does nothing: properly detect job completion in order to
-    // correctly set the annotation?  (annotation should probably be set on the
-    // app connection secret in order to ensure the job will always be run in
-    // conjunction with a new/reset connection secret).
-    const userInitialized = req.status.conditions?.find(
-      c => c.type === 'UserInitialized' && c.status === 'True'
-    );
+    // Check if user already initialized via Secret annotation
+    const userInitialized = req.existingSecret.metadata?.annotations?.['ns.mdn.io/user-initialized'];
     
     if (userInitialized) {
-      console.log(`  User successfully initialized - marking completed`);
-      // TODO: ensure user-provisioned annotation is set if missing.
-      res.annotations['nightscout.io/user-initialized-at'] = (new Date( )).toISOString( );
+      console.log(`  User already initialized at ${userInitialized}`);
       return next();
     }
     
+    // Find create-user Job in related resources
+    const jobs = req.related['Job.batch/v1'] || {};
+    const createUserJobName = `${req.storageAccountId}-${req.tenantId}-create-user`;
+    const createUserJob = jobs[createUserJobName];
+    
+    if (!createUserJob) {
+      console.log(`  Create-user Job not found - initialization not started`);
+      return next();
+    }
+    
+    // Check if Job succeeded
+    const jobStatus = createUserJob.status || {};
+    const succeeded = (jobStatus.succeeded || 0) > 0;
+    
+    if (succeeded) {
+      console.log(`  Create-user Job succeeded - marking user initialized on Secret`);
+      
+      // Update annotation on the Secret object (req.existingSecret)
+      // This works whether Secret came from attachments or related
+      req.existingSecret.metadata.annotations = req.existingSecret.metadata.annotations || {};
+      req.existingSecret.metadata.annotations['ns.mdn.io/user-initialized'] = new Date().toISOString();
+      
+      // Ensure the updated Secret is in res.attachments
+      // Check if already attached (by planCredentialsSecret)
+      const secretInAttachments = res.attachments.find(
+        att => att.kind === 'Secret' && att.metadata.name === req.appCredentialsSecretName
+      );
+      
+      if (!secretInAttachments) {
+        // Not yet attached - add it now with the annotation
+        console.log(`  Secret not in attachments - adding with user-initialized annotation`);
+        res.attachments.push(req.existingSecret);
+      } else {
+        console.log(`  Updated Secret ${req.appCredentialsSecretName} with user-initialized annotation`);
+      }
+    } else {
+      console.log(`  Create-user Job status: active=${jobStatus.active || 0}, failed=${jobStatus.failed || 0}`);
+    }
+    
+    return next();
+  }
+  
+  /**
+   * Stage 6: Plan user initialization Job (create/skip)
+   * Only renders Job if user not initialized (checked via Secret annotation)
+   * Secret lifecycle controls Job lifecycle - if Secret deleted, Job reruns
+   */
+  function planUserInitJob(req, res, next) {
+    // Skip if shared storage (no app-credentials Secret)
+    if (!req.credentialsRequested) {
+      console.log(`  Shared storage mode - skipping user init Job`);
+      return next();
+    }
+    
+    // Check if Secret exists and has user-initialized annotation
+    // The annotation is set by trackUserInitialization when Job succeeds
+    const userInitialized = req.existingSecret?.metadata?.annotations?.['ns.mdn.io/user-initialized'];
+    
+    if (userInitialized) {
+      console.log(`  User already initialized at ${userInitialized} - skipping Job creation`);
+      return next();
+    }
+    
+    // User not initialized - render create-user Job
+    // This handles both first-time creation and Secret recreation scenarios
     console.log(`  User not initialized - rendering create-user Job`);
+    
+    // Need to reference the Secret (either existing or newly created in this cycle)
+    const secret = req.existingSecret || res.attachments.find(
+      att => att.kind === 'Secret' && att.metadata.name === req.appCredentialsSecretName
+    );
+    
+    if (!secret) {
+      console.log(`  Warning: No Secret found to reference for create-user Job - skipping`);
+      return next();
+    }
     
     const createUserJob = renderCreateUserJob(
       req.mongoAuthName,
-      req.existingSecret,
+      secret,
       req.tenantId,
       req.namespace,
       req.storageAccountId,
@@ -293,6 +357,7 @@ function createStorageCredentialsDecoratorSync(config) {
     discoverStorageAccount,
     collectAttachments,
     planCredentialsSecret,
+    trackUserInitialization,
     planUserInitJob,
     planMigrationJob,
     assembleResponse
@@ -331,10 +396,10 @@ function createStorageCredentialsDecoratorSync(config) {
       {
         apiVersion: 'batch/v1',
         resource: 'jobs',
-        // namespace: secret.metadata.namespace,
         labelSelector: {
           matchLabels: {
             'storage.nightscout.org/account': storageAccountId,
+            'nightscout.io/tenant': tenantId,
             'ns.mdn.io/composite': 'storage-create-user',
           },
         },
@@ -478,8 +543,9 @@ function generateAppCredentials(tenantId, mongoHost, mongoPort, databaseName, us
 
 /**
  * Render app-credentials Secret
+ * @param {object} existingAnnotations - Annotations to preserve from existing Secret
  */
-function renderAppCredentialsSecret(tenantId, namespace, appCredentials, labels) {
+function renderAppCredentialsSecret(tenantId, namespace, appCredentials, labels, existingAnnotations = {}) {
   const secretName = `${tenantId}-app-credentials`;
   
   // Encode all credential fields to base64
@@ -487,6 +553,21 @@ function renderAppCredentialsSecret(tenantId, namespace, appCredentials, labels)
   Object.keys(appCredentials).forEach(key => {
     encodedData[key] = Buffer.from(appCredentials[key]).toString('base64');
   });
+  
+  // Standard annotations that are always set
+  const standardAnnotations = {
+    'ns.mdn.io/created-at': new Date().toISOString(),
+    'ns.mdn.io/tenant': tenantId,
+    'ns.mdn.io/description': 'MongoDB credentials for Nightscout application pods',
+    [ANNOTATIONS.PROTECTED_RESOURCE]: 'true'
+  };
+  
+  // Merge existing annotations (lifecycle tracking) with standard annotations
+  // Existing annotations take precedence to preserve user-initialized state
+  const mergedAnnotations = {
+    ...standardAnnotations,
+    ...existingAnnotations
+  };
   
   return {
     apiVersion: 'v1',
@@ -502,12 +583,7 @@ function renderAppCredentialsSecret(tenantId, namespace, appCredentials, labels)
         'ns.mdn.io/credential-type': 'application',
         [LABELS.RESOURCE_TYPE]: RESOURCE_TYPES.APP_CREDENTIALS_SECRET
       },
-      annotations: {
-        'ns.mdn.io/created-at': new Date().toISOString(),
-        'ns.mdn.io/tenant': tenantId,
-        'ns.mdn.io/description': 'MongoDB credentials for Nightscout application pods',
-        [ANNOTATIONS.PROTECTED_RESOURCE]: 'true'
-      }
+      annotations: mergedAnnotations
     },
     type: 'Opaque',
     data: encodedData
@@ -619,7 +695,7 @@ function renderMigrationJob(tenantId, namespace, storageAccount, databaseName, u
 function renderCreateUserJob(adminRefName, secret, tenantId, namespace, storageAccount, config) {
   // const namespace = secret.metadata.namespace;
   const secretName = secret.metadata.name;
-  const jobName = `${storageAccount}-create-user`;
+  const jobName = `${storageAccount}-${tenantId}-create-user`;
   const forceCreate = true;
   const utilityImagePullSecret = config.imagePullSecrets;
   
@@ -631,6 +707,7 @@ function renderCreateUserJob(adminRefName, secret, tenantId, namespace, storageA
       namespace: namespace,
       labels: {
         'storage.nightscout.org/account': storageAccount,
+        'nightscout.io/tenant': tenantId,
         'app.kubernetes.io/component': 'user-initialization',
         'ns.mdn.io/composite': 'storage-create-user'
       },
@@ -645,6 +722,7 @@ function renderCreateUserJob(adminRefName, secret, tenantId, namespace, storageA
         metadata: {
           labels: {
             'storage.nightscout.org/account': storageAccount,
+            'nightscout.io/tenant': tenantId,
             'app.kubernetes.io/component': 'user-initialization'
           }
         },

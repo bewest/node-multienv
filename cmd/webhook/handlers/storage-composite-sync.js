@@ -7,8 +7,8 @@
  * Children:
  *   - MongoDB StatefulSet
  *   - MongoDB Service (headless)
- *   - Migration Job (if spec.migration.enabled is true)
- *   - App Credentials Secret (MongoDB credentials for Nightscout)
+ *   - Init Replica Set Job (for replica set initialization)
+ *   - MongoDB Auth Secret (root credentials for MongoDB admin)
  * Related (not owned):
  *   - PersistentVolumeClaim (created by StatefulSet, protected from deletion)
  *   - ComputeInstances (tenants using this storage)
@@ -18,8 +18,9 @@
  *   - spec.replicas: Number of MongoDB replicas (default: 3)
  *   - spec.storageSize: Storage size per replica (default: "10Gi")
  *   - spec.tier: Service tier (free, basic, premium, enterprise)
- *   - spec.migration.enabled: Trigger migration from external MongoDB
- *   - spec.migration.sourceConnectionSecret: Secret containing source MongoDB URI
+ * 
+ * Note: Per-tenant database migration is handled by Storage Credentials Decorator,
+ * not this controller. See storage-credentials-decorator-sync.js for migration logic.
  */
 
 const crypto = require('crypto');
