@@ -199,6 +199,10 @@ function createStorageCredentialsDecoratorSync(config) {
       return next();
     }
     // Check if user already initialized
+    // TODO: this does nothing: properly detect job completion in order to
+    // correctly set the annotation?  (annotation should probably be set on the
+    // app connection secret in order to ensure the job will always be run in
+    // conjunction with a new/reset connection secret).
     const userInitialized = req.status.conditions?.find(
       c => c.type === 'UserInitialized' && c.status === 'True'
     );
