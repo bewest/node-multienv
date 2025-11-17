@@ -50,9 +50,11 @@ const config = {
   // Container commands
   commands: {
     podHealthcheck: process.env.POD_HEALTHCHECK_COMMAND || 'tenant-pod-healthcheck',
-    mongodb: parseArray(process.env.MONGODB_COMMAND, ['mongod', '--auth', /* '--replSet', 'rs0', */ '--bind_ip_all']),
-    initReplicaSet: parseArray(process.env.INIT_REPLICA_SET_COMMAND, ['init-replica-set.sh']),
-    migration: parseArray(process.env.MIGRATION_COMMAND, ['migrate-tenant-storage']),
+    // mongodb: parseArray(process.env.MONGODB_COMMAND, ['mongod', '--auth', /* '--replSet', 'rs0', */ '--bind_ip_all']),
+    initReplicaSet: parseArray(process.env.MULTIENV_COMMANDS_INIT_REPLICA_SET, ['/app/multienvctl/entrypoints/init-replica-set.sh']),
+    migration: parseArray(process.env.MULTIENV_COMMANDS_MIGRATION, ['/app/multienvctl/entrypoints/migrate-database.sh']),
+    createUser: parseArray(process.env.MULTIENV_COMMANDS_CREATEUSER, ['/app/multienvctl/entrypoints/create-mongodb-user.sh']),
+    prepareKeyfile: parseArray(process.env.MULTIENV_COMMANDS_PREPARE_KEYFILE, ['/app/multienvctl/entrypoints/prepare-keyfile.sh']),
   },
 
   // Resource requests and limits per container type
@@ -178,6 +180,21 @@ const config = {
         'app.kubernetes.io/name': 'nightscout',
       },
     },
+  },
+  jobs: {
+    ttlSecondsAfterFinished: parseInt(process.env.MULTIENV_JOBS_TTL || '3600'),
+    backoffLimit: parseInt(process.env.MULTIENV_JOBS_BACKOFFLIMIT || '3'),
+    imagePullSecrets: (parseArray(process.env.MULTIENV_IMAGE_PULLSECRETS) || [])
+      .map(function (el, v) { return { name: el }; }),
+
+
+  },
+  mongodb: {
+    keyfile: {
+      uid: process.env.MULTIENV_MONGODB_KEYFILE_UID || '999',
+      gid: process.env.MULTIENV_MONGODB_KEYFILE_GID || '999',
+      // TODO: sourcePath, destPath?
+    }
   },
 
   // CDC/Kafka configuration

@@ -69,23 +69,8 @@ function createStorageCompositeSync(config) {
 
     if (!existingAppSecret) {
       console.log('storageAccount', storageAccount, 'MISSING SECRET KEY MUST CREATE OUT OF BAND');
-      // console.log(`  Generating mongo admin credentials for ${storageAccount}`);
-      
-      // Generate new credentials
-      const root_username = generateUsername(storageAccount, 'admin');
-      const root_password = generateSecurePassword(32);
-      const databaseName = generateDatabaseName(storageAccount);
-      const stringData = {
-        STORAGE: storageAccount,
-        MONGO_INITDB_ROOT_USERNAME: root_username,
-        MONGO_INITDB_ROOT_PASSWORD: root_password,
-        MONGO_INITDB_DATABASE: databaseName
-      };
-      var mongo_secret = template_initial_storage_secret(storageAccount, req.storageType, req.spec.tier, stringData);
-      // console.log("SELECTOR", req.spec.selector);
-      // console.log("NEW LABELS", mongo_secret.metadata.labels);
+
       res.status.phase = 'Pending';
-      // res.children.push(mongo_secret);
       return next( );
     }
     req.needsDedicatedInfra = (existingAppSecret.metadata?.annotations['ns.mdn.io/runtime-required'] == 'dedicated');
@@ -151,36 +136,6 @@ function createStorageCompositeSync(config) {
     return next();
   }
 
-  function template_initial_storage_secret (accountId, storageType, tier, stringData) {
-    const secretName = `${accountId}-mongo-auth`;
-    
-    // Create K8s secret with provisioning root MongoDB credentials
-    // This Secret triggers the storage composite controller via ns.mdn.io/composite label
-    const secret = {
-      apiVersion: 'v1',
-      kind: 'Secret',
-      metadata: {
-        name: secretName,
-        labels: {
-          'app.kubernetes.io/managed-by': 'metacontroller',
-          'storage.nightscout.org/account': accountId,
-          // set to storage to manage as a child, set to key to set as related?
-          'ns.mdn.io/composite': 'key',
-          // Credential type label for decorator selection
-          'ns.mdn.io/credential-type': 'mongodb-auth'
-        },
-        annotations: {
-          'ns.mdn.io/storage-type': storageType || config.storage.defaultStorageType,
-          'ns.mdn.io/tier': tier || opts.DEFAULT_TIER || 'basic',
-          'ns.mdn.io/created-at': new Date().toISOString(),
-          [ANNOTATIONS.PROTECTED_RESOURCE]: 'true'
-        },
-        ownerReferences: null  // CRITICAL: Protected resource - survives parent deletion
-      },
-      stringData
-    };
-    return secret;
-  }
 
   function collectAttachments (req, res, next) {
     // Index req.children (owned) and req.related (label-selected) into req.attachments
@@ -269,17 +224,9 @@ function createStorageCompositeSync(config) {
       var databaseName = Buffer.from(secretData.MONGO_INITDB_DATABASE || '', 'base64').toString('utf-8');
 
         
-      // Ensure app credentials
-      // var updated_secret = ensureNSUserCredentials(req.storageSecret, storageAccount);
-      // var nsuserUsername = Buffer.from(secretData.MONGO_USERNAME || '', 'base64').toString('utf-8');
-      // var nsuserPassword = Buffer.from(secretData.MONGO_PASSWORD || '', 'base64').toString('utf-8');
-      // res.children.push(updated_secret);
-
       const mongoResources = renderMongoDB(req.storageConfig, databaseName, config, req.parent);
       res.children.push(...mongoResources);
-      // Check if NS user creation is needed
-      
-      // const hasCredentials = nsuserUsername && nsuserPassword;
+
       // Check MongoDB readiness
       const mongoReadiness = checkMongoReadiness(req.children, req.storageAccount);
       if (mongoReadiness.condition) {
@@ -291,9 +238,7 @@ function createStorageCompositeSync(config) {
       if (mongoReadiness.ready) {
         const userInitialized = req.parent.status?.conditions?.find(c => c.type === 'UserInitialized' && c.status === 'True');
         if (!userInitialized) {
-          console.log(`  NS user creation needed - should render create-user Job`);
-          // const createUserJob = renderCreateUserJob(req.storageSecret, req.storageAccount, req.storageConfig, config);
-          // res.children.push(createUserJob);
+          console.log(`  NS user creation needed? - should render create-user Job`);
         }
       }
     }
@@ -389,9 +334,9 @@ function createStorageCompositeSync(config) {
         // Don't modify Secret - Secret Decorator owns annotation updates
       } else if (failed > 0) {
         // Job failed - keep rendering to allow retry (up to backoffLimit)
+        // Will be re-added to children automatically below.
         console.log(`  Init Job failed (${failed} failures) - keeping Job for retry`);
-        const initJob = renderInitMongoClusterJob(req.parent, storageAccount, config);
-        // res.children.push(initJob);
+
         
         res.status.conditions.push({
           type: 'ReplicaSetReady',
@@ -402,9 +347,7 @@ function createStorageCompositeSync(config) {
       } else {
         // Job still running - re-add to keep it alive
         console.log(`  Init Job in progress (active=${active}) - keeping Job alive`);
-        // const initJob = renderInitMongoClusterJob(req.parent, storageAccount, config);
-        // res.children.push(initJob);
-        
+
         res.status.conditions.push({
           type: 'ReplicaSetReady',
           status: 'False',
@@ -431,11 +374,8 @@ function createStorageCompositeSync(config) {
     var remaining = _(req.children).flatMap(function (resources, kind) {
       return _.map(resources, (resource, name) => ({
         ...resource
-        // ..._.omit(resource, 'status')
       }));
     }).reject((child) => {
-        // child.metadata.name == name
-        // child.metadata.kind == kind
         return _.some(response.children, (excluded) => {
           hasSameName = excluded.metadata.name == child.metadata.name && excluded;
           isSameKind = excluded.kind == child.kind;
@@ -465,30 +405,6 @@ function createStorageCompositeSync(config) {
 
 }
 
-/**
- * Generate secure random password
- */
-function generateSecurePassword(length = 32) {
-  const charset = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%^&*-_+=';
-  const crypto = require('crypto');
-  let password = '';
-  const randomBytes = crypto.randomBytes(length);
-  
-  for (let i = 0; i < length; i++) {
-    password += charset[randomBytes[i] % charset.length];
-  }
-  
-  return password;
-}
-
-/**
- * Generate unique username with random suffix
- */
-function generateUsername(storageAccount, prefix='nsuser') {
-  const crypto = require('crypto');
-  const randomSuffix = crypto.randomBytes(4).toString('hex');
-  return `${prefix}-${storageAccount}-${randomSuffix}`;
-}
 
 /**
  * Generate short unique database name for storage account
@@ -516,64 +432,6 @@ function generateAppCredentials(storageAccount, mongoHost, mongoPort, databaseNa
     'MONGO_USERNAME': username,
     'MONGO_PASSWORD': password,
     'MONGO_AUTH_SOURCE': databaseName
-  };
-}
-
-/**
- * Ensure NS user credentials exist in Secret, generate if missing
- */
-function ensureNSUserCredentials(secret, storageAccount) {
-  // Decode existing Secret data
-  const existingData = {};
-  if (secret.data) {
-    Object.keys(secret.data).forEach(key => {
-      existingData[key] = Buffer.from(secret.data[key], 'base64').toString('utf-8');
-    });
-  }
-  
-  // Check if credentials already exist
-  const hasUsername = existingData['nsuser-username'];
-  const hasPassword = existingData['nsuser-password'];
-  
-  if (hasUsername && hasPassword) {
-    // Credentials already exist, no update needed
-    return null;
-  }
-  
-  console.log(`  Generating NS user credentials for ${storageAccount}`);
-  
-  // Generate new credentials
-  const nsuserUsername = hasUsername || generateUsername(storageAccount);
-  const nsuserPassword = hasPassword || generateSecurePassword(32);
-  
-  // Build updated Secret data (merge with existing)
-  const updatedData = {
-    ...existingData,
-    'nsuser-username': nsuserUsername,
-    'nsuser-password': nsuserPassword
-  };
-  
-  // Encode to base64 for Kubernetes Secret
-  const encodedData = {};
-  Object.keys(updatedData).forEach(key => {
-    encodedData[key] = Buffer.from(updatedData[key]).toString('base64');
-  });
-  
-  // Return updated Secret
-  return {
-    apiVersion: 'v1',
-    kind: 'Secret',
-    metadata: {
-      name: secret.metadata.name,
-      namespace: secret.metadata.namespace,
-      labels: secret.metadata.labels,
-      annotations: {
-        ...secret.metadata.annotations,
-        'ns.mdn.io/nsuser-credentials-generated': new Date().toISOString()
-      }
-    },
-    type: 'Opaque',
-    data: encodedData
   };
 }
 
@@ -661,211 +519,6 @@ function checkMongoReadiness(children, storageAccount) {
 }
 
 /**
- * Render app-credentials Secret for Nightscout containers
- * Contains only the credentials needed by application workloads (not root/admin credentials)
- */
-function renderAppCredentialsSecret(storageAccount, namespace, appCredentials, storageLabels) {
-  const secretName = `${storageAccount}-app-credentials`;
-  
-  // Encode all credential fields to base64
-  const encodedData = {};
-  Object.keys(appCredentials).forEach(key => {
-    encodedData[key] = Buffer.from(appCredentials[key]).toString('base64');
-  });
-  
-  return {
-    apiVersion: 'v1',
-    kind: 'Secret',
-    metadata: {
-      name: secretName,
-      namespace: namespace,
-      labels: {
-        ...storageLabels,
-        'app.kubernetes.io/component': 'app-credentials',
-        'ns.mdn.io/composite': 'storage',
-        'ns.mdn.io/credential-type': 'application'
-      },
-      annotations: {
-        'ns.mdn.io/created-at': new Date().toISOString(),
-        'ns.mdn.io/description': 'MongoDB credentials for Nightscout application containers'
-      }
-    },
-    type: 'Opaque',
-    data: encodedData
-  };
-}
-
-/**
- * Render migration Job based on StorageAccount CRD spec
- * Uses ns-utility image and scripts for better status reporting
- */
-function renderMigrationJobFromCRD(parent, storageAccount, sourceConnectionSecretName, config) {
-  const namespace = parent.metadata.namespace;
-  const jobName = `${storageAccount}-migration`;
-  const spec = parent.spec || {};
-  
-  const targetDb = generateDatabaseName(storageAccount);
-  const targetHost = `mongo-${targetDb}`;
-  const migrationMethod = 'mongodump-restore';
-  
-  return {
-    apiVersion: 'batch/v1',
-    kind: 'Job',
-    metadata: {
-      name: jobName,
-      namespace: namespace,
-      labels: {
-        'storage.nightscout.org/account': storageAccount,
-        'app.kubernetes.io/component': 'migration',
-        'ns.mdn.io/composite': 'storage'
-      },
-      annotations: {
-        'ns.mdn.io/created-at': new Date().toISOString(),
-        'ns.mdn.io/migration-method': migrationMethod,
-        'ns.mdn.io/migration-target-db': targetDb,
-        'ns.mdn.io/source-secret': sourceConnectionSecretName
-      }
-    },
-    spec: {
-      ttlSecondsAfterFinished: 86400,
-      backoffLimit: 3,
-      template: {
-        metadata: {
-          labels: {
-            'storage.nightscout.org/account': storageAccount,
-            'app.kubernetes.io/component': 'migration'
-          }
-        },
-        spec: {
-          restartPolicy: 'OnFailure',
-          containers: [{
-            name: 'migration',
-            image: config.images.nsUtility,
-            imagePullPolicy: config.images.nsUtilityPullPolicy,
-            env: [
-              {
-                name: 'MIGRATION_SOURCE_URI',
-                valueFrom: {
-                  secretKeyRef: {
-                    name: sourceConnectionSecretName,
-                    key: 'uri'
-                  }
-                }
-              },
-              { name: 'MIGRATION_TARGET_HOST', value: targetHost },
-              { name: 'MIGRATION_TARGET_DB', value: targetDb },
-              { name: 'MIGRATION_METHOD', value: migrationMethod },
-              { name: 'STORAGE_ACCOUNT', value: storageAccount }
-            ],
-            command: ['migrate-database.sh'],
-            resources: {
-              requests: {
-                cpu: config.resources.nsUtility.cpuRequest,
-                memory: config.resources.nsUtility.memRequest
-              },
-              limits: {
-                cpu: config.resources.nsUtility.cpuLimit,
-                memory: config.resources.nsUtility.memLimit
-              }
-            }
-          }]
-        }
-      }
-    }
-  };
-}
-
-/**
- * Render migration Job based on Secret annotations (LEGACY)
- * Uses ns-utility image and scripts for better status reporting
- */
-function renderMigrationJob(secret, storageAccount, sourceUri, config) {
-  const namespace = secret.metadata.namespace;
-  const jobName = `${storageAccount}-migration`;
-  
-  // Decode Secret data for target credentials
-  const secretData = {};
-  if (secret.data) {
-    Object.keys(secret.data).forEach(key => {
-      secretData[key] = Buffer.from(secret.data[key], 'base64').toString('utf-8');
-    });
-  }
-  
-  const targetDb = generateDatabaseName(storageAccount);
-  const targetHost = `mongo-${targetDb}`;
-  const targetUser = secretData.username || 'admin';
-  const targetPassword = secretData.password || secretData['root-password'];
-  const targetUri = `mongodb://${targetUser}:${targetPassword}@${targetHost}:27017/${targetDb}?replicaSet=rs0`;
-  
-  // Use ns-utility image from config
-  const migrationImage = config.images.nsUtility;
-  const migrationMethod = secret.metadata.annotations?.['ns.mdn.io/migration-method'] || 'mongodump-restore';
-  
-  // Get source database name from annotation or default
-  const sourceDb = secret.metadata.annotations?.['ns.mdn.io/migration-source-db'] || 'nightscout';
-  
-  return {
-    apiVersion: 'batch/v1',
-    kind: 'Job',
-    metadata: {
-      name: jobName,
-      namespace: namespace,
-      labels: {
-        'storage.nightscout.org/account': storageAccount,
-        'app.kubernetes.io/component': 'migration',
-        'ns.mdn.io/composite': 'storage'
-      },
-      annotations: {
-        'ns.mdn.io/created-at': new Date().toISOString(),
-        'ns.mdn.io/migration-method': migrationMethod,
-        'ns.mdn.io/migration-source-db': sourceDb,
-        'ns.mdn.io/migration-target-db': targetDb
-      }
-    },
-    spec: {
-      ttlSecondsAfterFinished: 86400, // 24 hours
-      backoffLimit: 3,
-      template: {
-        metadata: {
-          labels: {
-            'storage.nightscout.org/account': storageAccount,
-            'app.kubernetes.io/component': 'migration'
-          }
-        },
-        spec: {
-          restartPolicy: 'OnFailure',
-          containers: [{
-            name: 'migration',
-            image: migrationImage,
-            imagePullPolicy: config.images.nsUtilityPullPolicy,
-            env: [
-              { name: 'MIGRATION_SOURCE_URI', value: sourceUri },
-              { name: 'MIGRATION_TARGET_URI', value: targetUri },
-              { name: 'MIGRATION_SOURCE_DB', value: sourceDb },
-              { name: 'MIGRATION_TARGET_DB', value: targetDb },
-              { name: 'MIGRATION_METHOD', value: migrationMethod },
-              { name: 'STORAGE_ACCOUNT', value: storageAccount }
-            ],
-            command: ['migrate-database.sh'],
-            resources: {
-              requests: {
-                cpu: config.resources.nsUtility.cpuRequest,
-                memory: config.resources.nsUtility.memRequest
-              },
-              limits: {
-                cpu: config.resources.nsUtility.cpuLimit,
-                memory: config.resources.nsUtility.memLimit
-              }
-            }
-          }]
-        }
-      }
-    }
-  };
-}
-
-
-/**
  * Check user initialization state from create-user Job
  */
 function checkUserInitializationState(children, parent) {
@@ -944,89 +597,6 @@ function checkUserInitializationState(children, parent) {
   };
 }
 
-/**
- * Check migration state from Job children (for CRD-based migrations)
- */
-function checkMigrationStateFromCRD(children, migrationEnabled) {
-  if (!migrationEnabled) {
-    return { enabled: false, complete: true, failed: false };
-  }
-  
-  const jobs = children['Job.batch/v1'] || {};
-  
-  for (const [name, job] of Object.entries(jobs)) {
-    if (name.endsWith('-migration')) {
-      const conditions = job.status?.conditions || [];
-      const succeeded = job.status?.succeeded || 0;
-      const failed = job.status?.failed || 0;
-      const active = job.status?.active || 0;
-      
-      const completeCondition = conditions.find(c => c.type === 'Complete' && c.status === 'True');
-      const failedCondition = conditions.find(c => c.type === 'Failed' && c.status === 'True');
-      
-      if (completeCondition || succeeded > 0) {
-        return {
-          enabled: true,
-          complete: true,
-          failed: false,
-          condition: {
-            type: 'MigrationComplete',
-            status: 'True',
-            reason: 'JobSucceeded',
-            message: 'Database migration completed successfully',
-            lastTransitionTime: completeCondition?.lastTransitionTime || new Date().toISOString()
-          }
-        };
-      } else if (failedCondition) {
-        return {
-          enabled: true,
-          complete: false,
-          failed: true,
-          condition: {
-            type: 'MigrationComplete',
-            status: 'False',
-            reason: 'JobFailed',
-            message: `Migration job failed (${failed} failures). Check logs and delete job to retry.`,
-            lastTransitionTime: failedCondition?.lastTransitionTime || new Date().toISOString()
-          }
-        };
-      } else if (active > 0) {
-        return {
-          enabled: true,
-          complete: false,
-          failed: false,
-          condition: {
-            type: 'MigrationComplete',
-            status: 'Unknown',
-            reason: 'JobRunning',
-            message: 'Database migration in progress',
-            lastTransitionTime: new Date().toISOString()
-          }
-        };
-      } else {
-        return {
-          enabled: true,
-          complete: false,
-          failed: false,
-          condition: {
-            type: 'MigrationComplete',
-            status: 'Unknown',
-            reason: 'JobPending',
-            message: 'Migration job created but not yet started',
-            lastTransitionTime: new Date().toISOString()
-          }
-        };
-      }
-    }
-  }
-  
-  return {
-    enabled: true,
-    complete: false,
-    failed: false,
-    condition: null
-  };
-}
 
 /**
  * Check migration state from Job children (LEGACY - for annotation-based migrations)
@@ -1147,40 +717,5 @@ function countTenantUsage(related, storageAccountLabel) {
     tenantIds: tenants
   };
 }
-
-/**
- * Collect children that should be preserved unchanged
- * This prevents accidental deletion when we don't return a child
- * 
- * We preserve:
- * - Completed Jobs (Success status) - keep them for audit/history
- * - Failed Jobs - keep for debugging
- * - Running Jobs - keep them running
- * Only exclude Pending/incomplete Jobs that we might want to recreate
- * 
- * @param {Object} children - Existing children from request
- * @param {Object} parent - Parent StorageAccount CRD
- * @returns {Array} - Array of children resources to preserve
- */
-function collectPreservedChildren(children, parent) {
-  const preserved = [];
-  
-  // Preserve completed/running Jobs (don't recreate them)
-  const jobs = children['Job.batch/v1'] || {};
-  for (const [name, job] of Object.entries(jobs)) {
-    const succeeded = job.status?.succeeded || 0;
-    const failed = job.status?.failed || 0;
-    const active = job.status?.active || 0;
-    
-    // Preserve if completed (succeeded or failed) or still running
-    if (succeeded > 0 || failed > 0 || active > 0) {
-      console.log(`  Preserving Job: ${name} (succeeded=${succeeded}, failed=${failed}, active=${active})`);
-      preserved.push(job);
-    }
-  }
-  
-  return preserved;
-}
-
 
 module.exports = createStorageCompositeSync;

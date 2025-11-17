@@ -84,8 +84,7 @@ function createComputeCompositeSync(config) {
     const appCredentialsSecret = findAppCredentialsSecret(related, storageAccountLabel);
     
     if (storageAccount.spec.storageType == 'dedicated' && !appCredentialsSecret) {
-      // TODO: Maybe renderCreateUserJob create-user
-      console.warn(`App credentials Secret not found for account: ${storageAccountLabel}`);
+
       response.status = {
         phase: 'Pending',
         observedGeneration: parent.metadata?.generation,

@@ -145,29 +145,12 @@ function createStorageCredentialsDecoratorSync(config) {
       console.log(`  compute credentials decorator Found existing app-credentials Secret: ${req.appCredentialsSecretName}`);
       res.attachments.push(req.existingSecret);
       // res.attachments.push(updatedSecret);
-      
-      /*
-      // Extract credentials for Job rendering
-      const secretData = req.existingSecret.data || {};
-      // VERIFY
-      username = Buffer.from(secretData.MONGO_USERNAME || '', 'base64').toString('utf-8');
-      password = Buffer.from(secretData.MONGO_PASSWORD || '', 'base64').toString('utf-8');
-      req.credentials = username && password ? { username, password } : null;
-      */
-      
+
     } else {
       // First cycle - generate new credentials
-      console.log(`  First cycle - generating new app credentials`);
+      console.log(`  FIRST CYCLE - GENERATING NEW APP CREDENTIALS`);
       console.log(`MISSING APP SECRET`);
       console.log('MISSING FROM RELATED?', req.related);
-      /*
-      const namespace = parent.metadata.namespace || 'hosted-tenants';
-      // const serviceName = `${storageAccount}-mongo`;
-      const serviceName = `mongo-${parent.status.databaseName}`;
-      const secretName = `${storageAccount}-mongo-auth`;
-      const jobName = `${storageAccount}-init-mongo-cluster`;
-      const mongoHost = `${storageAccount}-mongo-0.${serviceName}.${namespace}.svc.cluster.local`;
-      */
       
       username = generateUsername(req.tenantId);
       password = generateSecurePassword(16);
@@ -555,7 +538,7 @@ function renderMigrationJob(tenantId, namespace, storageAccount, databaseName, u
         'storage.nightscout.org/account': storageAccount
       },
       annotations: {
-        'ns.mdn.io/created-at': new Date().toISOString(),
+        // 'ns.mdn.io/created-at': new Date().toISOString(),
         'ns.mdn.io/tenant': tenantId,
         'ns.mdn.io/migration-method': migrationMethod,
         'ns.mdn.io/migration-target-db': databaseName,
@@ -563,8 +546,8 @@ function renderMigrationJob(tenantId, namespace, storageAccount, databaseName, u
       }
     },
     spec: {
-      ttlSecondsAfterFinished: 86400, // 24 hours
-      backoffLimit: 3,
+      ttlSecondsAfterFinished: config.jobs.ttlSecondsAfterFinished,
+      backoffLimit: config.jobs.backoffLimit,
       template: {
         metadata: {
           labels: {
@@ -574,6 +557,7 @@ function renderMigrationJob(tenantId, namespace, storageAccount, databaseName, u
           }
         },
         spec: {
+          imagePullSecrets: config.jobs.imagePullSecrets,
           restartPolicy: 'OnFailure',
           serviceAccountName: 'migration-job',
           containers: [{
@@ -606,8 +590,8 @@ function renderMigrationJob(tenantId, namespace, storageAccount, databaseName, u
               { name: 'STORAGE_ACCOUNT', value: storageAccount },
               { name: 'TENANT_ID', value: tenantId }
             ],
-            command: ['migrate-database.sh'],
-            args: [], // TODO: Add specific migration args if needed
+            command: config.commands.migration, //  ['migrate-database.sh'],
+            // args: [], // TODO: Add specific migration args if needed
             resources: {
               requests: {
                 cpu: config.resources?.nsUtility?.cpuRequest || '100m',
@@ -627,15 +611,6 @@ function renderMigrationJob(tenantId, namespace, storageAccount, databaseName, u
 
 /**
  * Render create-user Job to create MongoDB user with NS app credentials
-    const createUserJob = renderCreateUserJob(
-      req.mongoAuthName,
-      req.existingSecret,
-      req.tenantId,
-      req.namespace,
-      req.storageAccountId,
-      config
-    );
-    
  */
 function renderCreateUserJob(adminRefName, secret, tenantId, namespace, storageAccount, config) {
   // const namespace = secret.metadata.namespace;
@@ -656,15 +631,12 @@ function renderCreateUserJob(adminRefName, secret, tenantId, namespace, storageA
         'ns.mdn.io/composite': 'storage-create-user'
       },
       annotations: {
-        // 'ns.mdn.io/created-at': new Date().toISOString(),
-        // 'ns.mdn.io/force-create': forceCreate.toString(),
-        // 'ns.mdn.io/target-user': nsuserUsername,
-        // 'ns.mdn.io/target-db': targetDb
+
       }
     },
     spec: {
-      ttlSecondsAfterFinished: 3600, // 1 hour
-      backoffLimit: 3,
+      ttlSecondsAfterFinished: config.jobs.ttlSecondsAfterFinished,
+      backoffLimit: config.jobs.backoffLimit,
       template: {
         metadata: {
           labels: {
@@ -673,14 +645,14 @@ function renderCreateUserJob(adminRefName, secret, tenantId, namespace, storageA
           }
         },
         spec: {
-          imagePullSecrets: config.multienv.imagePullSecrets.map(function (el, v) { return { name: el }; }),
+          imagePullSecrets: config.jobs.imagePullSecrets,
           restartPolicy: 'OnFailure',
           backoffLimit: 4,
           containers: [{
             name: 'create-user',
             image: config.images.nsUtility,
             imagePullPolicy: config.images.nsUtilityPullPolicy,
-            command: ['/app/multienvctl/entrypoints/create-mongodb-user.sh'],
+            command: config.commands.createUser, // ['/app/multienvctl/entrypoints/create-mongodb-user.sh'],
             env: [
               { name: 'MONGO_PORT', value: '27017' },
               { name: 'FORCE_USER_CREATE', value: forceCreate ? 'true' : 'false' },

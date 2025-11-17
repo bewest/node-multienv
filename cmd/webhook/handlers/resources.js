@@ -71,28 +71,6 @@ function renderMongoDB(parent, databaseName, config, storage) {
     ...additionalLabels
   });
 
-  const secret = {
-    apiVersion: 'v1',
-    kind: 'Secret',
-    metadata: {
-      name: secretName,
-      namespace: namespace,
-      labels: standardLabels('database'),
-      annotations: {
-        'ns.mdn.io/created-at': new Date().toISOString(),
-        'ns.mdn.io/credential-type': 'mongodb-auth'
-      }
-    },
-    type: 'Opaque',
-    stringData: {
-      // username should be generated randomly
-      username: 'nsuser',
-      password: generatePassword(),
-      // database name should be generated randomly
-      database: 'ns'
-    }
-  };
-
   const headlessService = {
     apiVersion: 'v1',
     kind: 'Service',
@@ -156,7 +134,7 @@ function renderMongoDB(parent, databaseName, config, storage) {
             {
               name: 'prepare-keyfile',
               image: config.images.nsUtility,
-              command: ['/app/multienvctl/entrypoints/prepare-keyfile.sh'],
+              command: config.commands.prepareKeyfile, // ['/app/multienvctl/entrypoints/prepare-keyfile.sh'],
               env: [
                 {
                   name: 'KEYFILE_SOURCE',
@@ -168,11 +146,11 @@ function renderMongoDB(parent, databaseName, config, storage) {
                 },
                 {
                   name: 'KEYFILE_UID',
-                  value: '999'
+                  value: config.mongodb.keyfile.uid, // '999'
                 },
                 {
                   name: 'KEYFILE_GID',
-                  value: '999'
+                  value: config.mongodb.keyfile.gid, // '999'
                 }
               ],
               volumeMounts: [
@@ -336,7 +314,7 @@ function renderMongoDB(parent, databaseName, config, storage) {
               // 'ns.mdn.io/created-at': new Date().toISOString(),
               // 'ns.mdn.io/parent-generation': String(parent.metadata.generation || 1),
               // 'ns.mdn.io/tenant-email': parent.data.TENANT_EMAIL || '',
-              'ns.mdn.io/backup-schedule': parent.data.BACKUP_SCHEDULE || 'daily',
+              // 'ns.mdn.io/backup-schedule': parent.data.BACKUP_SCHEDULE || 'daily',
               'ns.mdn.io/storage-class': storageClass,
               'ns.mdn.io/size-gi': storageGi
             }
@@ -368,7 +346,6 @@ function renderMongoDB(parent, databaseName, config, storage) {
       selector: {
         matchLabels: {
           'app.kubernetes.io/name': 'mongodb',
-          // 'app.kubernetes.io/instance': tenantId
           'storage.nightscout.org/account': storageAccount,
         }
       }
@@ -417,11 +394,9 @@ function renderNightscout(parent, config) {
   
   // Resource names with tenant prefix
   const deploymentName = `${tenantId}-nightscout`;
-  const serviceName = `${tenantId}-nightscout`;
   const pdbName = `${tenantId}-nightscout-pdb`;
   // Resourcces with storageAccount prefix
   const secretName = `${storageAccount}-mongo-auth`;
-  const mongoHost = `${storageAccount}-mongo-0.${storageAccount}-mongo`;
 
   const resources = [];
 
