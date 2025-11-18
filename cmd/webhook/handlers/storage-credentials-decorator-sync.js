@@ -592,7 +592,7 @@ function renderAppCredentialsSecret(tenantId, namespace, databaseName, existingS
       annotations: mergedAnnotations
     },
     type: 'Opaque',
-    // data: encodedData
+
   };
 
   if (existingSecret) {
