@@ -590,11 +590,13 @@ function renderAppCredentialsSecret(tenantId, namespace, databaseName, existingS
       tenantId,
       mongoHost,
       mongoPort,
+      databaseName,
       username,
       password
     );
+
     // Encode all credential fields to base64
-    const encodedData = {};
+    var encodedData = {};
     Object.keys(appCredentials).forEach(key => {
       encodedData[key] = Buffer.from(appCredentials[key]).toString('base64');
     });
