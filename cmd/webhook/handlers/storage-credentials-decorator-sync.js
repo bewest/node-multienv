@@ -245,6 +245,12 @@ function createStorageCredentialsDecoratorSync(config) {
     if (succeeded) {
       console.log(`  Create-user Job succeeded - marking user initialized on Secret`);
       
+      const initTimestamp = new Date().toISOString();
+      
+      // Update req.existingSecret so planUserInitJob sees the annotation in this cycle
+      req.existingSecret.metadata.annotations = req.existingSecret.metadata.annotations || {};
+      req.existingSecret.metadata.annotations['ns.mdn.io/user-initialized'] = initTimestamp;
+      
       // Find the clean Secret already in res.attachments (added by planCredentialsSecret)
       const cleanSecretIndex = res.attachments.findIndex(
         att => att.kind === 'Secret' && att.metadata.name === req.appCredentialsSecretName
@@ -254,7 +260,7 @@ function createStorageCredentialsDecoratorSync(config) {
         // Update the clean Secret with the user-initialized annotation
         const cleanSecret = res.attachments[cleanSecretIndex];
         cleanSecret.metadata.annotations = cleanSecret.metadata.annotations || {};
-        cleanSecret.metadata.annotations['ns.mdn.io/user-initialized'] = new Date().toISOString();
+        cleanSecret.metadata.annotations['ns.mdn.io/user-initialized'] = initTimestamp;
         console.log(`  Updated clean Secret in attachments with user-initialized annotation`);
       } else {
         // Secret not in attachments yet - this shouldn't happen if planCredentialsSecret ran
@@ -265,7 +271,7 @@ function createStorageCredentialsDecoratorSync(config) {
         if (credentials) {
           const annotations = {
             ...(req.existingSecret.metadata?.annotations || {}),
-            'ns.mdn.io/user-initialized': new Date().toISOString()
+            'ns.mdn.io/user-initialized': initTimestamp
           };
           
           const secretWithAnnotation = renderAppCredentialsSecret(
