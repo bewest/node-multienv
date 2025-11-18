@@ -216,19 +216,27 @@ spec:
 
 ### Compute Composite
 
-**Parent**: ConfigMap (labeled `ns.mdn.io/composite=compute`)
+**Parent**: ComputeInstance CRD (`nightscout.io/v1alpha1`)
 
 **Children** (owned, deleted with parent):
 - Nightscout Deployment
-- Nightscout Service
+- Nightscout Service (optional)
 - PodDisruptionBudget
-- Optional: KafkaTopic, KafkaConnector, Jobs
+- Optional: KafkaTopic, KafkaConnector (if CDC enabled)
 
 **Related** (discovered, NOT deleted with parent):
-- Storage Secret (provides MongoDB credentials)
+- StorageAccount CRD (referenced via spec.storageAccountRef.name)
 - MongoDB StatefulSet (blast radius protection)
+- App-credentials Secret (managed by decorator, not composite)
 
-**Webhook**: `POST /composite/compute/sync`
+**Webhooks**: 
+- `POST /composite/compute/customize` - Discover related resources
+- `POST /composite/compute/sync` - Generate Nightscout infrastructure
+
+**Status Reporting**:
+- Nightscout readiness (`Ready` condition)
+- Storage availability check
+- CDC status (if enabled)
 
 ### Kafka/CDC Integration Scope
 
@@ -255,6 +263,183 @@ See [Kafka CDC Integration Contract](KAFKA-CDC-INTEGRATION.md) for complete deta
 - Required ConfigMaps/Secrets format
 - Per-tenant resource generation
 - Validation and troubleshooting
+
+### Decorator Controllers
+
+Decorators watch resources **outside** the composite lifecycle to implement domain-specific logic and **blast radius protection**. Unlike composites, decorators don't own their watched resources, allowing critical data to survive composite controller garbage collection.
+
+#### Storage-Credentials Decorator
+
+**Watches**: ComputeInstance CRDs (via label selector: `storage.nightscout.org/account` exists)
+
+**Attachments** (managed, but not owned by parent):
+- App-credentials Secret (per-tenant MongoDB credentials)
+- Create-user Job (MongoDB user initialization)
+- Migration Job (Gen3→Gen4 data migration)
+
+**Webhooks**:
+- `POST /decorator/storage-credentials/customize` - Discover StorageAccount, Jobs, Secrets, ConfigMaps
+- `POST /decorator/storage-credentials/sync` - Generate app credentials and migration Jobs
+
+**Purpose**:
+- Creates unique per-tenant MongoDB credentials separate from root credentials
+- Initializes MongoDB users after replica set is ready
+- Orchestrates Gen3→Gen4 migration (shared→dedicated storage)
+- Protects app-credentials Secrets from composite deletion
+
+**Pipeline**:
+1. Discover StorageAccount to determine storage mode (shared/dedicated)
+2. Track user initialization status via Job completion
+3. Render create-user Job if user not initialized
+4. Render migration Job if migration annotation present (with prerequisite guards)
+5. Generate/preserve app-credentials Secret with connection details
+
+#### Storage-Initialization Decorator
+
+**Watches**: mongo-auth Secrets (via labels: `storage.nightscout.org/account` exists, `ns.mdn.io/composite` in [key, mongodb-auth])
+
+**Purpose**:
+- Tracks replica set initialization state outside composite lifecycle
+- Sets runtime annotations (`ns.mdn.io/runtime-required`) based on StorageAccount spec
+- Marks replica set initialized timestamp after observing init Job completion
+- Protects mongo-auth Secret state from composite garbage collection
+
+**Webhooks**:
+- `POST /decorator/storage-initialization/customize` - Discover init Jobs and StorageAccount
+- `POST /decorator/storage-initialization/sync` - Update Secret annotations with state
+
+**Why Decorator**: mongo-auth Secret contains root MongoDB credentials that MUST survive StorageAccount CRD deletion to prevent data loss during CRD recreation or migration scenarios.
+
+#### Instance-Userdata Decorator
+
+**Watches**: Gen3 ConfigMaps (via label: `role=config-as-deploy`)
+
+**Purpose**:
+- Orchestrates Gen3→Gen4 migration by managing ConfigMap lifecycle
+- Ensures ComputeInstance CRD exists before ConfigMap deletion
+- Provides gradual cutover from Gen3 to Gen4 architecture
+
+**Webhooks**:
+- `POST /decorator/instance-userdata/customize` - Discover related ComputeInstances
+- `POST /decorator/instance-userdata/sync` - Coordinate migration cutover
+
+**Why Decorator**: Gen3 ConfigMaps exist before Gen4 adoption and must be preserved until migration completes. Decorator pattern allows observing both old (ConfigMap) and new (CRD) resources during transition.
+
+#### PVC-Backup Decorator
+
+**Watches**: PersistentVolumeClaims (via labels: `app.kubernetes.io/component=database`)
+
+**Attachments**:
+- VolumeSnapshot (backup on PVC deletion)
+
+**Webhooks**:
+- `POST /decorator/sync` - Enforce backup policy
+- `POST /decorator/finalize` - Create snapshot before PVC deletion
+
+**Purpose**:
+- Automatically creates VolumeSnapshots when MongoDB PVCs are deleted
+- Provides recovery mechanism for accidental deletion
+- Implements backup retention policies
+
+## Provisioner API Lifecycle
+
+The deployment-controller provides a **thin provisioning facade** (`/accounts/` API) that creates Gen4 CRDs without requiring external systems to understand Kubernetes or Metacontroller internals.
+
+### Complete Lifecycle Flow
+
+```
+External System (Dashboard, CLI, Automation)
+    ↓
+POST /accounts/:accountId
+    ↓
+deployment-controller creates:
+  1. StorageAccount CRD (declares storage needs)
+  2. mongo-auth Secret (root credentials - PROTECTED from GC)
+    ↓
+Metacontroller watches StorageAccount CRD
+    ↓
+Storage Composite creates:
+  - MongoDB StatefulSet (if dedicated)
+  - MongoDB Service
+  - Init-replica-set Job
+    ↓
+Storage-Initialization Decorator:
+  - Observes init Job completion
+  - Marks mongo-auth Secret with replica-set-initialized timestamp
+    ↓
+POST /accounts/:accountId/sites/:tenantId
+    ↓
+deployment-controller creates:
+  1. ComputeInstance CRD (declares compute needs)
+    ↓
+Metacontroller watches ComputeInstance CRD
+    ↓
+Storage-Credentials Decorator creates:
+  - App-credentials Secret (per-tenant credentials)
+  - Create-user Job (MongoDB user initialization)
+  - Migration Job (if migration annotation present)
+    ↓
+Compute Composite creates:
+  - Nightscout Deployment
+  - Nightscout Service
+  - PodDisruptionBudget
+    ↓
+Deployment-Operator syncs to Consul
+    ↓
+Resolver routes HTTP traffic
+    ↓
+Tenant site is live ✅
+```
+
+### API Endpoints
+
+**Create Storage Account:**
+```bash
+POST /accounts/:accountId
+{
+  "tier": "basic|premium|enterprise",
+  "storageType": "shared|dedicated",
+  "mongodbVersion": "7.0",
+  "replicas": 3,
+  "storageSize": "10Gi"
+}
+```
+
+Creates:
+- `StorageAccount` CRD named `{accountId}`
+- `mongo-auth` Secret named `{accountId}-mongo-auth` (root credentials, label-protected)
+
+**Create Compute Instance:**
+```bash
+POST /accounts/:accountId/sites/:tenantId
+{
+  "internal_name": "tenantId",
+  "storageAccountRef": {"name": "accountId"},
+  "nightscoutImage": "nightscout/cgm-remote-monitor:latest",
+  "replicas": 2,
+  "cdc": {"enabled": false}
+}
+```
+
+Creates:
+- `ComputeInstance` CRD named `{tenantId}`
+- Labels: `storage.nightscout.org/account: accountId`, `nightscout.io/tenant: tenantId`
+
+### Blast Radius Protection Pattern
+
+The provisioner creates resources with specific **ownership patterns** to prevent cascading deletions:
+
+**Owned by CRD** (deleted with parent):
+- MongoDB StatefulSet (owned by StorageAccount)
+- Nightscout Deployment (owned by ComputeInstance)
+- Services, PDBs, Jobs (owned by respective composites)
+
+**Protected by Decorator** (survives CRD deletion):
+- `mongo-auth` Secret - Root MongoDB credentials (watched by Storage-Initialization Decorator)
+- `app-credentials` Secret - Per-tenant credentials (attached by Storage-Credentials Decorator)
+- PersistentVolumeClaims - Data volumes (related resource, not owned)
+
+**Why**: If a StorageAccount CRD is accidentally deleted, the mongo-auth Secret survives because it's watched by a decorator outside the composite lifecycle. When the CRD is recreated, the decorator reconnects it to the existing Secret, preserving root credentials and enabling StatefulSet to remount existing PVCs.
 
 ## Annotation-Driven Behavior
 
