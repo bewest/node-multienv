@@ -694,52 +694,7 @@ function renderMigrationJob(tenantId, namespace, storageAccount, databaseName, l
                   }
                 }
               },
-              // Target: Gen4 app-credentials Secret - explicit mapping for clarity
-              {
-                name: 'MIGRATION_TARGET_HOST',
-                valueFrom: {
-                  secretKeyRef: {
-                    name: targetSecretName,
-                    key: 'MONGO_HOST'
-                  }
-                }
-              },
-              {
-                name: 'MIGRATION_TARGET_PORT',
-                valueFrom: {
-                  secretKeyRef: {
-                    name: targetSecretName,
-                    key: 'MONGO_PORT'
-                  }
-                }
-              },
-              {
-                name: 'MIGRATION_TARGET_DATABASE',
-                valueFrom: {
-                  secretKeyRef: {
-                    name: targetSecretName,
-                    key: 'MONGO_DATABASE'
-                  }
-                }
-              },
-              {
-                name: 'MIGRATION_TARGET_USERNAME',
-                valueFrom: {
-                  secretKeyRef: {
-                    name: targetSecretName,
-                    key: 'MONGO_USERNAME'
-                  }
-                }
-              },
-              {
-                name: 'MIGRATION_TARGET_PASSWORD',
-                valueFrom: {
-                  secretKeyRef: {
-                    name: targetSecretName,
-                    key: 'MONGO_PASSWORD'
-                  }
-                }
-              },
+              // Target: Gen4 app-credentials Secret with complete MongoDB URI
               {
                 name: 'MIGRATION_TARGET_URI',
                 valueFrom: {
@@ -752,6 +707,15 @@ function renderMigrationJob(tenantId, namespace, storageAccount, databaseName, l
               // Migration configuration
               { name: 'MIGRATION_METHOD', value: migrationMethod },
               { name: 'MIGRATION_SOURCE_DB', value: 'nightscout' }, // Default shared DB name
+              { 
+                name: 'MIGRATION_TARGET_DB',
+                valueFrom: {
+                  secretKeyRef: {
+                    name: targetSecretName,
+                    key: 'MONGO_DATABASE'
+                  }
+                }
+              },
               { name: 'STORAGE_ACCOUNT', value: storageAccount },
               { name: 'TENANT_ID', value: tenantId }
             ],

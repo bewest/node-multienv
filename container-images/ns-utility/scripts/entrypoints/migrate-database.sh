@@ -10,12 +10,11 @@ source "${LIB_DIR}/mongodb-utils.sh"
 main() {
   log_info "Starting database migration"
   
-  require_env "SOURCE_MONGO_URI"
-  require_env "TARGET_MONGO_HOST"
+  require_env "MIGRATION_SOURCE_URI"
+  require_env "MIGRATION_TARGET_URI"
   
-  local source_uri="${SOURCE_MONGO_URI}"
-  local target_host="${TARGET_MONGO_HOST}"
-  local target_port="${TARGET_MONGO_PORT:-27017}"
+  local source_uri="${MIGRATION_SOURCE_URI}"
+  local target_uri="${MIGRATION_TARGET_URI}"
   local method="${MIGRATION_METHOD:-mongodump-restore}"
   local source_db="${MIGRATION_SOURCE_DB:-nightscout}"
   local target_db="${MIGRATION_TARGET_DB:-ns}"
@@ -25,19 +24,18 @@ main() {
   log_info "  Method: ${method}"
   log_info "  Source DB: ${source_db}"
   log_info "  Target DB: ${target_db}"
-  log_info "  Target Host: ${target_host}:${target_port}"
   log_info "  Work directory: ${work_dir}"
   
   mkdir -p "${work_dir}"
   cleanup_on_exit "rm -rf ${work_dir}"
   
-  if ! wait_for_mongodb "${target_host}" "${target_port}" 120; then
+  if ! wait_for_mongodb_uri "${target_uri}" 120; then
     die "Target MongoDB is not available"
   fi
   
   case "${method}" in
     mongodump-restore|mongodump-restore-single-db)
-      migrate_with_mongodump "${source_uri}" "${target_host}" "${target_port}" \
+      migrate_with_mongodump "${source_uri}" "${target_uri}" \
         "${source_db}" "${target_db}" "${work_dir}"
       ;;
     *)
@@ -45,18 +43,17 @@ main() {
       ;;
   esac
   
-  verify_migration "${target_host}" "${target_port}" "${target_db}"
+  verify_migration "${target_uri}" "${target_db}"
   
   log_info "Database migration completed successfully"
 }
 
 migrate_with_mongodump() {
   local source_uri="$1"
-  local target_host="$2"
-  local target_port="$3"
-  local source_db="$4"
-  local target_db="$5"
-  local work_dir="$6"
+  local target_uri="$2"
+  local source_db="$3"
+  local target_db="$4"
+  local work_dir="$5"
   
   log_info "Dumping source database '${source_db}'"
   
@@ -71,8 +68,8 @@ migrate_with_mongodump() {
   
   log_info "Restoring to target database '${target_db}'"
   
-  if ! mongorestore --host="${target_host}" --port="${target_port}" \
-       --db="${target_db}" --nsFrom="${source_db}.*" --nsTo="${target_db}.*" \
+  if ! mongorestore --uri="${target_uri}" \
+       --nsFrom="${source_db}.*" --nsTo="${target_db}.*" \
        "${work_dir}/${source_db}" --gzip --drop 2>&1 | grep -v "SCRAM-SHA" || true; then
     die "Failed to restore to target database"
   fi
@@ -81,14 +78,13 @@ migrate_with_mongodump() {
 }
 
 verify_migration() {
-  local host="$1"
-  local port="$2"
-  local database="$3"
+  local uri="$1"
+  local database="$2"
   
   log_info "Verifying migration for database '${database}'"
   
   local stats
-  stats=$(get_database_size "${host}" "${port}" "${database}")
+  stats=$(get_database_size_uri "${uri}" "${database}")
   
   local collections
   collections=$(echo "${stats}" | jq -r '.collections')
@@ -110,7 +106,7 @@ verify_migration() {
   local critical_collections=("entries" "treatments")
   for collection in "${critical_collections[@]}"; do
     local count
-    count=$(mongo --host="${host}" --port="${port}" --quiet --eval "
+    count=$(mongo "${uri}" --quiet --eval "
       db = db.getSiblingDB('${database}');
       print(db.${collection}.countDocuments());
     " 2>/dev/null)

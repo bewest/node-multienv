@@ -370,6 +370,22 @@ get_database_size() {
   "
 }
 
+get_database_size_uri() {
+  local uri="$1"
+  local database="$2"
+  
+  mongo "${uri}" --quiet --eval "
+    db = db.getSiblingDB('${database}');
+    const stats = db.stats();
+    print(JSON.stringify({
+      collections: stats.collections,
+      dataSize: stats.dataSize,
+      indexSize: stats.indexSize,
+      totalSize: stats.dataSize + stats.indexSize
+    }));
+  "
+}
+
 backup_database_mongodump() {
   local host="$1"
   local port="$2"
