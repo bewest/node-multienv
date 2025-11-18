@@ -273,12 +273,6 @@ function createStorageCredentialsDecoratorSync(config) {
       return next();
     }
     
-    // Verify we have target credentials (should exist from planCredentialsSecret stage)
-    if (!req.credentials) {
-      console.log(`  Warning: Migration requested but no target credentials available - skipping`);
-      return next();
-    }
-    
     console.log(`  Rendering migration Job for tenant ${req.tenantId}`);
     
     const migrationJob = renderMigrationJob(
@@ -286,8 +280,6 @@ function createStorageCredentialsDecoratorSync(config) {
       req.namespace,
       req.storageAccountId,
       req.databaseName,
-      req.credentials.username,
-      req.credentials.password,
       req.computeInstance.metadata.labels,
       config
     );
