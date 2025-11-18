@@ -169,7 +169,12 @@ function createStorageCredentialsDecoratorSync(config) {
       res.attachments.push(cleanSecret);
       
       // Store credentials for downstream Job rendering (migration, etc.)
-      req.credentials = existingCredentials;
+      // Normalize to include both MONGO_* keys and username/password aliases
+      req.credentials = {
+        ...existingCredentials,
+        username: existingCredentials.MONGO_USERNAME,
+        password: existingCredentials.MONGO_PASSWORD
+      };
 
     } else {
       // First cycle - generate new credentials
@@ -202,7 +207,12 @@ function createStorageCredentialsDecoratorSync(config) {
       res.attachments.push(secret);
       
       // Store credentials for downstream Job rendering (migration, etc.)
-      req.credentials = appCredentials;
+      // Normalize to include both MONGO_* keys and username/password aliases
+      req.credentials = {
+        ...appCredentials,
+        username: appCredentials.MONGO_USERNAME,
+        password: appCredentials.MONGO_PASSWORD
+      };
     }
     
     return next();
