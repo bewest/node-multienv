@@ -141,10 +141,31 @@ function createStorageCredentialsDecoratorSync(config) {
     console.log(`  Dedicated storage mode - managing app credentials`);
 
     if (req.existingSecret) {
-      // Existing Secret found - preserve credentials and add protections
-      console.log(`  compute credentials decorator Found existing app-credentials Secret: ${req.appCredentialsSecretName}`);
-      res.attachments.push(req.existingSecret);
-      // res.attachments.push(updatedSecret);
+      // Existing Secret found - extract credentials and re-render as clean desired state
+      console.log(`  Found existing app-credentials Secret: ${req.appCredentialsSecretName}`);
+      
+      // Extract credentials from existing Secret (decode BASE64 data)
+      const existingCredentials = extractCredentialsFromSecret(req.existingSecret);
+      
+      if (!existingCredentials) {
+        console.log(`  ERROR: Could not extract credentials from existing Secret`);
+        // Preserve raw Secret as fallback to prevent deletion
+        res.attachments.push(req.existingSecret);
+        return next();
+      }
+      
+      // Re-render Secret as clean desired state (without Kubernetes metadata)
+      // This prevents reconciliation loops caused by resourceVersion/uid/managedFields
+      const cleanSecret = renderAppCredentialsSecret(
+        req.tenantId,
+        req.namespace,
+        existingCredentials,
+        req.computeInstance.metadata.labels,
+        req.existingSecret.metadata?.annotations || {}  // Preserve annotations (e.g., user-initialized)
+      );
+      
+      console.log(`  Re-rendered Secret as clean desired state`);
+      res.attachments.push(cleanSecret);
 
     } else {
       // First cycle - generate new credentials
