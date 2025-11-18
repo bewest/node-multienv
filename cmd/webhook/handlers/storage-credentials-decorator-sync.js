@@ -532,8 +532,8 @@ function generateAppCredentials(tenantId, mongoHost, mongoPort, databaseName, us
 function renderAppCredentialsSecret(tenantId, namespace, databaseName, existingSecret, labels) {
       
   const secretName = `${tenantId}-app-credentials`;
-  var existingAnnotations = existingSecret?.annotations || { };
-  var existingLabels = existingSecret?.labels || { };
+  var existingAnnotations = existingSecret?.metadata?.annotations || { };
+  var existingLabels = existingSecret?.metadata?.labels || { };
 
   // Standard annotations that are always set
   const standardAnnotations = {
