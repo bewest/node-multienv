@@ -600,15 +600,19 @@ function renderAppCredentialsSecret(tenantId, namespace, databaseName, existingS
 /**
  * Render migration Job (shared → dedicated storage transition)
  * Migrates data from shared MongoDB (ConfigMap-based) to dedicated storage
+ * 
+ * Source credentials: ${tenantId} ConfigMap (Gen3 legacy tenant ConfigMap with MONGODB_URI)
+ * Target credentials: ${tenantId}-app-credentials Secret (Gen4 per-tenant Secret with MONGO_*)
  */
-function renderMigrationJob(tenantId, namespace, storageAccount, databaseName, username, password, labels, config) {
+function renderMigrationJob(tenantId, namespace, storageAccount, databaseName, labels, config) {
   const jobName = `${tenantId}-migrate-to-dedicated`;
-  const targetHost = `mongo-${databaseName}`;
   const migrationMethod = 'mongodump-restore';
   
-  // TODO: Discover source ConfigMap credentials for shared storage
-  // For now, assume source ConfigMap name follows convention
-  const sourceConfigMapName = `${tenantId}-shared-storage-config`;
+  // Gen3 tenant ConfigMap name (contains legacy MONGODB_URI)
+  const sourceConfigMapName = tenantId;
+  
+  // Gen4 app-credentials Secret name
+  const targetSecretName = `${tenantId}-app-credentials`;
   
   return {
     apiVersion: 'batch/v1',
@@ -625,7 +629,6 @@ function renderMigrationJob(tenantId, namespace, storageAccount, databaseName, u
         'storage.nightscout.org/account': storageAccount
       },
       annotations: {
-        // 'ns.mdn.io/created-at': new Date().toISOString(),
         'ns.mdn.io/tenant': tenantId,
         'ns.mdn.io/migration-method': migrationMethod,
         'ns.mdn.io/migration-target-db': databaseName,
@@ -652,33 +655,78 @@ function renderMigrationJob(tenantId, namespace, storageAccount, databaseName, u
             image: config.images.nsUtility,
             imagePullPolicy: config.imagePullPolicies.nsUtility || 'IfNotPresent',
             env: [
-              // TODO: Source MongoDB URI from ConfigMap
-              // This should reference the shared storage ConfigMap
-              // For now, use placeholder that will need to be populated
+              // Source: Gen3 tenant ConfigMap with MONGODB_URI
               {
                 name: 'MIGRATION_SOURCE_URI',
                 valueFrom: {
                   configMapKeyRef: {
                     name: sourceConfigMapName,
-                    key: 'MONGODB_URI',
-                    optional: true
+                    key: 'MONGODB_URI'
                   }
                 }
               },
-              // Target MongoDB connection (dedicated storage)
-              { name: 'MIGRATION_TARGET_HOST', value: targetHost },
-              { name: 'MIGRATION_TARGET_PORT', value: '27017' },
-              { name: 'MIGRATION_TARGET_DB', value: databaseName },
-              { name: 'MIGRATION_TARGET_USER', value: username },
-              { name: 'MIGRATION_TARGET_PASSWORD', value: password },
+              // Target: Gen4 app-credentials Secret - explicit mapping for clarity
+              {
+                name: 'MIGRATION_TARGET_HOST',
+                valueFrom: {
+                  secretKeyRef: {
+                    name: targetSecretName,
+                    key: 'MONGO_HOST'
+                  }
+                }
+              },
+              {
+                name: 'MIGRATION_TARGET_PORT',
+                valueFrom: {
+                  secretKeyRef: {
+                    name: targetSecretName,
+                    key: 'MONGO_PORT'
+                  }
+                }
+              },
+              {
+                name: 'MIGRATION_TARGET_DATABASE',
+                valueFrom: {
+                  secretKeyRef: {
+                    name: targetSecretName,
+                    key: 'MONGO_DATABASE'
+                  }
+                }
+              },
+              {
+                name: 'MIGRATION_TARGET_USERNAME',
+                valueFrom: {
+                  secretKeyRef: {
+                    name: targetSecretName,
+                    key: 'MONGO_USERNAME'
+                  }
+                }
+              },
+              {
+                name: 'MIGRATION_TARGET_PASSWORD',
+                valueFrom: {
+                  secretKeyRef: {
+                    name: targetSecretName,
+                    key: 'MONGO_PASSWORD'
+                  }
+                }
+              },
+              {
+                name: 'MIGRATION_TARGET_URI',
+                valueFrom: {
+                  secretKeyRef: {
+                    name: targetSecretName,
+                    key: 'MONGODB_URI'
+                  }
+                }
+              },
               // Migration configuration
               { name: 'MIGRATION_METHOD', value: migrationMethod },
               { name: 'MIGRATION_SOURCE_DB', value: 'nightscout' }, // Default shared DB name
               { name: 'STORAGE_ACCOUNT', value: storageAccount },
               { name: 'TENANT_ID', value: tenantId }
             ],
-            command: config.commands.migration, //  ['migrate-database.sh'],
-            // args: [], // TODO: Add specific migration args if needed
+            command: config.commands.migration,
             resources: {
               requests: {
                 cpu: config.resources?.nsUtility?.cpuRequest || '100m',
