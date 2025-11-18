@@ -140,84 +140,18 @@ function createStorageCredentialsDecoratorSync(config) {
     }
     console.log(`  Dedicated storage mode - managing app credentials`);
 
-    if (req.existingSecret) {
-      // Existing Secret found - extract credentials and re-render as clean desired state
-      console.log(`  Found existing app-credentials Secret: ${req.appCredentialsSecretName}`);
-      
-      // Extract credentials from existing Secret (decode BASE64 data)
-      const existingCredentials = extractCredentialsFromSecret(req.existingSecret);
-      
-      if (!existingCredentials) {
-        console.log(`  ERROR: Could not extract credentials from existing Secret`);
-        // Preserve raw Secret as fallback to prevent deletion
-        res.attachments.push(req.existingSecret);
-        req.credentials = null;
-        return next();
-      }
-      
-      // Re-render Secret as clean desired state (without Kubernetes metadata)
-      // This prevents reconciliation loops caused by resourceVersion/uid/managedFields
-      const cleanSecret = renderAppCredentialsSecret(
-        req.tenantId,
-        req.namespace,
-        existingCredentials,
-        req.computeInstance.metadata.labels,
-        req.existingSecret.metadata?.annotations || {}  // Preserve annotations (e.g., user-initialized)
-      );
-      
-      console.log(`  Re-rendered Secret as clean desired state`);
-      res.attachments.push(cleanSecret);
-      
-      // Store credentials for downstream Job rendering (migration, etc.)
-      // Normalize to include both MONGO_* keys and username/password aliases
-      req.credentials = {
-        ...existingCredentials,
-        username: existingCredentials.MONGO_USERNAME,
-        password: existingCredentials.MONGO_PASSWORD
-      };
+    const secret = renderAppCredentialsSecret(
+      req.tenantId,
+      req.namespace,
+      req.databaseName,
+      req.existingSecret,
+      req.computeInstance.metadata.labels
+    );
 
-    } else {
-      // First cycle - generate new credentials
-      console.log(`  FIRST CYCLE - GENERATING NEW APP CREDENTIALS`);
-      console.log(`MISSING APP SECRET`);
-      console.log('MISSING FROM RELATED?', req.related);
-      
-      username = generateUsername(req.tenantId);
-      password = generateSecurePassword(16);
-      
-      const mongoHost = `mongo-${req.databaseName}`;
-      const mongoPort = '27017';
-      
-      const appCredentials = generateAppCredentials(
-        req.tenantId,
-        mongoHost,
-        mongoPort,
-        req.databaseName,
-        username,
-        password
-      );
-      
-      const secret = renderAppCredentialsSecret(
-        req.tenantId,
-        req.namespace,
-        appCredentials,
-        req.computeInstance.metadata.labels
-      );
-      
-      res.attachments.push(secret);
-      
-      // Store credentials for downstream Job rendering (migration, etc.)
-      // Normalize to include both MONGO_* keys and username/password aliases
-      req.credentials = {
-        ...appCredentials,
-        username: appCredentials.MONGO_USERNAME,
-        password: appCredentials.MONGO_PASSWORD
-      };
-    }
-    
+    res.attachments.push(secret);
     return next();
   }
-  
+
   /**
    * Stage 5: Track user initialization Job completion
    * Sets ns.mdn.io/user-initialized annotation on Secret when Job succeeds
@@ -262,40 +196,6 @@ function createStorageCredentialsDecoratorSync(config) {
       req.existingSecret.metadata.annotations = req.existingSecret.metadata.annotations || {};
       req.existingSecret.metadata.annotations['ns.mdn.io/user-initialized'] = initTimestamp;
       
-      // Find the clean Secret already in res.attachments (added by planCredentialsSecret)
-      const cleanSecretIndex = res.attachments.findIndex(
-        att => att.kind === 'Secret' && att.metadata.name === req.appCredentialsSecretName
-      );
-      
-      if (cleanSecretIndex >= 0) {
-        // Update the clean Secret with the user-initialized annotation
-        const cleanSecret = res.attachments[cleanSecretIndex];
-        cleanSecret.metadata.annotations = cleanSecret.metadata.annotations || {};
-        cleanSecret.metadata.annotations['ns.mdn.io/user-initialized'] = initTimestamp;
-        console.log(`  Updated clean Secret in attachments with user-initialized annotation`);
-      } else {
-        // Secret not in attachments yet - this shouldn't happen if planCredentialsSecret ran
-        console.log(`  WARNING: Secret not found in attachments - re-rendering with annotation`);
-        
-        // Extract credentials and re-render with annotation
-        const credentials = extractCredentialsFromSecret(req.existingSecret);
-        if (credentials) {
-          const annotations = {
-            ...(req.existingSecret.metadata?.annotations || {}),
-            'ns.mdn.io/user-initialized': initTimestamp
-          };
-          
-          const secretWithAnnotation = renderAppCredentialsSecret(
-            req.tenantId,
-            req.namespace,
-            credentials,
-            req.computeInstance.metadata.labels,
-            annotations
-          );
-          
-          res.attachments.push(secretWithAnnotation);
-        }
-      }
 
     } else {
       console.log(`  CREATE-USER JOB STATUS: active=${jobStatus.active || 0}, failed=${jobStatus.failed || 0}`);
@@ -410,10 +310,10 @@ function createStorageCredentialsDecoratorSync(config) {
     initializeContext,
     discoverStorageAccount,
     collectAttachments,
-    planCredentialsSecret,
     trackUserInitialization,
     planUserInitJob,
     planMigrationJob,
+    planCredentialsSecret,
     assembleResponse
   ];
 
@@ -621,16 +521,20 @@ function generateAppCredentials(tenantId, mongoHost, mongoPort, databaseName, us
 /**
  * Render app-credentials Secret
  * @param {object} existingAnnotations - Annotations to preserve from existing Secret
+      const secret = renderAppCredentialsSecret(
+        req.tenantId,
+        req.namespace,
+        req.databaseName,
+        req.existingSecret,
+        req.computeInstance.metadata.labels
+      );
  */
-function renderAppCredentialsSecret(tenantId, namespace, appCredentials, labels, existingAnnotations = {}) {
+function renderAppCredentialsSecret(tenantId, namespace, databaseName, existingSecret, labels) {
+      
   const secretName = `${tenantId}-app-credentials`;
-  
-  // Encode all credential fields to base64
-  const encodedData = {};
-  Object.keys(appCredentials).forEach(key => {
-    encodedData[key] = Buffer.from(appCredentials[key]).toString('base64');
-  });
-  
+  var existingAnnotations = existingSecret?.annotations || { };
+  var existingLabels = existingSecret?.labels || { };
+
   // Standard annotations that are always set
   const standardAnnotations = {
     'ns.mdn.io/created-at': new Date().toISOString(),
@@ -645,15 +549,20 @@ function renderAppCredentialsSecret(tenantId, namespace, appCredentials, labels,
     ...standardAnnotations,
     ...existingAnnotations
   };
-  
-  return {
+
+  const mergedLabels = {
+    ...labels,
+    ...existingLabels
+  };
+
+  var secret = {
     apiVersion: 'v1',
     kind: 'Secret',
     metadata: {
       name: secretName,
       namespace: namespace,
       labels: {
-        ...labels,
+        ...mergedLabels,
         'app.kubernetes.io/component': 'app-credentials',
         'app.kubernetes.io/managed-by': 'metacontroller',
         'ns.mdn.io/decorator': 'storage-credentials',
@@ -663,8 +572,35 @@ function renderAppCredentialsSecret(tenantId, namespace, appCredentials, labels,
       annotations: mergedAnnotations
     },
     type: 'Opaque',
-    data: encodedData
+    // data: encodedData
   };
+
+  if (existingSecret) {
+    secret.data = existingSecret.data;
+    secret.type = existingSecret.type;
+  } else {
+    console.log(`  FIRST CYCLE - GENERATING NEW APP CREDENTIALS`);
+    const username = generateUsername(tenantId);
+    const password = generateSecurePassword(16);
+    
+    const mongoHost = `mongo-${databaseName}`;
+    const mongoPort = '27017';
+    
+    const appCredentials = generateAppCredentials(
+      tenantId,
+      mongoHost,
+      mongoPort,
+      username,
+      password
+    );
+    // Encode all credential fields to base64
+    const encodedData = {};
+    Object.keys(appCredentials).forEach(key => {
+      encodedData[key] = Buffer.from(appCredentials[key]).toString('base64');
+    });
+    secret.data = encodedData;
+  }
+  return secret;
 }
 
 /**
