@@ -60,6 +60,7 @@ The platform utilizes a **CRD-based two-composite architecture** (Storage and Co
 - **Shared MongoDB Configuration**: Single `mongod-config` ConfigMap for all StorageAccounts (1,300+ tenants), generated via jsonnet and deployed to `hosted-tenants` namespace. Provides replication, security, and logging configuration. StatefulSet CLI args override `net.bindIp` to bind only to `127.0.0.1,$(POD_IP)` for DigitalOcean private networking.
 - **MongoDB FQDN Consistency**: Helper function `getMongoDBHostnames()` provides canonical hostnames for replica sets. Init Jobs use pod FQDN (e.g., `myaccount-mongo-0.mongo-dbname.namespace.svc.cluster.local`) for both connection and rs.initiate() member configuration to ensure MongoDB stores stable network identities.
 - **Decorator Response Pattern**: Decorators follow clean ergonomics - set `res.labels` and `res.annotations` only when patches are needed, return `{ attachments: [] }` for no-op. All handlers flow through to final formatter, no early exits with full object copies.
+- **Clean Desired State Pattern**: Webhooks must return clean desired state manifests (metadata.name, namespace, labels, annotations only) without Kubernetes runtime metadata (resourceVersion, uid, managedFields, creationTimestamp). When preserving existing resources, extract their data/spec and re-render as clean manifests to prevent Metacontroller reconciliation loops.
 
 ## External Dependencies
 - **Strimzi Kafka Operator**: Manages Kafka clusters and KafkaConnect.

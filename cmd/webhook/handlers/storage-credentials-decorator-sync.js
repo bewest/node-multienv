@@ -151,6 +151,7 @@ function createStorageCredentialsDecoratorSync(config) {
         console.log(`  ERROR: Could not extract credentials from existing Secret`);
         // Preserve raw Secret as fallback to prevent deletion
         res.attachments.push(req.existingSecret);
+        req.credentials = null;
         return next();
       }
       
@@ -166,6 +167,9 @@ function createStorageCredentialsDecoratorSync(config) {
       
       console.log(`  Re-rendered Secret as clean desired state`);
       res.attachments.push(cleanSecret);
+      
+      // Store credentials for downstream Job rendering (migration, etc.)
+      req.credentials = existingCredentials;
 
     } else {
       // First cycle - generate new credentials
@@ -194,12 +198,12 @@ function createStorageCredentialsDecoratorSync(config) {
         appCredentials,
         req.computeInstance.metadata.labels
       );
-      req.credentials = null;
       
       res.attachments.push(secret);
+      
+      // Store credentials for downstream Job rendering (migration, etc.)
+      req.credentials = appCredentials;
     }
-    
-    // Store credentials for Job rendering
     
     return next();
   }
@@ -241,23 +245,39 @@ function createStorageCredentialsDecoratorSync(config) {
     if (succeeded) {
       console.log(`  Create-user Job succeeded - marking user initialized on Secret`);
       
-      // Update annotation on the Secret object (req.existingSecret)
-      // This works whether Secret came from attachments or related
-      req.existingSecret.metadata.annotations = req.existingSecret.metadata.annotations || {};
-      req.existingSecret.metadata.annotations['ns.mdn.io/user-initialized'] = new Date().toISOString();
-      
-      // Ensure the updated Secret is in res.attachments
-      // Check if already attached (by planCredentialsSecret)
-      const secretInAttachments = res.attachments.find(
+      // Find the clean Secret already in res.attachments (added by planCredentialsSecret)
+      const cleanSecretIndex = res.attachments.findIndex(
         att => att.kind === 'Secret' && att.metadata.name === req.appCredentialsSecretName
       );
       
-      if (!secretInAttachments) {
-        // Not yet attached - add it now with the annotation
-        console.log(`  Secret not in attachments - adding with user-initialized annotation`);
-        res.attachments.push(req.existingSecret);
+      if (cleanSecretIndex >= 0) {
+        // Update the clean Secret with the user-initialized annotation
+        const cleanSecret = res.attachments[cleanSecretIndex];
+        cleanSecret.metadata.annotations = cleanSecret.metadata.annotations || {};
+        cleanSecret.metadata.annotations['ns.mdn.io/user-initialized'] = new Date().toISOString();
+        console.log(`  Updated clean Secret in attachments with user-initialized annotation`);
       } else {
-        console.log(`  Updated Secret ${req.appCredentialsSecretName} with user-initialized annotation`);
+        // Secret not in attachments yet - this shouldn't happen if planCredentialsSecret ran
+        console.log(`  WARNING: Secret not found in attachments - re-rendering with annotation`);
+        
+        // Extract credentials and re-render with annotation
+        const credentials = extractCredentialsFromSecret(req.existingSecret);
+        if (credentials) {
+          const annotations = {
+            ...(req.existingSecret.metadata?.annotations || {}),
+            'ns.mdn.io/user-initialized': new Date().toISOString()
+          };
+          
+          const secretWithAnnotation = renderAppCredentialsSecret(
+            req.tenantId,
+            req.namespace,
+            credentials,
+            req.computeInstance.metadata.labels,
+            annotations
+          );
+          
+          res.attachments.push(secretWithAnnotation);
+        }
       }
     } else {
       console.log(`  Create-user Job status: active=${jobStatus.active || 0}, failed=${jobStatus.failed || 0}`);
