@@ -526,6 +526,29 @@ function generateDatabaseName(storageAccount) {
 }
 
 /**
+ * Extract credentials from existing Secret
+ * Decodes BASE64-encoded data fields to reconstruct credential object
+ */
+function extractCredentialsFromSecret(secret) {
+  if (!secret || !secret.data) {
+    return null;
+  }
+  
+  const credentials = {};
+  const requiredFields = ['MONGO_USERNAME', 'MONGO_PASSWORD', 'MONGO_HOST', 'MONGO_PORT', 'MONGO_DATABASE', 'MONGODB_URI'];
+  
+  for (const field of requiredFields) {
+    if (!secret.data[field]) {
+      console.log(`  WARNING: Missing field ${field} in existing Secret`);
+      return null;
+    }
+    credentials[field] = Buffer.from(secret.data[field], 'base64').toString('utf-8');
+  }
+  
+  return credentials;
+}
+
+/**
  * Generate app credentials object
  */
 function generateAppCredentials(tenantId, mongoHost, mongoPort, databaseName, username, password) {
