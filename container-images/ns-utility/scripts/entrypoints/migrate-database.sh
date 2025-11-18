@@ -16,8 +16,19 @@ main() {
   local source_uri="${MIGRATION_SOURCE_URI}"
   local target_uri="${MIGRATION_TARGET_URI}"
   local method="${MIGRATION_METHOD:-mongodump-restore}"
-  local source_db="${MIGRATION_SOURCE_DB:-nightscout}"
-  local target_db="${MIGRATION_TARGET_DB:-ns}"
+  
+  # Parse database names from URIs, fallback to env vars or defaults
+  local source_db_from_uri
+  local target_db_from_uri
+  source_db_from_uri="$(get_database_from_uri "${source_uri}")"
+  target_db_from_uri="$(get_database_from_uri "${target_uri}")"
+  
+  local source_db="${MIGRATION_SOURCE_DB:-${source_db_from_uri:-nightscout}}"
+  local target_db="${MIGRATION_TARGET_DB:-${target_db_from_uri:-ns}}"
+  
+  log_info "Parsed source database: ${source_db} (from URI: ${source_db_from_uri:-not found})"
+  log_info "Parsed target database: ${target_db} (from URI: ${target_db_from_uri:-not found})"
+  
   local work_dir="/tmp/migration-$(get_timestamp)"
   
   log_info "Migration configuration:"

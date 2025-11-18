@@ -706,16 +706,6 @@ function renderMigrationJob(tenantId, namespace, storageAccount, databaseName, l
               },
               // Migration configuration
               { name: 'MIGRATION_METHOD', value: migrationMethod },
-              { name: 'MIGRATION_SOURCE_DB', value: 'nightscout' }, // Default shared DB name
-              { 
-                name: 'MIGRATION_TARGET_DB',
-                valueFrom: {
-                  secretKeyRef: {
-                    name: targetSecretName,
-                    key: 'MONGO_DATABASE'
-                  }
-                }
-              },
               { name: 'STORAGE_ACCOUNT', value: storageAccount },
               { name: 'TENANT_ID', value: tenantId }
             ],

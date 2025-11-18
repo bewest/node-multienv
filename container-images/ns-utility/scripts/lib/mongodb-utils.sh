@@ -4,6 +4,33 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/common.sh"
 
+# Extract database name from MongoDB URI
+# Format: mongodb://[user:pass@]host[:port]/database[?options]
+# Example: mongodb://user:pass@localhost:27017/mydb?authSource=admin -> mydb
+get_database_from_uri() {
+  local uri="$1"
+  
+  # Remove protocol prefix (mongodb:// or mongodb+srv://)
+  local without_protocol="${uri#mongodb://}"
+  without_protocol="${without_protocol#mongodb+srv://}"
+  
+  # Remove credentials (everything before @)
+  local without_creds="${without_protocol#*@}"
+  
+  # Remove host:port (everything before first /)
+  local path_and_query="${without_creds#*/}"
+  
+  # Remove query string (everything after ?)
+  local database="${path_and_query%%\?*}"
+  
+  # Return empty if no database in URI
+  if [[ -z "${database}" ]] || [[ "${database}" == "${without_creds}" ]]; then
+    echo ""
+  else
+    echo "${database}"
+  fi
+}
+
 wait_for_mongodb() {
   local host="${1}"
   local port="${2:-27017}"
