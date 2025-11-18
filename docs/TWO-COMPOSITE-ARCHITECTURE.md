@@ -769,131 +769,7 @@ The canonical migration tool is `tools/gen4-migration.sh`, which uses the REST A
 5. Labels ConfigMap with `ns.mdn.io/composite: compute` (triggers compute controller)
 6. Compute controller creates Deployment + Service
 
-**Philosophy**: Leverages provisioner API facade for Secret creation, uses declarative triggers (labels/annotations) to orchestrate resources via webhooks
-
-## REST API Provisioning
-
-The deployment controller (`k8s-deployment-controller.js`) provides REST APIs that serve as a **provisioner facade** over the two-composite architecture. External systems can provision tenants without understanding Kubernetes or Metacontroller.
-
-### Create Storage Account
-
-**Endpoint**: `POST /accounts` or `POST /accounts/:account`
-
-Creates a storage Secret that triggers the storage composite controller.
-
-```bash
-# Create new account with auto-generated ID
-curl -X POST http://deployment-controller:3000/accounts \
-  -H "Content-Type: application/json" \
-  -d '{
-    "tier": "basic",
-    "storageType": "shared"
-  }'
-
-# Response:
-{
-  "account": "507f1f77bcf86cd799439011",
-  "storageType": "shared",
-  "tier": "basic"
-}
-
-# Create/update specific account
-curl -X POST http://deployment-controller:3000/accounts/507f1f77bcf86cd799439011 \
-  -H "Content-Type: application/json" \
-  -d '{
-    "tier": "premium",
-    "storageType": "dedicated"
-  }'
-```
-
-**What it creates**:
-```yaml
-apiVersion: v1
-kind: Secret
-metadata:
-  name: 507f1f77bcf86cd799439011-secret
-  labels:
-    ns.mdn.io/composite: storage          # ← Triggers storage controller
-    storage.nightscout.org/account: 507f1f77bcf86cd799439011
-    app.kubernetes.io/managed-by: metacontroller
-  annotations:
-    ns.mdn.io/storage-type: shared        # ← "shared" or "dedicated"
-    ns.mdn.io/tier: basic
-stringData:
-  MONGO_INITDB_ROOT_USERNAME: user_507f1f77bcf86cd799439011
-  MONGO_INITDB_ROOT_PASSWORD: <random>
-  MONGO_INITDB_DATABASE: ns
-```
-
-### Create Tenant Site
-
-**Endpoint**: `POST /accounts/:account/sites/:name`
-
-Creates a compute ConfigMap linked to the storage account.
-
-```bash
-curl -X POST http://deployment-controller:3000/accounts/507f1f77bcf86cd799439011/sites/demo1234 \
-  -H "Content-Type: application/json" \
-  -d '{
-    "internal_name": "demo1234",
-    "API_SECRET": "my-secret-token-12345",
-    "DISPLAY_UNITS": "mg/dl",
-    "ENABLE_CAREPORTAL": "true"
-  }'
-
-# Response:
-{
-  "tenant": "demo1234",
-  "account": "507f1f77bcf86cd799439011"
-}
-```
-
-**What it creates**:
-```yaml
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: demo1234
-  labels:
-    ns.mdn.io/composite: compute           # ← Triggers compute controller
-    ns.mdn.io/tenant: demo1234
-    storage.nightscout.org/account: 507f1f77bcf86cd799439011  # ← Links to storage
-    app.kubernetes.io/managed-by: metacontroller
-data:
-  TENANT_ID: demo1234
-  API_SECRET: my-secret-token-12345
-  DISPLAY_UNITS: mg/dl
-  ENABLE_CAREPORTAL: "true"
-```
-
-**Validation**:
-- `internal_name` must match URL parameter `:name`
-- Tenant ID must be DNS-compatible (lowercase alphanumeric + hyphens, max 63 chars)
-- Both endpoints are **idempotent** (safe to retry)
-
-### Complete Provisioning Flow
-
-```bash
-# 1. Create storage account
-ACCOUNT=$(curl -s -X POST http://deployment-controller:3000/accounts \
-  -H "Content-Type: application/json" \
-  -d '{"tier": "basic", "storageType": "shared"}' | jq -r '.account')
-
-echo "Created account: $ACCOUNT"
-
-# 2. Create tenant site linked to account
-curl -X POST http://deployment-controller:3000/accounts/$ACCOUNT/sites/demo1234 \
-  -H "Content-Type: application/json" \
-  -d '{
-    "internal_name": "demo1234",
-    "API_SECRET": "my-secret-token-12345"
-  }'
-
-# 3. Metacontroller takes over:
-#    - Storage controller sees Secret, creates nothing (shared storage)
-#    - Compute controller sees ConfigMap, creates Deployment + Service
-#    - Tenant is live!
-```
+**Philosophy**: Leverages provisioner API facade for CRD creation, uses declarative triggers (labels/annotations) to orchestrate resources via webhooks
 
 ## Gen 3b → Gen 4 Migration via REST API
 
@@ -1212,13 +1088,24 @@ status:
 
 | Component | File |
 |-----------|------|
-| Storage Webhook | `cmd/webhook/handlers/storage-composite-sync.js` |
-| Compute Webhook | `cmd/webhook/handlers/compute-composite-sync.js` |
-| Storage Controller | `metacontroller/controllers/storage-composite.yaml` |
-| Compute Controller | `metacontroller/controllers/compute-composite.yaml` |
+| **Webhooks** | |
+| Storage Composite | `cmd/webhook/handlers/storage-composite-sync.js` |
+| Compute Composite | `cmd/webhook/handlers/compute-composite-sync.js` |
+| Storage-Credentials Decorator | `cmd/webhook/handlers/storage-credentials-decorator-sync.js` |
+| Storage-Initialization Decorator | `cmd/webhook/handlers/storage-initialization-decorator-sync.js` |
+| Instance-Userdata Decorator | `cmd/webhook/handlers/instance-userdata-decorator-sync.js` |
+| **Controller Definitions** (jsonnet) | |
+| Metacontroller Library | `jsonnet/lib-k8s-multienv/metacontroller.libsonnet` |
+| Gen4 Stack Generator | `jsonnet/lib-k8s-multienv/gen4.libsonnet` |
+| Test Environment | `jsonnet/environments/gen4-test/main.jsonnet` |
+| **CRDs** | |
+| StorageAccount CRD | `metacontroller/crds/storageaccount.yaml` |
+| ComputeInstance CRD | `metacontroller/crds/computeinstance.yaml` |
+| **APIs & Tools** | |
+| Provisioner API | `k8s-deployment-controller.js` (/accounts/ endpoints) |
 | Migration Tool | `tools/gen4-migration.sh` |
-| Provisioner API | `k8s-deployment-controller.js` (account/site endpoints) |
-| Examples | `metacontroller/examples/storage-*.yaml` |
+
+**Note**: Controller definitions are generated from jsonnet, not manually written YAML. See `metacontroller/controllers/README.md` for details.
 
 ## Benefits
 
