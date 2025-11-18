@@ -529,37 +529,133 @@ This works because:
 - Dedicated storage: PVCs labeled with storage account
 - Shared storage: No PVCs created (decorator never sees them)
 
-## Blast Radius Protection
+## Blast Radius Protection (Gen4)
 
-### Scenario 1: Storage Secret Deleted
+Gen4 uses **Decorator Controllers** to protect critical resources outside the composite lifecycle. This prevents accidental data loss from CRD deletion while maintaining clean Kubernetes ownership semantics.
+
+### Protection Mechanism
+
+**Composite Controllers** (own children):
+- StorageAccount CRD → owns StatefulSet, Service, Init Jobs
+- ComputeInstance CRD → owns Deployment, Service, PDB
+- Deletion cascades to owned children via K8s garbage collection
+
+**Decorator Controllers** (watch resources independently):
+- Storage-Initialization → watches mongo-auth Secret (root credentials)
+- Storage-Credentials → attaches app-credentials Secret (per-tenant credentials)
+- Instance-Userdata → watches Gen3 ConfigMaps (migration coordination)
+- PVC-Backup → watches PVCs (snapshot enforcement)
+
+**Related Resources** (discovered, not owned):
+- PersistentVolumeClaims (created by StatefulSet volumeClaimTemplates)
+- Survive parent deletion, can be remounted after recreation
+
+### Scenario 1: StorageAccount CRD Deleted (Accidental)
 
 ```
-Storage Secret deleted
+kubectl delete storageaccount demo-storage
   ↓
-StatefulSet deleted (child resource)
+Composite Controller deletes children:
+  - MongoDB StatefulSet ❌ deleted
+  - MongoDB Service ❌ deleted  
+  - Init Jobs ❌ deleted
   ↓
-PVC SURVIVES (related resource, not owned)
+Decorator-watched resources SURVIVE:
+  - mongo-auth Secret ✅ survives (watched by Storage-Initialization Decorator)
+  - PVCs ✅ survive (related resource, not owned)
   ↓
-Recreate Secret with same labels
+Operator recreates StorageAccount CRD with same name
   ↓
-StatefulSet recreated, mounts existing PVC
+Storage Composite recreates:
+  - StatefulSet (mounts existing PVCs ✅ data intact)
+  - Service
   ↓
-Data intact ✅
+Storage-Initialization Decorator:
+  - Reconnects to existing mongo-auth Secret
+  - Skips replica set init (already marked initialized)
+  ↓
+Database operational with original data ✅
 ```
 
-### Scenario 2: Compute ConfigMap Deleted
+**Key**: mongo-auth Secret survived because it's watched by a **decorator outside the composite lifecycle**, not owned by the StorageAccount CRD.
+
+### Scenario 2: ComputeInstance CRD Deleted
 
 ```
-Compute ConfigMap deleted
+kubectl delete computeinstance demo-tenant
   ↓
-Nightscout Deployment deleted (child resource)
+Composite Controller deletes children:
+  - Nightscout Deployment ❌ deleted
+  - Service ❌ deleted
+  - PDB ❌ deleted
   ↓
-Storage Secret SURVIVES (related resource, not owned)
-MongoDB StatefulSet SURVIVES (related resource, not owned)
-PVC SURVIVES (related to StatefulSet)
+Decorator-attached resources SURVIVE:
+  - app-credentials Secret ✅ survives (attached by Storage-Credentials Decorator)
   ↓
-Database intact ✅
+Related resources SURVIVE:
+  - StorageAccount CRD ✅ survives (not owned by compute)
+  - MongoDB StatefulSet ✅ survives (owned by StorageAccount)
+  - PVCs ✅ survive (owned by StatefulSet volumeClaimTemplates)
+  ↓
+Operator recreates ComputeInstance CRD with same name
+  ↓
+Compute Composite recreates:
+  - Deployment (references existing app-credentials Secret)
+  - Service
+  ↓
+Storage-Credentials Decorator:
+  - Reconnects to existing app-credentials Secret
+  - Skips user initialization (already completed)
+  ↓
+Application operational, database untouched ✅
 ```
+
+**Key**: Compute and Storage are **independent lifecycles**. Deleting compute never affects storage infrastructure.
+
+### Scenario 3: Complete Tenant Deletion (Intentional)
+
+```
+kubectl delete storageaccount demo-storage
+kubectl delete computeinstance demo-tenant
+  ↓
+Composites delete owned children:
+  - StatefulSet, Deployment, Services, Jobs all deleted ❌
+  ↓
+Decorator-watched resources SURVIVE:
+  - mongo-auth Secret ✅ (contains root credentials)
+  - app-credentials Secret ✅ (contains tenant credentials)
+  - PVCs ✅ (contain MongoDB data)
+  ↓
+PVC-Backup Decorator triggers:
+  - Creates VolumeSnapshot from each PVC
+  - Provides recovery mechanism
+  ↓
+Operator decision:
+  - Keep Secrets/PVCs → Fast recreation (minutes)
+  - Delete Secrets/PVCs → Clean removal
+  - Keep VolumeSnapshots → Long-term recovery (days/months)
+```
+
+**Key**: Even with full deletion, critical resources survive for recovery. Operators must explicitly delete Secrets and PVCs to fully remove tenant data.
+
+### Protection Summary
+
+| Resource Type | Owned By | Survives CRD Deletion? | Recovery Path |
+|--------------|----------|----------------------|---------------|
+| MongoDB StatefulSet | StorageAccount CRD | ❌ No | Recreate CRD → mounts existing PVCs |
+| Nightscout Deployment | ComputeInstance CRD | ❌ No | Recreate CRD → reuses existing credentials |
+| mongo-auth Secret | **Storage-Init Decorator** | ✅ Yes | Automatic reconnection on CRD recreation |
+| app-credentials Secret | **Storage-Creds Decorator** | ✅ Yes | Automatic reconnection on CRD recreation |
+| PersistentVolumeClaims | StatefulSet (volumeClaimTemplates) | ✅ Yes | Remounted by new StatefulSet |
+| VolumeSnapshots | **PVC-Backup Decorator** | ✅ Yes | Manual restore via CSI driver |
+
+### Why Decorators for Blast Radius Protection?
+
+**Problem**: Kubernetes garbage collection deletes all children when a parent is deleted. If mongo-auth Secret was owned by StorageAccount CRD, deleting the CRD would delete root credentials → **permanent data loss**.
+
+**Solution**: Decorators **watch resources independently** using label selectors, not ownership references. When a CRD is recreated, decorators reconnect it to existing protected resources.
+
+**Trade-off**: Operators must manually clean up Secrets and PVCs when permanently removing tenants. This is intentional - better to require explicit deletion than risk accidental data loss.
 
 ## Migration Workflow
 
