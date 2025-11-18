@@ -50,11 +50,11 @@ All tenants are deployed within a single `hosted-tenants` namespace, with resour
 ### System Design Choices
 The platform utilizes a **CRD-based two-composite architecture** (Storage and Compute) for separation of concerns, offering a Kubernetes-native API with `kubectl` integration.
 - **Status Reporting**: CRD status includes phase, conditions, connectionSecret, and endpoints.
-- **Provisioner API Facade**: A REST API for external systems to provision accounts.
+- **Provisioner API Facade**: A REST API (`POST /accounts/`) for external systems to create StorageAccount + ComputeInstance CRDs and mongo-auth Secrets. Provides abstraction layer over Kubernetes API for tenant provisioning.
+- **Decorator-Based Blast Radius Protection**: Decorator controllers watch critical resources (mongo-auth Secret, app-credentials Secret, PVCs) independently using label selectors, not ownership. When CRDs are deleted, decorators protect these resources from cascade deletion, enabling fast recovery via CRD recreation. Operators must explicitly delete Secrets/PVCs to permanently remove tenant data.
 - **Resolver Interface**: Routes Nightscout traffic using Consul.
 - **Pod Health Check Sidecar**: Lightweight sidecar for localhost-based health validation.
-- **Two-Secret Architecture**: Separates root MongoDB credentials from application credentials for enhanced security.
-- **Selector-Based Resource Protection**: Implements a hybrid lifecycle pattern using selectors to protect critical resources (e.g., PVCs, secrets) from accidental deletion, allowing them to survive parent CRD deletion.
+- **Two-Secret Architecture**: Separates root MongoDB credentials (mongo-auth Secret, decorator-managed) from application credentials (app-credentials Secret, decorator-attached) for enhanced security and blast radius protection.
 - **URI-Based Authentication**: MongoDB utility Jobs (init-replica-set, create-user) use complete connection URIs with admin authentication, ensuring retry reliability and proper credential isolation with `authSource=admin`.
 - **Keyfile-Based Replica Authentication**: MongoDB replica sets use shared keyfile Secrets (per StorageAccount) for member authentication. Keyfiles are child resources (deleted with parent CR, regenerable from webhook). Init containers prepare keyfile permissions (chmod 400, chown 999:999) before MongoDB startup. Protection mechanism for keyfiles is deferred to future implementation.
 - **Shared MongoDB Configuration**: Single `mongod-config` ConfigMap for all StorageAccounts (1,300+ tenants), generated via jsonnet and deployed to `hosted-tenants` namespace. Provides replication, security, and logging configuration. StatefulSet CLI args override `net.bindIp` to bind only to `127.0.0.1,$(POD_IP)` for DigitalOcean private networking.
