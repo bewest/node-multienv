@@ -689,7 +689,7 @@ function renderMigrationJob(tenantId, namespace, storageAccount, databaseName, l
                 valueFrom: {
                   configMapKeyRef: {
                     name: sourceConfigMapName,
-                    key: 'MONGODB_URI'
+                    key: 'mongo'
                   }
                 }
               },
