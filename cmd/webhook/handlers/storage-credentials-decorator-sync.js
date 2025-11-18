@@ -280,6 +280,7 @@ function createStorageCredentialsDecoratorSync(config) {
     if (!sourceConfigMap) {
       console.log(`  WARNING: Migration requested but source ConfigMap '${sourceConfigMapName}' not found`);
       console.log(`  Skipping migration Job - ConfigMap must exist for shared→dedicated migration`);
+      console.log("NOT IN RELATED", req.related);
       return next();
     }
     
@@ -389,7 +390,7 @@ function createStorageCredentialsDecoratorSync(config) {
         resource: 'configmaps',
         labelSelector: {
           matchLabels: {
-            'nightscout.io/tenant': tenantId,
+            'tenant': tenantId,
           },
         },
       },
@@ -665,7 +666,6 @@ function renderMigrationJob(tenantId, namespace, storageAccount, databaseName, l
     },
     spec: {
       ttlSecondsAfterFinished: config.jobs.ttlSecondsAfterFinished,
-      backoffLimit: config.jobs.backoffLimit,
       template: {
         metadata: {
           labels: {
@@ -675,9 +675,10 @@ function renderMigrationJob(tenantId, namespace, storageAccount, databaseName, l
           }
         },
         spec: {
+          backoffLimit: config.jobs.backoffLimit,
           imagePullSecrets: config.jobs.imagePullSecrets,
           restartPolicy: 'OnFailure',
-          serviceAccountName: 'migration-job',
+          // serviceAccountName: 'migration-job',
           containers: [{
             name: 'migration',
             image: config.images.nsUtility,
@@ -800,7 +801,6 @@ function renderCreateUserJob(adminRefName, secret, tenantId, namespace, storageA
     },
     spec: {
       ttlSecondsAfterFinished: config.jobs.ttlSecondsAfterFinished,
-      backoffLimit: config.jobs.backoffLimit,
       template: {
         metadata: {
           labels: {
@@ -812,7 +812,7 @@ function renderCreateUserJob(adminRefName, secret, tenantId, namespace, storageA
         spec: {
           imagePullSecrets: config.jobs.imagePullSecrets,
           restartPolicy: 'OnFailure',
-          backoffLimit: 4,
+          backoffLimit: config.jobs.backoffLimit,
           containers: [{
             name: 'create-user',
             image: config.images.nsUtility,
