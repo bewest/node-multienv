@@ -273,7 +273,28 @@ function createStorageCredentialsDecoratorSync(config) {
       return next();
     }
     
-    console.log(`  Rendering migration Job for tenant ${req.tenantId}`);
+    // Guard: Verify source ConfigMap exists (Gen3 tenant ConfigMap with MONGODB_URI)
+    const sourceConfigMapName = req.tenantId;
+    const sourceConfigMap = req.related['ConfigMap.v1']?.[sourceConfigMapName];
+    
+    if (!sourceConfigMap) {
+      console.log(`  WARNING: Migration requested but source ConfigMap '${sourceConfigMapName}' not found`);
+      console.log(`  Skipping migration Job - ConfigMap must exist for shared→dedicated migration`);
+      return next();
+    }
+    
+    // Guard: Verify target Secret exists (Gen4 app-credentials Secret)
+    // Note: planMigrationJob runs BEFORE planCredentialsSecret in pipeline
+    // So we check req.existingSecret which is populated in collectAttachments
+    if (!req.existingSecret) {
+      console.log(`  WARNING: Migration requested but target Secret '${req.appCredentialsSecretName}' not found`);
+      console.log(`  Skipping migration Job - Secret will be created in next reconciliation cycle`);
+      return next();
+    }
+    
+    console.log(`  Prerequisites verified - rendering migration Job for tenant ${req.tenantId}`);
+    console.log(`    Source: ConfigMap/${sourceConfigMapName}`);
+    console.log(`    Target: Secret/${req.appCredentialsSecretName}`);
     
     const migrationJob = renderMigrationJob(
       req.tenantId,
@@ -335,10 +356,10 @@ function createStorageCredentialsDecoratorSync(config) {
         labelSelector: {
           matchLabels: {
             'storage.nightscout.org/account': storageAccountId,
-            // 'app.kubernetes.io/component': 'init-job',
           },
         },
       },
+      // Create-user Jobs
       {
         apiVersion: 'batch/v1',
         resource: 'jobs',
@@ -350,11 +371,10 @@ function createStorageCredentialsDecoratorSync(config) {
           },
         },
       },
-      // Detect per tenant secret connection.
+      // App-credentials Secrets
       {
         apiVersion: 'v1',
         resource: 'secrets',
-        // namespace: secret.metadata.namespace,
         labelSelector: {
           matchLabels: {
             'storage.nightscout.org/account': storageAccountId,
@@ -363,8 +383,16 @@ function createStorageCredentialsDecoratorSync(config) {
           },
         },
       },
-      /*
-      */
+      // Gen3 tenant ConfigMaps (for migration source credentials)
+      {
+        apiVersion: 'v1',
+        resource: 'configmaps',
+        labelSelector: {
+          matchLabels: {
+            'nightscout.io/tenant': tenantId,
+          },
+        },
+      },
     ];
     
     console.log(`  Requesting ${relatedResources.length} related resource types`);
