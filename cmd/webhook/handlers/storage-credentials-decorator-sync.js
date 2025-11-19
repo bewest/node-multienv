@@ -263,14 +263,37 @@ function createStorageCredentialsDecoratorSync(config) {
     
     console.log(`  Migration annotation detected - planning shared → dedicated migration`);
     
-    // Check if migration already completed
-    const migrationCompleted = req.status.conditions?.find(
-      c => c.type === 'MigrationCompleted' && c.status === 'True'
-    );
-    
-    if (migrationCompleted) {
-      console.log(`  Migration already completed - skipping Job creation`);
+    // Check for durable completion marker (persists after Job TTL cleanup)
+    const migrationCompletedAnnotation = req.existingSecret?.metadata?.annotations?.['ns.mdn.io/migration-completed'];
+    if (migrationCompletedAnnotation) {
+      console.log(`  Migration already completed at ${migrationCompletedAnnotation} - skipping Job recreation`);
       return next();
+    }
+    
+    // Check if migration Job currently exists and succeeded
+    const jobs = req.related['Job.batch/v1'] || {};
+    const migrationJobName = `${req.tenantId}-migrate-to-dedicated`;
+    const existingMigrationJob = jobs[migrationJobName];
+    
+    if (existingMigrationJob) {
+      const jobStatus = existingMigrationJob.status || {};
+      const succeeded = (jobStatus.succeeded || 0) > 0;
+      
+      if (succeeded) {
+        console.log(`  MIGRATION JOB SUCCEEDED - marking completion on Secret`);
+        
+        // Set durable completion marker so we don't recreate after TTL cleanup
+        const completionTimestamp = new Date().toISOString();
+        req.existingSecret.metadata.annotations = req.existingSecret.metadata.annotations || {};
+        req.existingSecret.metadata.annotations['ns.mdn.io/migration-completed'] = completionTimestamp;
+        
+        // Also preserve the Secret in response
+        res.attachments.push(req.existingSecret);
+        
+        return next();
+      }
+      
+      console.log(`  Migration Job exists but not yet succeeded (active: ${jobStatus.active || 0}, failed: ${jobStatus.failed || 0})`);
     }
     
     // Guard: Verify source ConfigMap exists (Gen3 tenant ConfigMap with MONGODB_URI)
@@ -369,6 +392,18 @@ function createStorageCredentialsDecoratorSync(config) {
             'storage.nightscout.org/account': storageAccountId,
             'nightscout.io/tenant': tenantId,
             'ns.mdn.io/composite': 'storage-create-user',
+          },
+        },
+      },
+      // Migration Jobs (shared → dedicated storage transition)
+      {
+        apiVersion: 'batch/v1',
+        resource: 'jobs',
+        labelSelector: {
+          matchLabels: {
+            'storage.nightscout.org/account': storageAccountId,
+            'nightscout.io/tenant': tenantId,
+            'app.kubernetes.io/component': 'migration',
           },
         },
       },
