@@ -1,28 +1,40 @@
 /**
  * Instance Userdata Decorator Controller
  * 
- * Orchestrates Gen 3 → Gen 4 migration cutover by managing ConfigMap labels
+ * Orchestrates Gen 3 → Gen 4 userdata migration (Phase 2 of two-phase migration)
  * 
  * Target: ConfigMap with role=config-as-deploy label (Gen 3 user config)
  * Related Resources:
- *   - Deployments (Gen 3 + Gen 4) - both have internal_name label
- *   - ComputeInstance - migration status tracking
+ *   - Deployments (Gen 4) - verify Gen 4 deployment health
+ *   - ComputeInstance - storage migration status tracking
+ * 
+ * Two-Phase Migration Architecture:
+ *   Phase 1 (Storage): Storage-Credentials decorator migrates MongoDB data
+ *                      Sets nightscout.io/migration-completed on ComputeInstance
+ *   Phase 2 (Userdata): Instance-Userdata decorator (this controller)
+ *                       - Discovers ComputeInstance via customize hook
+ *                       - Waits for storage migration completion annotation
+ *                       - Archives ConfigMap (WITH MONGODB_URI for rollback)
+ *                       - Strips MONGODB_URI from active ConfigMap
+ *                       - Sets nightscout.io/userdata-migration-completed
  * 
  * Responsibilities:
  *   1. Watch Gen 3 ConfigMaps (role=config-as-deploy)
- *   2. Verify migration readiness:
- *      - Migration completed (ComputeInstance status)
- *      - Gen 3 deployment healthy (readyReplicas > 0)
- *      - Gen 4 deployment healthy (readyReplicas > 0)
- *   3. When ready:
- *      - Archive ConfigMap to different namespace (backup for rollback)
- *      - Remove role=config-as-deploy label (retires Gen 3 from resolver)
+ *   2. Discover related ComputeInstance via customize hook
+ *   3. Check storage migration completion (nightscout.io/migration-completed annotation)
+ *   4. Guard against duplicate migrations (nightscout.io/userdata-migration-completed)
+ *   5. Verify Gen 4 deployment health (readyReplicas > 0)
+ *   6. When ready:
+ *      - Archive complete ConfigMap to archive namespace (rollback capability)
+ *      - Strip MONGODB_URI from active ConfigMap (Gen4 uses Secret)
+ *      - Set completion annotation on ConfigMap
  * 
  * Key Design Points:
- *   - ConfigMap is parent resource (modify its own labels without ownership changes)
- *   - Zero-downtime cutover (both generations running before label removal)
- *   - Archive enables instant rollback if Gen 4 has issues
+ *   - ConfigMap is parent resource (modify annotations without ownership changes)
+ *   - Archive preserves MONGODB_URI for rollback scenarios
+ *   - Active ConfigMap becomes Compute Composite child (lifecycle-managed)
  *   - Idempotent (safe to reconcile multiple times)
+ *   - Loosely coupled from Storage-Credentials via annotation signaling
  */
 
 const { ANNOTATIONS, LABELS } = require('./constants');
@@ -44,12 +56,13 @@ function createDecoratorSync(config) {
     req.configMap = configMap;
     req.related = related || {};
     req.attachments = attachments || {};
-    req.tenantId = configMap.metadata.labels?.tenant;
+    req.tenantId = configMap.metadata.labels?.internal_name;
     req.namespace = configMap.metadata.namespace;
     
     // Initialize response
     res.attachments = [];
     res.labels = null;  // Will be set if label modification needed
+    res.annotations = null;  // Will be set if annotation modification needed
     
     console.log('Instance userdata decorator sync for ConfigMap:', configMap.metadata.name);
     console.log('  Tenant ID:', req.tenantId);
@@ -57,7 +70,7 @@ function createDecoratorSync(config) {
     if (!req.tenantId) {
       console.log('  WARNING: No internal_name label - cannot discover related resources');
       // Skip pipeline - return empty response
-      res.send({ attachments: [], labels: {} });
+      res.send({ attachments: [] });
       return;
     }
     
@@ -99,36 +112,49 @@ function createDecoratorSync(config) {
   
   /**
    * Stage 3: Evaluate migration readiness
-   * Check if all conditions met for Gen 3 → Gen 4 cutover
+   * Check if storage migration completed and userdata migration not yet done
    */
   function evaluateReadiness(req, res, next) {
     req.ready = false;
     
-    // Check migration completed
-    const migrationCompleted = hasCondition(req.computeInstance, 'MigrationCompleted');
+    // Guard: Check if userdata migration already completed
+    const userdataMigrationCompleted = req.configMap?.metadata?.annotations?.['nightscout.io/userdata-migration-completed'];
     
-    // Check Gen 3 deployment health
-    const gen3Healthy = req.gen3Deployment?.status?.readyReplicas > 0;
+    if (userdataMigrationCompleted) {
+      console.log('  Userdata migration already completed at:', userdataMigrationCompleted);
+      console.log('  Skipping pipeline');
+      res.send({ attachments: [] });
+      return;
+    }
     
-    // Check Gen 4 deployment health
+    // Check storage migration completed via annotation
+    const storageMigrationCompleted = req.computeInstance?.metadata?.annotations?.['nightscout.io/migration-completed'];
+    
+    if (!storageMigrationCompleted) {
+      console.log('  Storage migration not completed - skipping userdata migration');
+      console.log('  ComputeInstance annotations:', req.computeInstance?.metadata?.annotations || 'none');
+      return next();
+    }
+    
+    // Check Gen 4 deployment health (must be healthy before proceeding)
     const gen4Healthy = req.gen4Deployment?.status?.readyReplicas > 0;
     
     console.log('  Readiness checks:');
-    console.log('    Migration completed:', migrationCompleted);
-    console.log('    Gen 3 healthy:', gen3Healthy, `(${req.gen3Deployment?.status?.readyReplicas || 0} replicas)`);
+    console.log('    Storage migration completed:', storageMigrationCompleted);
+    console.log('    Userdata migration completed:', userdataMigrationCompleted);
     console.log('    Gen 4 healthy:', gen4Healthy, `(${req.gen4Deployment?.status?.readyReplicas || 0} replicas)`);
     
-    // All conditions must be true
-    req.ready = migrationCompleted && gen3Healthy && gen4Healthy;
+    // Ready if storage migration done and Gen 4 is healthy
+    req.ready = storageMigrationCompleted && gen4Healthy;
     
-    console.log('  Ready for cutover:', req.ready);
+    console.log('  Ready for userdata migration:', req.ready);
     
     return next();
   }
   
   /**
-   * Stage 4: Plan ConfigMap archive (if ready)
-   * Create backup copy in archive namespace for rollback capability
+   * Stage 4: Plan ConfigMap archive and MONGODB_URI cleanup (if ready)
+   * Creates archived copy (WITH MONGODB_URI for rollback) and strips MONGODB_URI from active ConfigMap
    */
   function planArchiveConfigMap(req, res, next) {
     if (!req.ready) {
@@ -136,42 +162,59 @@ function createDecoratorSync(config) {
       return next();
     }
     
-    // Check if already archived
-    const archiveAttachments = req.attachments['ConfigMap.v1'] || {};
-    const archiveName = `${req.configMap.metadata.name}-backup`;
-    const alreadyArchived = Object.values(archiveAttachments).some(cm =>
-      cm.metadata?.namespace === ARCHIVE_NAMESPACE &&
-      cm.metadata?.name === archiveName
-    );
+    console.log('  Planning ConfigMap archival and MONGODB_URI cleanup');
     
-    if (alreadyArchived) {
-      console.log('  Archive already exists - skipping');
-      return next();
-    }
+    // Guard against missing data field
+    const sourceData = req.configMap.data || {};
     
-    // Create archive copy with full original data
-    const archiveConfigMap = {
+    // Create archived copy in archive namespace (preserves MONGODB_URI for rollback)
+    const archiveName = `${req.tenantId}-gen3-backup`;
+    const archivedConfigMap = {
       apiVersion: 'v1',
       kind: 'ConfigMap',
       metadata: {
         name: archiveName,
         namespace: ARCHIVE_NAMESPACE,
         labels: {
-          ...req.configMap.metadata.labels,
-          'nightscout.io/archived': 'true'
+          'nightscout.io/tenant': req.tenantId,
+          'ns.mdn.io/archived': 'true',
+          'ns.mdn.io/archived-from': 'gen3'
         },
         annotations: {
-          ...req.configMap.metadata.annotations,
-          'nightscout.io/archived-at': new Date().toISOString(),
-          'nightscout.io/source-namespace': req.namespace,
-          'nightscout.io/original-name': req.configMap.metadata.name
+          'ns.mdn.io/archived-at': new Date().toISOString(),
+          'ns.mdn.io/original-namespace': req.namespace,
+          'ns.mdn.io/original-name': req.configMap.metadata.name
         }
       },
-      data: req.configMap.data  // Preserve all user preferences + MONGODB_URI
+      data: { ...sourceData }  // Full copy including MONGODB_URI
     };
     
-    res.attachments.push(archiveConfigMap);
-    console.log(`  Planned archive: ${archiveName} → ${ARCHIVE_NAMESPACE}`);
+    res.attachments.push(archivedConfigMap);
+    console.log(`  Created archived ConfigMap: ${ARCHIVE_NAMESPACE}/${archiveName}`);
+    
+    // Return modified ConfigMap with MONGODB_URI stripped (Gen4 uses Secret for credentials)
+    const strippedConfigMap = {
+      apiVersion: 'v1',
+      kind: 'ConfigMap',
+      metadata: {
+        name: req.configMap.metadata.name,
+        namespace: req.namespace,
+        labels: { ...(req.configMap.metadata.labels || {}) },
+        annotations: { ...(req.configMap.metadata.annotations || {}) }
+      },
+      data: { ...sourceData }
+    };
+    
+    // Remove sensitive MongoDB URI (Gen4 uses app-credentials Secret instead)
+    delete strippedConfigMap.data.MONGODB_URI;
+    
+    res.attachments.push(strippedConfigMap);
+    console.log('  Stripped MONGODB_URI from active ConfigMap');
+    
+    // Set completion annotation on ConfigMap (signals userdata migration done)
+    res.annotations = res.annotations || {};
+    res.annotations['nightscout.io/userdata-migration-completed'] = new Date().toISOString();
+    console.log('  Set userdata-migration-completed annotation');
     
     return next();
   }
@@ -206,7 +249,7 @@ function createDecoratorSync(config) {
   
   /**
    * Stage 6: Assemble final response
-   * Return attachments and label modifications to Metacontroller
+   * Return attachments, annotations, and label modifications to Metacontroller
    */
   function assembleResponse(req, res, next) {
     const response = {
@@ -218,9 +261,15 @@ function createDecoratorSync(config) {
       response.labels = res.labels;
     }
     
+    // Only include annotations if modifications planned
+    if (res.annotations) {
+      response.annotations = res.annotations;
+    }
+    
     console.log('  Response:', {
       attachments: response.attachments.length,
-      labelModifications: res.labels ? Object.keys(res.labels).length : 0
+      labelModifications: res.labels ? Object.keys(res.labels).length : 0,
+      annotationModifications: res.annotations ? Object.keys(res.annotations).length : 0
     });
     
     res.json(response);
@@ -242,7 +291,7 @@ function createDecoratorSync(config) {
    */
   function customize_userdata_related(req, res, next) {
     const { parent } = req.body;
-    const tenantId = parent.metadata?.labels?.tenant;
+    const tenantId = parent.metadata?.labels?.internal_name;
     
     console.log('Instance userdata decorator customize for ConfigMap:', parent.metadata?.name);
     console.log('  Tenant ID:', tenantId);
