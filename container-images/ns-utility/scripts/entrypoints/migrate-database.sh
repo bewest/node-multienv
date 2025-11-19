@@ -69,7 +69,7 @@ migrate_with_mongodump() {
   log_info "Dumping source database '${source_db}'"
   
   if ! mongodump --uri="${source_uri}" --db="${source_db}" \
-       --out="${work_dir}" --gzip 2>&1 | grep -v "SCRAM-SHA" || true; then
+       --out="${work_dir}" --gzip; then
     die "Failed to dump source database"
   fi
   
@@ -81,7 +81,7 @@ migrate_with_mongodump() {
   
   if ! mongorestore --uri="${target_uri}" \
        --nsFrom="${source_db}.*" --nsTo="${target_db}.*" \
-       "${work_dir}/${source_db}" --gzip --drop 2>&1 | grep -v "SCRAM-SHA" || true; then
+       "${work_dir}/${source_db}" --gzip --drop; then
     die "Failed to restore to target database"
   fi
   
