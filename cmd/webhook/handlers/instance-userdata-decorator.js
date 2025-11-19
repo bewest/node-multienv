@@ -56,7 +56,7 @@ function createDecoratorSync(config) {
     req.configMap = configMap;
     req.related = related || {};
     req.attachments = attachments || {};
-    req.tenantId = configMap.metadata.labels?.internal_name;
+    req.tenantId = configMap.metadata.labels?.tenant;
     req.namespace = configMap.metadata.namespace;
     
     // Initialize response
@@ -68,7 +68,7 @@ function createDecoratorSync(config) {
     console.log('  Tenant ID:', req.tenantId);
     
     if (!req.tenantId) {
-      console.log('  WARNING: No internal_name label - cannot discover related resources');
+      console.log('  WARNING: No tenant label - cannot discover related resources');
       // Skip pipeline - return empty response
       res.send({ attachments: [] });
       return;
@@ -292,14 +292,14 @@ function createDecoratorSync(config) {
    */
   function customize_userdata_related(req, res, next) {
     const { parent } = req.body;
-    const tenantId = parent.metadata?.labels?.internal_name;
+    const tenantId = parent.metadata?.labels?.tenant;
     
     console.log('Instance userdata decorator customize for ConfigMap:', parent.metadata?.name);
     console.log('  Tenant ID:', tenantId);
     
     if (!tenantId) {
       // No tenant ID - cannot discover related resources
-      console.log('  WARNING: No internal_name label - returning empty relatedResources');
+      console.log('  WARNING: No tenant label - returning empty relatedResources');
       return res.json({ relatedResources: [] });
     }
     
