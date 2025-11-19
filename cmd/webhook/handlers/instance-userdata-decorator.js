@@ -14,8 +14,8 @@
  *   Phase 2 (Userdata): Instance-Userdata decorator (this controller)
  *                       - Discovers ComputeInstance via customize hook
  *                       - Waits for storage migration completion annotation
- *                       - Archives ConfigMap (WITH MONGODB_URI for rollback)
- *                       - Strips MONGODB_URI from active ConfigMap
+ *                       - Archives ConfigMap (WITH mongo URI for rollback)
+ *                       - Strips mongo URI from active ConfigMap
  *                       - Sets nightscout.io/userdata-migration-completed
  * 
  * Responsibilities:
@@ -26,12 +26,12 @@
  *   5. Verify Gen 4 deployment health (readyReplicas > 0)
  *   6. When ready:
  *      - Archive complete ConfigMap to archive namespace (rollback capability)
- *      - Strip MONGODB_URI from active ConfigMap (Gen4 uses Secret)
+ *      - Strip mongo URI from active ConfigMap (Gen4 uses Secret)
  *      - Set completion annotation on ConfigMap
  * 
  * Key Design Points:
  *   - ConfigMap is parent resource (modify annotations without ownership changes)
- *   - Archive preserves MONGODB_URI for rollback scenarios
+ *   - Archive preserves mongo URI (data.mongo field) for rollback scenarios
  *   - Active ConfigMap becomes Compute Composite child (lifecycle-managed)
  *   - Idempotent (safe to reconcile multiple times)
  *   - Loosely coupled from Storage-Credentials via annotation signaling
@@ -153,8 +153,8 @@ function createDecoratorSync(config) {
   }
   
   /**
-   * Stage 4: Plan ConfigMap archive and MONGODB_URI cleanup (if ready)
-   * Creates archived copy (WITH MONGODB_URI for rollback) and strips MONGODB_URI from active ConfigMap
+   * Stage 4: Plan ConfigMap archive and mongo URI cleanup (if ready)
+   * Creates archived copy (WITH mongo URI for rollback) and strips mongo URI from active ConfigMap
    */
   function planArchiveConfigMap(req, res, next) {
     if (!req.ready) {
@@ -162,12 +162,12 @@ function createDecoratorSync(config) {
       return next();
     }
     
-    console.log('  Planning ConfigMap archival and MONGODB_URI cleanup');
+    console.log('  Planning ConfigMap archival and mongo URI cleanup');
     
     // Guard against missing data field
     const sourceData = req.configMap.data || {};
     
-    // Create archived copy in archive namespace (preserves MONGODB_URI for rollback)
+    // Create archived copy in archive namespace (preserves mongo URI for rollback)
     const archiveName = `${req.tenantId}-gen3-backup`;
     const archivedConfigMap = {
       apiVersion: 'v1',
@@ -206,10 +206,11 @@ function createDecoratorSync(config) {
     };
     
     // Remove sensitive MongoDB URI (Gen4 uses app-credentials Secret instead)
-    delete strippedConfigMap.data.MONGODB_URI;
+    // Gen3 ConfigMaps store the URI under the 'mongo' key
+    delete strippedConfigMap.data.mongo;
     
     res.attachments.push(strippedConfigMap);
-    console.log('  Stripped MONGODB_URI from active ConfigMap');
+    console.log('  Stripped mongo URI from active ConfigMap');
     
     // Set completion annotation on ConfigMap (signals userdata migration done)
     res.annotations = res.annotations || {};
