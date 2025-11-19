@@ -113,13 +113,14 @@ verify_migration() {
   log_info "  Total size: ${total_size} bytes"
   
   log_info "Checking critical collections"
-  
-  local critical_collections=("entries" "treatments")
-  for collection in "${critical_collections[@]}"; do
+
+  (
+    echo ${MONGO_COLLECTION:-entries}
+    echo ${MONGO_TREATMENTS_COLLECTION:-treatments}
+  ) | while read collection; do
     local count
     count=$(mongo "${uri}" --quiet --eval "
-      db = db.getSiblingDB('${database}');
-      print(db.${collection}.countDocuments());
+      print(db.${collection}.countDocuments({ }));
     " 2>/dev/null)
     
     log_info "  Collection '${collection}': ${count} documents"

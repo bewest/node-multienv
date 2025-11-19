@@ -264,35 +264,30 @@ function createStorageCredentialsDecoratorSync(config) {
     console.log(`  Migration annotation detected - planning shared → dedicated migration`);
     
     // Check for durable completion marker (persists after Job TTL cleanup)
-    const migrationCompletedAnnotation = req.existingSecret?.metadata?.annotations?.['ns.mdn.io/migration-completed'];
+    const migrationCompletedAnnotation = req.computeInstance.metadata?.annotations?.['nightscout.io/migration-completed'];
     if (migrationCompletedAnnotation) {
       console.log(`  Migration already completed at ${migrationCompletedAnnotation} - skipping Job recreation`);
       return next();
     }
-    
+
     // Check if migration Job currently exists and succeeded
     const jobs = req.related['Job.batch/v1'] || {};
     const migrationJobName = `${req.tenantId}-migrate-to-dedicated`;
     const existingMigrationJob = jobs[migrationJobName];
-    
+
     if (existingMigrationJob) {
       const jobStatus = existingMigrationJob.status || {};
       const succeeded = (jobStatus.succeeded || 0) > 0;
-      
+
       if (succeeded) {
         console.log(`  MIGRATION JOB SUCCEEDED - marking completion on Secret`);
-        
+
         // Set durable completion marker so we don't recreate after TTL cleanup
         const completionTimestamp = new Date().toISOString();
-        req.existingSecret.metadata.annotations = req.existingSecret.metadata.annotations || {};
-        req.existingSecret.metadata.annotations['ns.mdn.io/migration-completed'] = completionTimestamp;
-        
-        // Also preserve the Secret in response
-        res.attachments.push(req.existingSecret);
-        
+        res.annotations['nightscout.io/migration-completed'] = completionTimestamp;
         return next();
       }
-      
+
       console.log(`  Migration Job exists but not yet succeeded (active: ${jobStatus.active || 0}, failed: ${jobStatus.failed || 0})`);
     }
     
@@ -339,7 +334,14 @@ function createStorageCredentialsDecoratorSync(config) {
    * Sends attachments back to Metacontroller
    */
   function assembleResponse(req, res, next) {
-    res.send({ attachments: res.attachments });
+    var response = { attachments: res.attachments };
+    if (Object.entries(res.annotations).length) {
+      response.annotations = res.annotations;
+    }
+    if (Object.entries(res.labels).length) {
+      response.labels = res.labels;
+    }
+    res.send(response);
   }
   
   // Define pipeline stages
@@ -701,6 +703,7 @@ function renderMigrationJob(tenantId, namespace, storageAccount, databaseName, l
     },
     spec: {
       ttlSecondsAfterFinished: config.jobs.ttlSecondsAfterFinished,
+      backoffLimit: config.jobs.backoffLimit,
       template: {
         metadata: {
           labels: {
@@ -710,7 +713,6 @@ function renderMigrationJob(tenantId, namespace, storageAccount, databaseName, l
           }
         },
         spec: {
-          backoffLimit: config.jobs.backoffLimit,
           imagePullSecrets: config.jobs.imagePullSecrets,
           restartPolicy: 'OnFailure',
           // serviceAccountName: 'migration-job',
@@ -726,6 +728,24 @@ function renderMigrationJob(tenantId, namespace, storageAccount, databaseName, l
                   configMapKeyRef: {
                     name: sourceConfigMapName,
                     key: 'mongo'
+                  }
+                }
+              },
+              {
+                name: 'MONGO_COLLECTION',
+                valueFrom: {
+                  configMapKeyRef: {
+                    name: sourceConfigMapName,
+                    key: 'MONGO_COLLECTION'
+                  }
+                }
+              },
+              {
+                name: 'MONGO_TREATMENTS_COLLECTION',
+                valueFrom: {
+                  configMapKeyRef: {
+                    name: sourceConfigMapName,
+                    key: 'MONGO_TREATMENTS_COLLECTION'
                   }
                 }
               },
@@ -790,6 +810,7 @@ function renderCreateUserJob(adminRefName, secret, tenantId, namespace, storageA
     },
     spec: {
       ttlSecondsAfterFinished: config.jobs.ttlSecondsAfterFinished,
+      backoffLimit: config.jobs.backoffLimit,
       template: {
         metadata: {
           labels: {
@@ -801,7 +822,6 @@ function renderCreateUserJob(adminRefName, secret, tenantId, namespace, storageA
         spec: {
           imagePullSecrets: config.jobs.imagePullSecrets,
           restartPolicy: 'OnFailure',
-          backoffLimit: config.jobs.backoffLimit,
           containers: [{
             name: 'create-user',
             image: config.images.nsUtility,
