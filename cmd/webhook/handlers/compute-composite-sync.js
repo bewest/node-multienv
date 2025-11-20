@@ -1,12 +1,13 @@
 /**
  * Compute Composite Controller
  * 
- * Manages Nightscout Deployment + Service from ComputeInstance CRD parent
+ * Manages Nightscout Deployment + Service + Gen3 ConfigMap adoption from ComputeInstance CRD parent
  * 
  * Parent: ComputeInstance CRD (nightscout.io/v1alpha1)
  * Children:
  *   - Nightscout Deployment
  *   - Nightscout Service
+ *   - Gen3 ConfigMap (adopted during userdata migration)
  *   - PodDisruptionBudget (optional)
  *   - KafkaTopic (if spec.cdc.enabled)
  *   - KafkaConnector (if spec.cdc.enabled)
@@ -20,116 +21,305 @@
  *   - spec.replicas: Number of Nightscout replicas (default: 2)
  *   - spec.cdc.enabled: Enable CDC with Kafka
  * 
- * Note: Migration is a storage-layer concern handled by storage composite.
- *       This controller never renders migration Jobs.
+ * Migration responsibilities:
+ *   - Adopt Gen3 ConfigMap as child when storage migration completes
+ *   - Archive data.mongo URI to annotation before stripping from ConfigMap
+ *   - Guard with nightscout.io/userdata-migration-completed annotation
  */
 
 const { renderNightscout, renderKafkaTopics, renderKafkaConnector } = require('./resources');
 
 function createComputeCompositeSync(config) {
-  return async function computeCompositeSync(req, res) {
-  const { parent, children, related } = req.body;
   
-  const tenantId = parent.metadata.name;
-  const spec = parent.spec || {};
-  const storageAccountName = spec.storageAccountRef?.name;
-  const storageAccountLabel = parent.metadata.labels?.['storage.nightscout.org/account'];
+  /**
+   * Stage 1: Initialize context from webhook request
+   */
+  function initializeContext(req, res, next) {
+    const { parent, children, related } = req.body;
+    
+    req.parent = parent;
+    req.children = children;
+    req.related = related;
+    req.tenantId = parent.metadata.name;
+    req.namespace = parent.metadata.namespace;
+    req.spec = parent.spec || {};
+    req.storageAccountName = req.spec.storageAccountRef?.name;
+    req.storageAccountLabel = parent.metadata.labels?.['storage.nightscout.org/account'];
+    
+    // Initialize response
+    res.childrenToRender = [];
+    res.status = {};
+    res.annotations = {};
+    
+    console.log('Compute composite sync for tenant:', req.tenantId, 'storage account:', req.storageAccountName);
+    
+    return next();
+  }
   
-  console.log('Compute composite sync for tenant:', tenantId, 'storage account:', storageAccountName);
-  
-  try {
-    const response = {
-      status: {},
-      children: []
-    };
-
-    if (!storageAccountName) {
+  /**
+   * Stage 2: Validate storage account reference
+   */
+  function validateStorageAccountRef(req, res, next) {
+    if (!req.storageAccountName) {
       console.warn(`Storage account reference missing in ComputeInstance spec`);
-      response.status = {
+      res.status = {
         phase: 'Failed',
-        observedGeneration: parent.metadata?.generation,
+        observedGeneration: req.parent.metadata?.generation,
         conditions: [{
           type: 'Ready',
           status: 'False',
           reason: 'StorageAccountRefMissing',
-          message: `spec.storageAccountRef.name is required`,
-          // lastTransitionTime: new Date().toISOString()
+          message: `spec.storageAccountRef.name is required`
         }]
       };
-      res.send(response);
+      res.send({ status: res.status, children: [] });
       return;
     }
-
-    // Find StorageAccount CRD from related resources
-    const storageAccount = findStorageAccount(related, storageAccountName);
+    return next();
+  }
+  
+  /**
+   * Stage 3: Discover StorageAccount CRD and app-credentials
+   */
+  function discoverStorageResources(req, res, next) {
+    // Find StorageAccount CRD
+    req.storageAccount = findStorageAccount(req.related, req.storageAccountName);
     
-    if (!storageAccount) {
-      console.warn(`StorageAccount CRD not found: ${storageAccountName}`);
-      response.status = {
+    if (!req.storageAccount) {
+      console.warn(`StorageAccount CRD not found: ${req.storageAccountName}`);
+      res.status = {
         phase: 'Pending',
-        observedGeneration: parent.metadata?.generation,
+        observedGeneration: req.parent.metadata?.generation,
         conditions: [{
           type: 'Ready',
           status: 'False',
           reason: 'StorageAccountNotFound',
-          message: `StorageAccount ${storageAccountName} not found`,
-          // lastTransitionTime: new Date().toISOString()
+          message: `StorageAccount ${req.storageAccountName} not found`
         }]
       };
-      res.send(response);
+      res.send({ status: res.status, children: [] });
       return;
     }
-
-    // Find app-credentials Secret from related resources (for Nightscout credentials)
-    const appCredentialsSecret = findAppCredentialsSecret(related, storageAccountLabel);
     
-    if (storageAccount.spec.storageType == 'dedicated' && !appCredentialsSecret) {
-
-      response.status = {
+    req.storageType = req.storageAccount.spec?.storageType;
+    
+    // Find app-credentials Secret for dedicated storage
+    req.appCredentialsSecret = findAppCredentialsSecret(req.related, req.storageAccountLabel);
+    
+    if (req.storageType == 'dedicated' && !req.appCredentialsSecret) {
+      res.status = {
         phase: 'Pending',
-        observedGeneration: parent.metadata?.generation,
+        observedGeneration: req.parent.metadata?.generation,
         conditions: [{
           type: 'Ready',
           status: 'False',
           reason: 'AppCredentialsNotFound',
-          message: `App credentials Secret not found for account ${storageAccountLabel}. Ensure StorageAccount is ready.`,
-          // lastTransitionTime: new Date().toISOString()
+          message: `App credentials Secret not found for account ${req.storageAccountLabel}. Ensure StorageAccount is ready.`
         }]
       };
-      res.send(response);
+      res.send({ status: res.status, children: [] });
       return;
     }
-
-    // Check MongoDB readiness from related StatefulSet or StorageAccount status
-    const mongoReadiness = checkMongoReadinessFromRelated(related, storageAccountLabel, storageAccount);
     
-    // Enhance parent with storage information
-    const enrichedParent = enrichWithStorageInfo(parent, storageAccount, appCredentialsSecret, storageAccountLabel);
-    
-    // Render Nightscout resources
-    response.children.push(...renderNightscout(enrichedParent, config));
-
-    // Optional: CDC resources if enabled
-    const cdcConfig = spec.cdc || {};
-    const cdcEnabled = cdcConfig.enabled === true;
-    if (cdcEnabled && mongoReadiness.ready) {
-      response.children.push(...renderKafkaTopics(enrichedParent, config));
-      response.children.push(renderKafkaConnector(enrichedParent, config));
-    }
-
-    // Build status
-    response.status = buildStatus(parent, {
-      mongoReadiness,
-      cdcEnabled,
-      storageAccount: storageAccountLabel,
-      children
-    });
-
-    res.send(response);
-  } catch (error) {
-    console.error('Error in compute composite sync:', error);
-    res.send(500, { error: error.message });
+    return next();
   }
+  
+  /**
+   * Stage 4: Check MongoDB readiness
+   */
+  function checkMongoReadiness(req, res, next) {
+    req.mongoReadiness = checkMongoReadinessFromRelated(
+      req.related,
+      req.storageAccountLabel,
+      req.storageAccount
+    );
+    return next();
+  }
+  
+  /**
+   * Stage 5: Plan ConfigMap adoption (Gen3 → Gen4 migration)
+   * Discovers Gen3 ConfigMap from related resources and prepares it for adoption
+   */
+  function planConfigMapAdoption(req, res, next) {
+    // Look for Gen3 ConfigMap in related resources
+    const configMaps = req.related['ConfigMap.v1'] || {};
+    const gen3ConfigMapName = req.tenantId;
+    const gen3ConfigMap = configMaps[gen3ConfigMapName];
+    
+    if (!gen3ConfigMap) {
+      console.log(`  No Gen3 ConfigMap found for tenant ${req.tenantId} - skipping adoption`);
+      return next();
+    }
+    
+    console.log(`  Found Gen3 ConfigMap: ${gen3ConfigMapName}`);
+    
+    // Store for userdata migration stage
+    req.gen3ConfigMap = gen3ConfigMap;
+    
+    return next();
+  }
+  
+  /**
+   * Stage 6: Plan userdata migration (archive data.mongo and strip from ConfigMap)
+   * Only executes when storage migration completes
+   */
+  function planUserDataMigration(req, res, next) {
+    if (!req.gen3ConfigMap) {
+      return next();
+    }
+    
+    // Check if userdata migration already completed
+    const userDataMigrationCompleted = req.gen3ConfigMap.metadata?.annotations?.['nightscout.io/userdata-migration-completed'];
+    if (userDataMigrationCompleted) {
+      console.log(`  Userdata migration already completed at ${userDataMigrationCompleted} - rendering clean ConfigMap`);
+      
+      // Render clean ConfigMap without data.mongo
+      const cleanConfigMap = renderCleanConfigMap(req.gen3ConfigMap, req.tenantId, req.namespace);
+      res.childrenToRender.push(cleanConfigMap);
+      return next();
+    }
+    
+    // Check if storage migration completed (annotation on ComputeInstance)
+    const storageMigrationCompleted = req.parent.metadata?.annotations?.['nightscout.io/migration-completed'];
+    
+    if (!storageMigrationCompleted) {
+      console.log(`  Storage migration not yet completed - preserving Gen3 ConfigMap as-is`);
+      
+      // Preserve ConfigMap without modifications until storage migration completes
+      const preservedConfigMap = renderPreservedConfigMap(req.gen3ConfigMap, req.tenantId, req.namespace);
+      res.childrenToRender.push(preservedConfigMap);
+      return next();
+    }
+    
+    console.log(`  Storage migration completed at ${storageMigrationCompleted} - executing userdata migration`);
+    
+    // Extract data.mongo URI before stripping
+    const mongoUri = extractMongoUri(req.gen3ConfigMap);
+    
+    if (mongoUri) {
+      console.log(`  Archiving data.mongo URI to annotation (length: ${mongoUri.length})`);
+      
+      // Archive mongo URI to ConfigMap annotation
+      const migratedConfigMap = renderMigratedConfigMap(
+        req.gen3ConfigMap,
+        req.tenantId,
+        req.namespace,
+        mongoUri
+      );
+      
+      res.childrenToRender.push(migratedConfigMap);
+    } else {
+      console.log(`  WARNING: No data.mongo field found in Gen3 ConfigMap - marking migration complete anyway`);
+      
+      // No mongo URI to archive, just mark complete
+      const cleanConfigMap = renderCleanConfigMap(req.gen3ConfigMap, req.tenantId, req.namespace);
+      res.childrenToRender.push(cleanConfigMap);
+    }
+    
+    return next();
+  }
+  
+  /**
+   * Stage 7: Render Nightscout resources (Deployment, Service, etc.)
+   */
+  function planNightscoutResources(req, res, next) {
+    // Enhance parent with storage information
+    const enrichedParent = enrichWithStorageInfo(
+      req.parent,
+      req.storageAccount,
+      req.appCredentialsSecret,
+      req.storageAccountLabel
+    );
+    
+    // Render Nightscout Deployment and Service
+    res.childrenToRender.push(...renderNightscout(enrichedParent, config));
+    
+    return next();
+  }
+  
+  /**
+   * Stage 8: Render CDC resources (KafkaTopic, KafkaConnector)
+   */
+  function planCDCResources(req, res, next) {
+    const cdcConfig = req.spec.cdc || {};
+    const cdcEnabled = cdcConfig.enabled === true;
+    
+    if (cdcEnabled && req.mongoReadiness.ready) {
+      console.log(`  CDC enabled - rendering Kafka resources`);
+      
+      const enrichedParent = enrichWithStorageInfo(
+        req.parent,
+        req.storageAccount,
+        req.appCredentialsSecret,
+        req.storageAccountLabel
+      );
+      
+      res.childrenToRender.push(...renderKafkaTopics(enrichedParent, config));
+      res.childrenToRender.push(renderKafkaConnector(enrichedParent, config));
+    }
+    
+    return next();
+  }
+  
+  /**
+   * Stage 9: Build status
+   */
+  function buildStatusConditions(req, res, next) {
+    res.status = buildStatus(req.parent, {
+      mongoReadiness: req.mongoReadiness,
+      cdcEnabled: req.spec.cdc?.enabled === true,
+      storageAccount: req.storageAccountLabel,
+      children: req.children
+    });
+    
+    return next();
+  }
+  
+  /**
+   * Stage 10: Assemble response
+   */
+  function assembleResponse(req, res, next) {
+    const response = {
+      status: res.status,
+      children: res.childrenToRender
+    };
+    
+    res.send(response);
+  }
+  
+  // Define pipeline stages
+  const pipeline = [
+    initializeContext,
+    validateStorageAccountRef,
+    discoverStorageResources,
+    checkMongoReadiness,
+    planConfigMapAdoption,
+    planUserDataMigration,
+    planNightscoutResources,
+    planCDCResources,
+    buildStatusConditions,
+    assembleResponse
+  ];
+  
+  // Return handler that executes pipeline
+  return async function computeCompositeSync(req, res) {
+    try {
+      // Execute pipeline
+      let stageIndex = 0;
+      
+      const next = () => {
+        stageIndex++;
+        if (stageIndex < pipeline.length) {
+          pipeline[stageIndex](req, res, next);
+        }
+      };
+      
+      pipeline[0](req, res, next);
+    } catch (error) {
+      console.error('Error in compute composite sync:', error);
+      res.send(500, { error: error.message });
+    }
+  };
 }
 
 /**
@@ -320,6 +510,101 @@ function buildStatus(parent, state) {
   };
 }
 
+// ============================================================================
+// ConfigMap Migration Helpers
+// ============================================================================
+
+/**
+ * Extract data.mongo URI from Gen3 ConfigMap
+ * Gen3 ConfigMaps store MongoDB URI in data.mongo field
+ */
+function extractMongoUri(configMap) {
+  if (!configMap || !configMap.data) {
+    return null;
+  }
+  
+  return configMap.data.mongo || null;
+}
+
+/**
+ * Render preserved ConfigMap (no modifications, just clean manifest)
+ * Used before storage migration completes - preserves ConfigMap as-is
+ */
+function renderPreservedConfigMap(existingConfigMap, tenantId, namespace) {
+  return {
+    apiVersion: 'v1',
+    kind: 'ConfigMap',
+    metadata: {
+      name: tenantId,
+      namespace: namespace,
+      labels: {
+        ...(existingConfigMap.metadata?.labels || {}),
+        'app.kubernetes.io/managed-by': 'metacontroller'
+      },
+      annotations: {
+        ...(existingConfigMap.metadata?.annotations || {})
+      }
+    },
+    data: existingConfigMap.data || {}
+  };
+}
+
+/**
+ * Render migrated ConfigMap (archives data.mongo to annotation and strips from data)
+ * Executes userdata migration when storage migration completes
+ */
+function renderMigratedConfigMap(existingConfigMap, tenantId, namespace, mongoUri) {
+  const data = { ...(existingConfigMap.data || {}) };
+  
+  // Strip data.mongo from ConfigMap data section
+  delete data.mongo;
+  
+  return {
+    apiVersion: 'v1',
+    kind: 'ConfigMap',
+    metadata: {
+      name: tenantId,
+      namespace: namespace,
+      labels: {
+        ...(existingConfigMap.metadata?.labels || {}),
+        'app.kubernetes.io/managed-by': 'metacontroller'
+      },
+      annotations: {
+        ...(existingConfigMap.metadata?.annotations || {}),
+        'nightscout.io/gen3-mongo-uri': mongoUri,
+        'nightscout.io/userdata-migration-completed': new Date().toISOString()
+      }
+    },
+    data: data
+  };
+}
+
+/**
+ * Render clean ConfigMap (no data.mongo, migration already completed)
+ * Used when userdata migration already completed in previous reconciliation
+ */
+function renderCleanConfigMap(existingConfigMap, tenantId, namespace) {
+  const data = { ...(existingConfigMap.data || {}) };
+  
+  // Ensure data.mongo is stripped (should already be gone)
+  delete data.mongo;
+  
+  return {
+    apiVersion: 'v1',
+    kind: 'ConfigMap',
+    metadata: {
+      name: tenantId,
+      namespace: namespace,
+      labels: {
+        ...(existingConfigMap.metadata?.labels || {}),
+        'app.kubernetes.io/managed-by': 'metacontroller'
+      },
+      annotations: {
+        ...(existingConfigMap.metadata?.annotations || {})
+      }
+    },
+    data: data
+  };
 }
 
 module.exports = createComputeCompositeSync;
