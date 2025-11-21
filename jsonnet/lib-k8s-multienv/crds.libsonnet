@@ -547,7 +547,9 @@
   },
 
   // NightscoutTenant CRD - Unified tenant resource (Gen 5 architecture)
-  // Combines storage + compute in single pod with interstitial StatefulSet pattern
+  // Two-phase provisioning model with ConfigMap-based compute activation
+  // Storage (PVC, mongo-auth secret) created by provisioner facade
+  // Compute activated when ConfigMap exists, deactivated when ConfigMap deleted
   nightscoutTenantCRD(
     group='nightscout.io',
     version='v1alpha1',
@@ -608,8 +610,31 @@
               properties: {
                 spec: {
                   type: 'object',
-                  required: ['mongodbVersion'],
+                  required: ['pvcName', 'mongoAuthSecretRef', 'selector', 'initialStorageType', 'mongodbVersion'],
                   properties: {
+                    // Provisioner-managed resources (created externally)
+                    pvcName: {
+                      type: 'string',
+                      description: 'Name of the PVC created by provisioner for MongoDB data',
+                    },
+                    mongoAuthSecretRef: {
+                      type: 'string',
+                      description: 'Name of the Secret containing MongoDB authentication credentials',
+                    },
+                    selector: {
+                      type: 'object',
+                      description: 'Label selector for child resources and ConfigMap matching',
+                      additionalProperties: {
+                        type: 'string',
+                      },
+                    },
+                    initialStorageType: {
+                      type: 'string',
+                      description: 'Initial storage architecture (shared or dedicated MongoDB)',
+                      enum: ['shared', 'dedicated'],
+                      default: 'dedicated',
+                    },
+                    
                     // MongoDB Configuration
                     mongodbVersion: {
                       type: 'string',
