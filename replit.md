@@ -18,15 +18,21 @@ This project delivers a production-grade, multi-tenant Nightscout platform on Ku
 All tenants are deployed within a single `hosted-tenants` namespace, with resources identified and isolated using a tenant ID prefix and standard Kubernetes labels.
 
 ### Custom Resource Definitions (CRDs)
-- **StorageAccount CRD** (`nightscout.io/v1alpha1`): Declares MongoDB storage infrastructure.
-- **ComputeInstance CRD** (`nightscout.io/v1alpha1`): Declares Nightscout application deployment, referencing a StorageAccount.
+- **StorageAccount CRD** (`nightscout.io/v1alpha1`): Gen4 - Declares MongoDB storage infrastructure.
+- **ComputeInstance CRD** (`nightscout.io/v1alpha1`): Gen4 - Declares Nightscout application deployment, referencing a StorageAccount.
+- **NightscoutTenant CRD** (`nightscout.io/v1alpha1`): Gen5 - Unified tenant resource with two-phase provisioning model. Storage (PVC, mongo-auth secret) created by provisioner facade. Compute activated when ConfigMap exists.
 
 ### Controllers (Metacontroller)
+
+**Gen4 Controllers:**
 - **Storage CompositeController**: Manages MongoDB StatefulSets, Services, and Migration Jobs.
 - **Compute CompositeController**: Manages Nightscout Deployments, Services, Gen3 ConfigMap adoption and userdata migration, and optional Kafka components. Uses pipeline pattern with 10 stages for separation of concerns.
 - **Storage-Credentials DecoratorController**: Manages per-tenant application credentials and user initialization.
 - **Storage-Initialization DecoratorController**: Manages durable state on mongo-auth Secrets using clean pipeline pattern with patch-based responses. Sets `ns.mdn.io/runtime-required` (shared/dedicated) based on StorageAccount spec and migration requests. Tracks replica set initialization by observing init-mongo-cluster Jobs and setting `ns.mdn.io/replica-set-initialized` timestamp marker on completion.
 - **PVC-Backup DecoratorController**: Enforces backup policies for MongoDB Persistent Volume Claims.
+
+**Gen5 Controller (Experimental):**
+- **Tenant CompositeController**: Single controller replacing dual Storage/Compute architecture. Uses ReplicaSet (replicas: 1) for pod lifecycle management. ConfigMap-based compute activation enables independent storage/compute lifecycle. Provisioner facade owns PVC and mongo-auth secret (outside Metacontroller GC). Uses utility container (`config.images.nsUtility`) for init jobs. Sets `ns.mdn.io/runtime-required` from `spec.initialStorageType` for Gen3/Gen4 migration compatibility.
 
 ### Key Technologies
 - **Orchestration**: Kubernetes, Metacontroller.
@@ -47,7 +53,11 @@ All tenants are deployed within a single `hosted-tenants` namespace, with resour
 - **Two-Interface Design**: Separate administration and resolver interfaces.
 
 ### System Design Choices
-The platform utilizes a **CRD-based two-composite architecture** (Storage and Compute) for separation of concerns, offering a Kubernetes-native API with `kubectl` integration.
+The platform offers multiple architecture patterns:
+- **Gen4**: CRD-based two-composite architecture (Storage and Compute) for separation of concerns
+- **Gen5 (Experimental)**: Unified NightscoutTenant CRD with two-phase provisioning and ConfigMap-based compute activation
+
+All patterns offer Kubernetes-native API with `kubectl` integration.
 - **Status Reporting**: CRD status includes phase, conditions, connectionSecret, and endpoints.
 - **Provisioner API Facade**: A REST API (`POST /accounts/`) for external systems to create StorageAccount + ComputeInstance CRDs and mongo-auth Secrets. Provides abstraction layer over Kubernetes API for tenant provisioning.
 - **Decorator-Based Blast Radius Protection**: Storage-Initialization Decorator watches mongo-auth Secret independently using label selectors, not ownership. When StorageAccount CRD is deleted, mongo-auth Secret survives cascade deletion, enabling fast recovery via CRD recreation. app-credentials Secret is regenerated on-demand by Storage-Credentials Decorator from preserved mongo-auth. Operators must explicitly delete mongo-auth Secrets and PVCs to permanently remove tenant data.

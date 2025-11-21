@@ -1,29 +1,33 @@
 /**
  * Tenant Composite Controller (Gen 5 Architecture)
  * 
- * Manages complete Nightscout tenant with co-located MongoDB + Nightscout
- * Uses interstitial StatefulSet pattern for initialization
+ * Two-phase provisioning model with ConfigMap-based compute activation
  * 
  * Parent: NightscoutTenant CRD (nightscout.io/v1alpha1)
  * 
- * Children (Initialization Phase):
- *   - StatefulSet (co-located MongoDB + Nightscout containers)
- *   - MongoDB Auth Secret
- *   - MongoDB Keyfile Secret
- *   - Init Replica Set Job
+ * Phase 1 (Provisioner creates):
+ *   - PVC (referenced by spec.pvcName)
+ *   - mongo-auth Secret (referenced by spec.mongoAuthSecretRef)
+ *   - NightscoutTenant CR (minimal spec with refs)
  * 
- * Children (Steady State):
- *   - Pod (direct, co-located containers, mounts existing PVC)
- *   - MongoDB Auth Secret
+ * Phase 2 (ConfigMap signals compute):
+ *   - Provisioner creates ConfigMap matching spec.selector
+ *   - Controller detects ConfigMap and renders compute layer
+ * 
+ * Children (Storage Only - No ConfigMap):
  *   - MongoDB Keyfile Secret
+ *   - Init Replica Set Job (if needed)
+ * 
+ * Children (Storage + Compute - ConfigMap Present):
+ *   - ReplicaSet (replicas: 1, co-located MongoDB + Nightscout)
+ *   - MongoDB Keyfile Secret
+ *   - Nightscout Secret (generated from mongo-auth)
+ *   - Init Replica Set Job (if needed)
  * 
  * Related (not owned):
- *   - PersistentVolumeClaim (created by StatefulSet, survives deletion)
- * 
- * Phase Transitions:
- *   Pending → Initializing (StatefulSet created, PVC provisioning)
- *   Initializing → Ready (Init Job complete, transition to direct Pod)
- *   Ready → Ready (Steady state with direct Pod)
+ *   - PVC (created by provisioner, referenced in spec)
+ *   - mongo-auth Secret (created by provisioner, referenced in spec)
+ *   - ConfigMap (created by provisioner, fetched via customize hook)
  */
 
 const crypto = require('crypto');
