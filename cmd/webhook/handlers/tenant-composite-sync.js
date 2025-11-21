@@ -236,6 +236,83 @@ function createTenantCompositeSync(config) {
   }
   
   /**
+   * Stage 3b: Ensure Nightscout application secret exists
+   * Generates API_SECRET and MONGO_CONNECTION from MongoDB credentials
+   */
+  function ensureNightscoutSecret(req, res, next) {
+    const tenantId = req.tenantId;
+    const namespace = req.namespace;
+    const nsSecretName = `${tenantId}-nightscout`;
+    
+    console.log(`Stage 3b: Ensuring Nightscout secret ${nsSecretName}`);
+    
+    // Check if secret already exists
+    const existingSecret = findResource(req.children['secrets.v1'], nsSecretName, namespace);
+    
+    if (existingSecret) {
+      console.log(`  Found existing Nightscout secret`);
+      const cleaned = cleanResource(existingSecret);
+      res.children.push(cleaned);
+      req.nightscoutSecret = cleaned;
+      return next();
+    }
+    
+    // Generate new Nightscout secret
+    console.log(`  Generating Nightscout Secret for ${tenantId}`);
+    
+    // Extract MongoDB credentials from auth secret
+    const mongoUsername = req.authSecret.stringData?.username || 'nsuser';
+    const mongoPassword = req.authSecret.stringData?.password || '';
+    const mongoDatabase = req.authSecret.stringData?.database || req.databaseName;
+    
+    // Build MongoDB connection string (localhost since co-located)
+    const mongoConnection = `mongodb://${mongoUsername}:${mongoPassword}@localhost:27017/${mongoDatabase}?authSource=${mongoDatabase}`;
+    
+    // Generate API_SECRET for Nightscout authentication
+    const apiSecret = crypto.randomBytes(32).toString('hex');
+    
+    const nightscoutSecret = {
+      apiVersion: 'v1',
+      kind: 'Secret',
+      type: 'Opaque',
+      metadata: {
+        name: nsSecretName,
+        namespace: namespace,
+        labels: {
+          'app.kubernetes.io/name': 'nightscout',
+          'app.kubernetes.io/component': 'application',
+          'app.kubernetes.io/part-of': 'nightscout-tenant',
+          'app.kubernetes.io/instance': tenantId,
+          'app.kubernetes.io/managed-by': 'metacontroller',
+          'ns.mdn.io/tenant': tenantId
+        },
+        annotations: {
+          'ns.mdn.io/created-at': new Date().toISOString()
+        }
+      },
+      stringData: {
+        MONGO_CONNECTION: mongoConnection,
+        API_SECRET: apiSecret,
+        // Additional Nightscout configuration
+        INSECURE_USE_HTTP: 'true', // Kubernetes handles TLS at ingress
+        HOSTNAME: `${tenantId}.nightscout.svc.cluster.local`,
+        BASE_URL: `https://${tenantId}.nightscout.example.com`, // Override via spec
+        // Enable features by default
+        ENABLE: 'careportal basal dbsize rawbg iob cob bwp cage iage sage boluscalc pushover treatmentnotify mmconnect loop pump profile food openaps bage alexa override cors',
+        // Time format
+        TIME_FORMAT: '24',
+        THEME: 'colors'
+      }
+    };
+    
+    res.children.push(nightscoutSecret);
+    req.nightscoutSecret = nightscoutSecret;
+    console.log(`  Added Nightscout Secret to children`);
+    
+    return next();
+  }
+  
+  /**
    * Stage 4: Check initialization status and determine phase
    * Uses durable parent status for replica set initialization state
    */
@@ -421,6 +498,7 @@ function createTenantCompositeSync(config) {
     initializeContext,
     ensureMongoKeyfile,
     ensureMongoAuthSecret,
+    ensureNightscoutSecret,
     detectPhase,
     renderChildren,
     sendResponse
