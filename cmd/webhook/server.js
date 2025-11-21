@@ -7,6 +7,7 @@ const createStorageCompositeSync = require('./handlers/storage-composite-sync');
 const createStorageCompositeCustomize = require('./handlers/storage-composite-customize');
 const createComputeCompositeSync = require('./handlers/compute-composite-sync');
 const createComputeCompositeCustomize = require('./handlers/compute-composite-customize');
+const createTenantCompositeSync = require('./handlers/tenant-composite-sync');
 const createDecoratorSync = require('./handlers/decorator-sync');
 const createDecoratorFinalize = require('./handlers/decorator-finalize');
 const { createStorageCredentialsDecoratorSync } = require('./handlers/storage-credentials-decorator-sync');
@@ -19,6 +20,7 @@ const storageCompositeSync = createStorageCompositeSync(config);
 const storageCompositeCustomize = createStorageCompositeCustomize(config);
 const computeCompositeSync = createComputeCompositeSync(config);
 const computeCompositeCustomize = createComputeCompositeCustomize(config);
+const tenantCompositeSync = createTenantCompositeSync(config);
 const decoratorSync = createDecoratorSync(config);
 const decoratorFinalize = createDecoratorFinalize(config);
 const { sync: storageCredentialsDecoratorSync, customize: storageCredentialsDecoratorCustomize } = createStorageCredentialsDecoratorSync(config);
@@ -59,6 +61,11 @@ server.post('/composite/storage/sync', storageCompositeSync);
 server.post('/composite/compute/customize', computeCompositeCustomize);
 server.post('/composite/compute/sync', computeCompositeSync);
 
+// Gen 5: Tenant Composite (Unified architecture)
+// Tenant composite: NightscoutTenant CRD → Pod (co-located MongoDB + Nightscout)
+// Uses interstitial StatefulSet pattern for initialization
+server.post('/composite/tenant/sync', tenantCompositeSync);
+
 // Decorator: PVC backup policy enforcement
 server.post('/decorator/sync', decoratorSync);
 server.post('/decorator/finalize', decoratorFinalize);
@@ -82,12 +89,13 @@ server.get('/health', (req, res, next) => {
 
 server.listen(port, '0.0.0.0', () => {
   console.log(`Metacontroller webhook server listening on port ${port}`);
-  console.log(`Gen 4: Three-Controller Architecture (2 Composites + 4 Decorators)`);
+  console.log(`Gen 4/5: Multi-Architecture Support (3 Composites + 4 Decorators)`);
   console.log(`Endpoints:`);
-  console.log(`  POST /composite/storage/customize - Storage: Related resource discovery`);
-  console.log(`  POST /composite/storage/sync - Storage: StorageAccount → MongoDB + Migration`);
-  console.log(`  POST /composite/compute/customize - Compute: Related resource discovery`);
-  console.log(`  POST /composite/compute/sync - Compute: ComputeInstance → Nightscout + CDC`);
+  console.log(`  POST /composite/storage/customize - Gen4: Storage: Related resource discovery`);
+  console.log(`  POST /composite/storage/sync - Gen4: StorageAccount → MongoDB + Migration`);
+  console.log(`  POST /composite/compute/customize - Gen4: Compute: Related resource discovery`);
+  console.log(`  POST /composite/compute/sync - Gen4: ComputeInstance → Nightscout + CDC`);
+  console.log(`  POST /composite/tenant/sync - Gen5: NightscoutTenant → Pod (co-located)`);
   console.log(`  POST /decorator/sync - PVC backup policy`);
   console.log(`  POST /decorator/finalize - PVC cleanup`);
   console.log(`  POST /decorator/storage-credentials/sync - Credentials: ComputeInstance → App Creds + User Init`);

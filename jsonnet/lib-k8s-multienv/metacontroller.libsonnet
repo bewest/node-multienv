@@ -356,6 +356,62 @@
       resyncPeriodSeconds=resyncPeriodSeconds,
     ),
 
+  // Tenant Composite Controller (NightscoutTenant CRD → Pod + Secrets + Init Job)
+  // Gen 5 architecture: Interstitial StatefulSet pattern (init phase only)
+  // Steady state: Direct Pod management with co-located MongoDB + Nightscout
+  tenantComposite(
+    webhookServiceUrl='http://webhook-service:3000',
+    crdGroup='nightscout.io',
+    crdVersion='v1alpha1',
+    resyncPeriodSeconds=30,
+  )::
+    $.compositeController(
+      name='tenant-composite',
+      syncUrl=webhookServiceUrl + '/composite/tenant/sync',
+      generateSelector=false,
+      parentResource={
+        apiVersion: crdGroup + '/' + crdVersion,
+        resource: 'nightscouttenants',
+        revisionHistory: {
+          fieldPaths: ['spec']
+        }
+      },
+      childResources=[
+        // Initialization phase: StatefulSet with co-located containers
+        { apiVersion: 'apps/v1', resource: 'statefulsets',
+          updateStrategy: {
+            method: 'InPlace'
+          }
+        },
+        // Steady state: Direct Pod (replaces StatefulSet after init)
+        { apiVersion: 'v1', resource: 'pods' },
+        // Secrets for MongoDB credentials and keyfile
+        { apiVersion: 'v1', resource: 'secrets' },
+        // Init Job for replica set setup
+        { apiVersion: 'batch/v1', resource: 'jobs' },
+        // Optional: CDC resources
+        // { apiVersion: 'kafka.strimzi.io/v1beta2', resource: 'kafkatopics' },
+        // { apiVersion: 'kafka.strimzi.io/v1beta2', resource: 'kafkaconnectors' },
+      ],
+      relatedResources=[
+        // PVCs created by StatefulSet volumeClaimTemplates (not owned, label-selected)
+        {
+          apiVersion: 'v1',
+          resource: 'persistentvolumeclaims',
+          labelSelector: {
+            matchExpressions: [
+              {
+                key: 'app.kubernetes.io/instance',
+                operator: 'In',
+                values: ['${parent.metadata.name}'],
+              },
+            ],
+          },
+        },
+      ],
+      resyncPeriodSeconds=resyncPeriodSeconds,
+    ),
+
   // Complete controller set
   controllers(
     webhookServiceUrl='http://webhook-service:3000',
@@ -363,6 +419,7 @@
     crdVersion='v1alpha1',
     storageResyncSeconds=30,
     computeResyncSeconds=30,
+    tenantResyncSeconds=30,
     pvcResyncSeconds=60,
     credentialsResyncSeconds=30,
     initializationResyncSeconds=30,
@@ -379,6 +436,12 @@
       crdGroup=crdGroup,
       crdVersion=crdVersion,
       resyncPeriodSeconds=computeResyncSeconds,
+    ),
+    tenant: $.tenantComposite(
+      webhookServiceUrl=webhookServiceUrl,
+      crdGroup=crdGroup,
+      crdVersion=crdVersion,
+      resyncPeriodSeconds=tenantResyncSeconds,
     ),
     pvcBackup:: $.pvcBackupDecorator(
       webhookUrl=webhookServiceUrl + '/decorator/sync',

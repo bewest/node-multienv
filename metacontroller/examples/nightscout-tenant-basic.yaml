@@ -1,0 +1,140 @@
+# NightscoutTenant Example - Gen 5 Unified Architecture
+#
+# This demonstrates the simplified tenant resource that combines storage + compute
+# in a single CRD using the interstitial StatefulSet pattern.
+#
+# Lifecycle:
+#   1. CRD created → Controller renders StatefulSet (co-located MongoDB + Nightscout)
+#   2. StatefulSet creates PVC, Init Job initializes MongoDB replica set
+#   3. Once initialized → Controller transitions to direct Pod (StatefulSet deleted)
+#   4. Steady state: Single Pod with co-located containers, mounting existing PVC
+#
+# Benefits:
+#   - Single resource per tenant (vs 2 in Gen4)
+#   - Co-located containers (localhost connection, no network overhead)
+#   - No headless service needed (Consul service discovery)
+#   - Automatic PVC protection (decorator still works)
+#   - 56% fewer Kubernetes objects at scale
+
+apiVersion: nightscout.io/v1alpha1
+kind: NightscoutTenant
+metadata:
+  name: demo-tenant
+  namespace: nightscout-tenants
+  labels:
+    ns.mdn.io/tier: basic
+    ns.mdn.io/tenant: demo-tenant
+spec:
+  # MongoDB Configuration
+  mongodbVersion: "7.0"
+  mongoResources:
+    requests:
+      cpu: "100m"
+      memory: "256Mi"
+    limits:
+      cpu: "500m"
+      memory: "512Mi"
+  
+  # Storage Configuration
+  storageSize: "10Gi"
+  storageClass: fast-ssd-retain  # Must have 'Retain' reclaim policy
+  
+  # Nightscout Configuration
+  nightscoutImage: "nightscout/cgm-remote-monitor:latest"
+  nightscoutResources:
+    requests:
+      cpu: "100m"
+      memory: "256Mi"
+    limits:
+      cpu: "1000m"
+      memory: "1Gi"
+  
+  # Additional Nightscout environment variables
+  env:
+    - name: API_SECRET
+      value: "change-me-random-secret"
+    - name: ENABLE
+      value: "careportal basal"
+    - name: TIME_FORMAT
+      value: "24"
+  
+  # Service tier
+  tier: basic
+  
+  # Backup configuration (PVC decorator integration)
+  backup:
+    enabled: true
+    policy: snapshot  # Creates VolumeSnapshot on PVC deletion
+  
+  # Health check sidecar for Consul registration
+  healthcheck:
+    enabled: true
+  
+  # Change Data Capture (optional)
+  cdc:
+    enabled: false
+    # kafkaCluster: "my-kafka"
+    # kafkaConnectCluster: "my-connect"
+
+---
+# Example: Premium tier tenant with custom resources
+apiVersion: nightscout.io/v1alpha1
+kind: NightscoutTenant
+metadata:
+  name: premium-tenant
+  namespace: nightscout-tenants
+  labels:
+    ns.mdn.io/tier: premium
+spec:
+  mongodbVersion: "7.0"
+  mongoResources:
+    requests:
+      cpu: "500m"
+      memory: "1Gi"
+    limits:
+      cpu: "2000m"
+      memory: "2Gi"
+  
+  storageSize: "50Gi"
+  
+  nightscoutImage: "nightscout/cgm-remote-monitor:15.0.0"
+  nightscoutResources:
+    requests:
+      cpu: "500m"
+      memory: "512Mi"
+    limits:
+      cpu: "2000m"
+      memory: "2Gi"
+  
+  tier: premium
+  
+  backup:
+    enabled: true
+    policy: snapshot
+  
+  cdc:
+    enabled: true
+    kafkaCluster: "production-kafka"
+    kafkaConnectCluster: "production-connect"
+
+---
+# Example: Migration from Gen3/4 to Gen5
+apiVersion: nightscout.io/v1alpha1
+kind: NightscoutTenant
+metadata:
+  name: migrated-tenant
+  namespace: nightscout-tenants
+  labels:
+    ns.mdn.io/tier: basic
+    ns.mdn.io/migration: gen4-to-gen5
+spec:
+  mongodbVersion: "7.0"
+  storageSize: "10Gi"
+  nightscoutImage: "nightscout/cgm-remote-monitor:latest"
+  
+  # Migration from existing Gen4 deployment
+  migration:
+    enabled: true
+    sourceConnectionSecret: "old-tenant-mongo-auth"  # Secret with source MongoDB URI
+  
+  tier: basic

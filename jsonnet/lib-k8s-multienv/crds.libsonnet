@@ -546,6 +546,299 @@
     },
   },
 
+  // NightscoutTenant CRD - Unified tenant resource (Gen 5 architecture)
+  // Combines storage + compute in single pod with interstitial StatefulSet pattern
+  nightscoutTenantCRD(
+    group='nightscout.io',
+    version='v1alpha1',
+  ):: {
+    apiVersion: 'apiextensions.k8s.io/v1',
+    kind: 'CustomResourceDefinition',
+    metadata: {
+      name: 'nightscouttenants.' + group,
+    },
+    spec: {
+      group: group,
+      names: {
+        kind: 'NightscoutTenant',
+        listKind: 'NightscoutTenantList',
+        plural: 'nightscouttenants',
+        singular: 'nightscouttenant',
+        shortNames: ['nst', 'tenant'],
+        categories: ['nightscout'],
+      },
+      scope: 'Namespaced',
+      versions: [
+        {
+          name: version,
+          served: true,
+          storage: true,
+          subresources: {
+            status: {},
+          },
+          additionalPrinterColumns: [
+            {
+              name: 'Phase',
+              type: 'string',
+              jsonPath: '.status.phase',
+              description: 'Current lifecycle phase',
+            },
+            {
+              name: 'MongoDB',
+              type: 'string',
+              jsonPath: '.spec.mongodbVersion',
+              description: 'MongoDB version',
+            },
+            {
+              name: 'Nightscout',
+              type: 'string',
+              jsonPath: '.spec.nightscoutImage',
+              description: 'Nightscout image',
+            },
+            {
+              name: 'Age',
+              type: 'date',
+              jsonPath: '.metadata.creationTimestamp',
+            },
+          ],
+          schema: {
+            openAPIV3Schema: {
+              type: 'object',
+              required: ['spec'],
+              properties: {
+                spec: {
+                  type: 'object',
+                  required: ['mongodbVersion'],
+                  properties: {
+                    // MongoDB Configuration
+                    mongodbVersion: {
+                      type: 'string',
+                      description: 'MongoDB version (e.g., "7.0", "6.0")',
+                      pattern: '^[0-9]+\\.[0-9]+$',
+                    },
+                    mongodbImage: {
+                      type: 'string',
+                      description: 'Override MongoDB container image',
+                    },
+                    mongoResources: {
+                      type: 'object',
+                      description: 'MongoDB container resource requirements',
+                      properties: {
+                        requests: {
+                          type: 'object',
+                          properties: {
+                            cpu: { type: 'string', default: '100m' },
+                            memory: { type: 'string', default: '256Mi' },
+                          },
+                        },
+                        limits: {
+                          type: 'object',
+                          properties: {
+                            cpu: { type: 'string', default: '500m' },
+                            memory: { type: 'string', default: '512Mi' },
+                          },
+                        },
+                      },
+                    },
+                    
+                    // Storage Configuration
+                    storageClass: {
+                      type: 'string',
+                      description: 'StorageClass for MongoDB PVC',
+                    },
+                    storageSize: {
+                      type: 'string',
+                      description: 'PVC storage size (e.g., "10Gi")',
+                      default: '10Gi',
+                    },
+                    
+                    // Nightscout Configuration
+                    nightscoutImage: {
+                      type: 'string',
+                      description: 'Nightscout container image',
+                      default: 'nightscout/cgm-remote-monitor:latest',
+                    },
+                    nightscoutResources: {
+                      type: 'object',
+                      description: 'Nightscout container resource requirements',
+                      properties: {
+                        requests: {
+                          type: 'object',
+                          properties: {
+                            cpu: { type: 'string', default: '100m' },
+                            memory: { type: 'string', default: '256Mi' },
+                          },
+                        },
+                        limits: {
+                          type: 'object',
+                          properties: {
+                            cpu: { type: 'string', default: '1000m' },
+                            memory: { type: 'string', default: '1Gi' },
+                          },
+                        },
+                      },
+                    },
+                    env: {
+                      type: 'array',
+                      description: 'Additional environment variables for Nightscout',
+                      items: {
+                        type: 'object',
+                        required: ['name'],
+                        properties: {
+                          name: { type: 'string' },
+                          value: { type: 'string' },
+                          valueFrom: {
+                            type: 'object',
+                            properties: {
+                              secretKeyRef: {
+                                type: 'object',
+                                properties: {
+                                  name: { type: 'string' },
+                                  key: { type: 'string' },
+                                },
+                              },
+                            },
+                          },
+                        },
+                      },
+                    },
+                    
+                    // Tier & Features
+                    tier: {
+                      type: 'string',
+                      description: 'Service tier',
+                      enum: ['free', 'basic', 'premium', 'enterprise'],
+                      default: 'basic',
+                    },
+                    cdc: {
+                      type: 'object',
+                      description: 'Change Data Capture via Kafka',
+                      properties: {
+                        enabled: {
+                          type: 'boolean',
+                          default: false,
+                        },
+                        kafkaCluster: {
+                          type: 'string',
+                        },
+                        kafkaConnectCluster: {
+                          type: 'string',
+                        },
+                      },
+                    },
+                    healthcheck: {
+                      type: 'object',
+                      description: 'Health check sidecar for Consul',
+                      properties: {
+                        enabled: {
+                          type: 'boolean',
+                          default: true,
+                        },
+                        image: {
+                          type: 'string',
+                        },
+                      },
+                    },
+                    
+                    // Backup Configuration
+                    backup: {
+                      type: 'object',
+                      description: 'PVC backup configuration',
+                      properties: {
+                        enabled: {
+                          type: 'boolean',
+                          default: true,
+                        },
+                        policy: {
+                          type: 'string',
+                          enum: ['snapshot', 'skip'],
+                          default: 'snapshot',
+                        },
+                      },
+                    },
+                    
+                    // Migration from Gen 3/4
+                    migration: {
+                      type: 'object',
+                      description: 'Migration from existing deployment',
+                      properties: {
+                        enabled: {
+                          type: 'boolean',
+                          default: false,
+                        },
+                        sourceConnectionSecret: {
+                          type: 'string',
+                          description: 'Secret with source MongoDB URI',
+                        },
+                      },
+                    },
+                  },
+                },
+                status: {
+                  type: 'object',
+                  properties: {
+                    phase: {
+                      type: 'string',
+                      description: 'Lifecycle phase',
+                      enum: ['Pending', 'Initializing', 'Ready', 'Failed'],
+                    },
+                    conditions: {
+                      type: 'array',
+                      description: 'Status conditions',
+                      items: {
+                        type: 'object',
+                        required: ['type', 'status'],
+                        properties: {
+                          type: {
+                            type: 'string',
+                            description: 'Condition type (Ready, ReplicaSetReady, PVCReady, MigrationComplete)',
+                          },
+                          status: {
+                            type: 'string',
+                            enum: ['True', 'False', 'Unknown'],
+                          },
+                          lastTransitionTime: {
+                            type: 'string',
+                            format: 'date-time',
+                          },
+                          reason: {
+                            type: 'string',
+                          },
+                          message: {
+                            type: 'string',
+                          },
+                        },
+                      },
+                    },
+                    connectionSecret: {
+                      type: 'string',
+                      description: 'Name of MongoDB connection Secret',
+                    },
+                    databaseName: {
+                      type: 'string',
+                      description: 'MongoDB database name',
+                    },
+                    pvcName: {
+                      type: 'string',
+                      description: 'Name of persistent volume claim',
+                    },
+                    podName: {
+                      type: 'string',
+                      description: 'Name of the running pod',
+                    },
+                    observedGeneration: {
+                      type: 'integer',
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+      ],
+    },
+  },
+
   // Helper: Generate both CRDs
   all(
     group='nightscout.io',
@@ -553,5 +846,6 @@
   ):: {
     storageAccount: $.storageAccountCRD(group, version),
     computeInstance: $.computeInstanceCRD(group, version),
+    nightscoutTenant: $.nightscoutTenantCRD(group, version),
   },
 }
