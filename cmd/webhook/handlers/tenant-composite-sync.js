@@ -261,9 +261,25 @@ function createTenantCompositeSync(config) {
     console.log(`  Generating Nightscout Secret for ${tenantId}`);
     
     // Extract MongoDB credentials from auth secret
-    const mongoUsername = req.authSecret.stringData?.username || 'nsuser';
-    const mongoPassword = req.authSecret.stringData?.password || '';
-    const mongoDatabase = req.authSecret.stringData?.database || req.databaseName;
+    // Handle both stringData (newly created) and data (existing, base64-encoded)
+    let mongoUsername, mongoPassword, mongoDatabase;
+    
+    if (req.authSecret.stringData) {
+      // New secret with stringData
+      mongoUsername = req.authSecret.stringData.username;
+      mongoPassword = req.authSecret.stringData.password;
+      mongoDatabase = req.authSecret.stringData.database;
+    } else if (req.authSecret.data) {
+      // Existing secret with base64-encoded data
+      mongoUsername = Buffer.from(req.authSecret.data.username || '', 'base64').toString('utf8');
+      mongoPassword = Buffer.from(req.authSecret.data.password || '', 'base64').toString('utf8');
+      mongoDatabase = Buffer.from(req.authSecret.data.database || '', 'base64').toString('utf8');
+    } else {
+      // Fallback defaults
+      mongoUsername = 'nsuser';
+      mongoPassword = '';
+      mongoDatabase = req.databaseName || `ns_${tenantId.replace(/-/g, '_')}`;
+    }
     
     // Build MongoDB connection string (localhost since co-located)
     const mongoConnection = `mongodb://${mongoUsername}:${mongoPassword}@localhost:27017/${mongoDatabase}?authSource=${mongoDatabase}`;
