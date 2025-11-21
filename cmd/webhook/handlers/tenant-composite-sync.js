@@ -272,12 +272,21 @@ function createTenantCompositeSync(config) {
     console.log(`Stage 3b: Detecting compute activation for ${tenantId}`);
     console.log(`  Selector: ${JSON.stringify(selector)}`);
     
+    // Preserve existing Error phase (don't override)
+    const currentPhase = res.status.phase;
+    const inErrorState = currentPhase === 'Error';
+    
     // No selector means no compute activation
     if (Object.keys(selector).length === 0) {
       console.log(`  No selector configured - compute disabled`);
       req.computeEnabled = false;
       req.computeConfigMap = null;
-      res.status.phase = 'Provisioned';
+      
+      // Only set phase if not already in Error state
+      if (!inErrorState) {
+        res.status.phase = 'Provisioned';
+      }
+      
       res.status.conditions.push({
         type: 'ComputeActivated',
         status: 'False',
@@ -288,12 +297,20 @@ function createTenantCompositeSync(config) {
     }
     
     // Look for ConfigMap matching selector in related resources
+    // Handle both array and object map formats
     const configMaps = req.related['configmaps.v1'];
     let matchingConfigMap = null;
     
-    if (Array.isArray(configMaps) && configMaps.length > 0) {
-      // Find first ConfigMap matching all selector labels
+    if (Array.isArray(configMaps)) {
+      // Array format
       matchingConfigMap = configMaps.find(cm => {
+        const labels = cm.metadata?.labels || {};
+        return Object.entries(selector).every(([key, value]) => labels[key] === value);
+      });
+    } else if (configMaps && typeof configMaps === 'object') {
+      // Object map format
+      const configMapArray = Object.values(configMaps);
+      matchingConfigMap = configMapArray.find(cm => {
         const labels = cm.metadata?.labels || {};
         return Object.entries(selector).every(([key, value]) => labels[key] === value);
       });
@@ -304,6 +321,7 @@ function createTenantCompositeSync(config) {
       req.computeEnabled = true;
       req.computeConfigMap = matchingConfigMap;
       // Status phase will be set later based on ReplicaSet readiness
+      // Don't override Error phase
       res.status.conditions.push({
         type: 'ComputeActivated',
         status: 'True',
@@ -314,7 +332,12 @@ function createTenantCompositeSync(config) {
       console.log(`  No matching ConfigMap found - compute disabled`);
       req.computeEnabled = false;
       req.computeConfigMap = null;
-      res.status.phase = 'Provisioned';
+      
+      // Only set phase if not already in Error state
+      if (!inErrorState) {
+        res.status.phase = 'Provisioned';
+      }
+      
       res.status.conditions.push({
         type: 'ComputeActivated',
         status: 'False',
@@ -341,6 +364,12 @@ function createTenantCompositeSync(config) {
     // Skip if compute not activated
     if (!req.computeEnabled) {
       console.log(`  Compute not activated - skipping Nightscout secret`);
+      return next();
+    }
+    
+    // Guard: Skip if authSecret is missing (Error state from ensureMongoAuthSecret)
+    if (!req.authSecret) {
+      console.log(`  Auth secret missing - skipping Nightscout secret (Error state)`);
       return next();
     }
     
