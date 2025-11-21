@@ -356,9 +356,10 @@
       resyncPeriodSeconds=resyncPeriodSeconds,
     ),
 
-  // Tenant Composite Controller (NightscoutTenant CRD → Pod + Secrets + Init Job)
-  // Gen 5 architecture: Interstitial StatefulSet pattern (init phase only)
-  // Steady state: Direct Pod management with co-located MongoDB + Nightscout
+  // Tenant Composite Controller (NightscoutTenant CRD → ReplicaSet + Secrets + Init Job)
+  // Gen 5 architecture: Two-phase provisioning with ConfigMap-based compute activation
+  // Storage: Provisioner creates PVC + mongo-auth secret (outside Metacontroller)
+  // Compute: Controller renders ReplicaSet when ConfigMap exists
   tenantComposite(
     webhookServiceUrl='http://webhook-service:3000',
     crdGroup='nightscout.io',
@@ -368,6 +369,7 @@
     $.compositeController(
       name='tenant-composite',
       syncUrl=webhookServiceUrl + '/composite/tenant/sync',
+      customizeUrl=webhookServiceUrl + '/composite/tenant/customize',
       generateSelector=false,
       parentResource={
         apiVersion: crdGroup + '/' + crdVersion,
@@ -377,37 +379,25 @@
         }
       },
       childResources=[
-        // Initialization phase: StatefulSet with co-located containers
-        { apiVersion: 'apps/v1', resource: 'statefulsets',
+        // Steady state: ReplicaSet with co-located containers (no interstitial StatefulSet)
+        { apiVersion: 'apps/v1', resource: 'replicasets',
           updateStrategy: {
             method: 'InPlace'
           }
         },
-        // Steady state: Direct Pod (replaces StatefulSet after init)
-        { apiVersion: 'v1', resource: 'pods' },
-        // Secrets for MongoDB credentials and keyfile
+        // Secrets for MongoDB keyfile and Nightscout config
         { apiVersion: 'v1', resource: 'secrets' },
-        // Init Job for replica set setup
+        // Init Job for replica set + user creation
         { apiVersion: 'batch/v1', resource: 'jobs' },
-        // Optional: CDC resources
-        // { apiVersion: 'kafka.strimzi.io/v1beta2', resource: 'kafkatopics' },
-        // { apiVersion: 'kafka.strimzi.io/v1beta2', resource: 'kafkaconnectors' },
       ],
       relatedResources=[
-        // PVCs created by StatefulSet volumeClaimTemplates (not owned, label-selected)
+        // PVCs created by provisioner (not owned, referenced by name in spec)
         {
           apiVersion: 'v1',
           resource: 'persistentvolumeclaims',
-          labelSelector: {
-            matchExpressions: [
-              {
-                key: 'app.kubernetes.io/instance',
-                operator: 'In',
-                values: ['${parent.metadata.name}'],
-              },
-            ],
-          },
         },
+        // ConfigMaps signal compute activation (not owned, fetched via customize hook)
+        // Dynamically fetched by selector in customize hook
       ],
       resyncPeriodSeconds=resyncPeriodSeconds,
     ),

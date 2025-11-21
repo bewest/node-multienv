@@ -8,6 +8,7 @@ const createStorageCompositeCustomize = require('./handlers/storage-composite-cu
 const createComputeCompositeSync = require('./handlers/compute-composite-sync');
 const createComputeCompositeCustomize = require('./handlers/compute-composite-customize');
 const createTenantCompositeSync = require('./handlers/tenant-composite-sync');
+const createTenantCompositeCustomize = require('./handlers/tenant-composite-customize');
 const createDecoratorSync = require('./handlers/decorator-sync');
 const createDecoratorFinalize = require('./handlers/decorator-finalize');
 const { createStorageCredentialsDecoratorSync } = require('./handlers/storage-credentials-decorator-sync');
@@ -21,6 +22,7 @@ const storageCompositeCustomize = createStorageCompositeCustomize(config);
 const computeCompositeSync = createComputeCompositeSync(config);
 const computeCompositeCustomize = createComputeCompositeCustomize(config);
 const tenantCompositeSync = createTenantCompositeSync(config);
+const tenantCompositeCustomize = createTenantCompositeCustomize(config);
 const decoratorSync = createDecoratorSync(config);
 const decoratorFinalize = createDecoratorFinalize(config);
 const { sync: storageCredentialsDecoratorSync, customize: storageCredentialsDecoratorCustomize } = createStorageCredentialsDecoratorSync(config);
@@ -61,9 +63,10 @@ server.post('/composite/storage/sync', storageCompositeSync);
 server.post('/composite/compute/customize', computeCompositeCustomize);
 server.post('/composite/compute/sync', computeCompositeSync);
 
-// Gen 5: Tenant Composite (Unified architecture)
-// Tenant composite: NightscoutTenant CRD → Pod (co-located MongoDB + Nightscout)
-// Uses interstitial StatefulSet pattern for initialization
+// Gen 5: Tenant Composite (Two-phase provisioning architecture)
+// Tenant composite: NightscoutTenant CRD → ReplicaSet (co-located MongoDB + Nightscout)
+// ConfigMap signals compute activation, PVC/mongo-auth owned by provisioner
+server.post('/composite/tenant/customize', tenantCompositeCustomize);
 server.post('/composite/tenant/sync', tenantCompositeSync);
 
 // Decorator: PVC backup policy enforcement
@@ -95,7 +98,8 @@ server.listen(port, '0.0.0.0', () => {
   console.log(`  POST /composite/storage/sync - Gen4: StorageAccount → MongoDB + Migration`);
   console.log(`  POST /composite/compute/customize - Gen4: Compute: Related resource discovery`);
   console.log(`  POST /composite/compute/sync - Gen4: ComputeInstance → Nightscout + CDC`);
-  console.log(`  POST /composite/tenant/sync - Gen5: NightscoutTenant → Pod (co-located)`);
+  console.log(`  POST /composite/tenant/customize - Gen5: NightscoutTenant: ConfigMap discovery`);
+  console.log(`  POST /composite/tenant/sync - Gen5: NightscoutTenant → ReplicaSet (co-located)`);
   console.log(`  POST /decorator/sync - PVC backup policy`);
   console.log(`  POST /decorator/finalize - PVC cleanup`);
   console.log(`  POST /decorator/storage-credentials/sync - Credentials: ComputeInstance → App Creds + User Init`);
