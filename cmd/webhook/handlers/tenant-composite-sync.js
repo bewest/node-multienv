@@ -576,106 +576,130 @@ function createTenantCompositeSync(config) {
   }
   
   /**
-   * Stage 5: Render children based on phase
+   * Stage 5: Render children based on compute activation and storage state
+   * Gen5: Conditional rendering based on ConfigMap presence and PVC availability
    */
   function renderChildren(req, res, next) {
     const tenantId = req.tenantId;
     const spec = req.spec;
     
-    // Persist durable state conditions as soon as observed
-    // These survive resource garbage collection
+    console.log(`Stage 5: Rendering children for ${tenantId}`);
+    console.log(`  Compute enabled: ${req.computeEnabled}`);
+    console.log(`  PVC exists: ${req.pvcExists}`);
+    console.log(`  Auth secret exists: ${!!req.authSecret}`);
     
-    // Persist PVC bound state (write once, keep forever)
-    if (req.pvcJustBound) {
-      console.log(`  Persisting PVCBound condition (PVC just became bound)`);
+    // Storage-only mode (no ConfigMap or compute disabled)
+    if (!req.computeEnabled) {
+      console.log(`  Storage-only mode - no compute layer`);
+      
+      // Status already set to 'Provisioned' by detectComputeActivation
+      // or 'Error' by ensureMongoAuthSecret
+      
       res.status.conditions.push({
-        type: 'PVCBound',
-        status: 'True',
-        reason: 'PVCProvisioned',
-        message: `PVC ${req.pvcName} is bound and ready`
+        type: 'Ready',
+        status: 'False',
+        reason: 'ComputeNotActivated',
+        message: 'Storage provisioned but compute not activated (ConfigMap missing)'
       });
-    } else if (req.pvcBound) {
-      // Already persisted, re-write to maintain status
-      res.status.conditions.push({
-        type: 'PVCBound',
-        status: 'True',
-        reason: 'PVCProvisioned',
-        message: `PVC ${req.pvcName} is bound and ready`
-      });
+      
+      // Add status fields
+      res.status.databaseName = req.databaseName;
+      res.status.connectionSecret = req.authSecret?.metadata?.name;
+      res.status.observedGeneration = req.parent.metadata.generation;
+      
+      return next();
     }
     
-    // Persist replica set initialization (write once, keep forever)
-    if (req.jobJustSucceeded) {
-      console.log(`  Persisting ReplicaSetInitialized condition (Job just succeeded)`);
+    // Compute enabled but missing prerequisites (PVC or auth secret)
+    if (!req.pvcExists || !req.authSecret) {
+      console.log(`  Compute enabled but missing prerequisites`);
+      console.log(`    PVC exists: ${req.pvcExists}, Auth secret: ${!!req.authSecret}`);
+      
+      res.status.phase = 'Pending';
       res.status.conditions.push({
-        type: 'ReplicaSetInitialized',
-        status: 'True',
-        reason: 'InitJobSucceeded',
-        message: 'MongoDB replica set initialized successfully'
+        type: 'Ready',
+        status: 'False',
+        reason: 'MissingPrerequisites',
+        message: `Waiting for: ${!req.pvcExists ? 'PVC ' : ''}${!req.authSecret ? 'mongo-auth secret' : ''}`
       });
-    } else if (req.replicaSetInitialized) {
-      // Already persisted, re-write to maintain status
-      res.status.conditions.push({
-        type: 'ReplicaSetInitialized',
-        status: 'True',
-        reason: 'InitJobSucceeded',
-        message: 'MongoDB replica set initialized successfully'
-      });
+      
+      res.status.databaseName = req.databaseName;
+      res.status.connectionSecret = req.authSecret?.metadata?.name;
+      res.status.observedGeneration = req.parent.metadata.generation;
+      
+      return next();
     }
     
-    // Render children based on current phase
-    if (req.targetPhase === 'Initializing') {
-      // Initialization phase: render StatefulSet + Init Job
-      console.log(`  Rendering StatefulSet for initialization`);
-      
-      const statefulSet = renderStatefulSet(tenantId, req.namespace, spec, req.authSecret, req.keyfileSecret, req.nightscoutSecret, config);
-      res.children.push(statefulSet);
-      
-      // Only render init job if auth secret has credentials
-      if (req.authSecret && req.databaseName) {
-        const initJob = renderInitJob(tenantId, req.namespace, req.databaseName, req.authSecret, config);
-        res.children.push(initJob);
-      }
-      
+    // Check if ReplicaSet exists and is ready
+    const replicaSet = findResource(req.children['replicasets.v1.apps'], `${tenantId}-rs`, req.namespace);
+    const replicaSetReady = replicaSet?.status?.readyReplicas > 0;
+    
+    // Check init job completion
+    const initJob = findResource(req.children['jobs.v1.batch'], `${tenantId}-init-rs`, req.namespace);
+    const initJobSucceeded = initJob?.status?.succeeded > 0;
+    
+    console.log(`  ReplicaSet ready: ${replicaSetReady}, Init job succeeded: ${initJobSucceeded}`);
+    
+    // Render compute layer (ReplicaSet + optional init job)
+    console.log(`  Rendering compute layer (ReplicaSet)`);
+    
+    const replicaSetResource = renderReplicaSet(
+      tenantId, 
+      req.namespace, 
+      spec, 
+      req.authSecret, 
+      req.keyfileSecret, 
+      req.nightscoutSecret, 
+      config
+    );
+    res.children.push(replicaSetResource);
+    
+    // Render init job if not yet completed
+    if (!initJobSucceeded && req.databaseName) {
+      console.log(`  Rendering init job`);
+      const initJobResource = renderInitJob(
+        tenantId, 
+        req.namespace, 
+        req.databaseName, 
+        req.authSecret, 
+        config
+      );
+      res.children.push(initJobResource);
+    }
+    
+    // Set phase and conditions based on ReplicaSet readiness
+    if (replicaSetReady) {
+      res.status.phase = 'Running';
+      res.status.conditions.push({
+        type: 'Ready',
+        status: 'True',
+        reason: 'ReplicaSetReady',
+        message: 'Tenant is running with compute layer active'
+      });
+    } else {
       res.status.phase = 'Initializing';
       res.status.conditions.push({
         type: 'Ready',
         status: 'False',
         reason: 'Initializing',
-        message: 'StatefulSet and init Job created, waiting for replica set initialization'
-      });
-      
-    } else {
-      // Steady state: render direct Pod
-      console.log(`  Rendering direct Pod for steady state`);
-      
-      const pod = renderPod(tenantId, req.namespace, spec, req.pvcName, req.authSecret, req.keyfileSecret, req.nightscoutSecret, config);
-      res.children.push(pod);
-      
-      res.status.phase = 'Ready';
-      res.status.conditions.push({
-        type: 'Ready',
-        status: 'True',
-        reason: 'TenantReady',
-        message: 'Tenant pod is running'
-      });
-      
-      // Legacy condition for backward compatibility
-      res.status.conditions.push({
-        type: 'ReplicaSetReady',
-        status: 'True',
-        reason: 'ReplicaSetInitialized',
-        message: 'MongoDB replica set initialized'
+        message: 'ReplicaSet created, waiting for pod to be ready'
       });
     }
     
-    // Add PVC status for easier observability
-    if (req.pvcExists) {
-      res.status.pvcName = req.pvcName;
+    // Add init job status condition if relevant
+    if (initJobSucceeded) {
+      res.status.conditions.push({
+        type: 'ReplicaSetInitialized',
+        status: 'True',
+        reason: 'InitJobSucceeded',
+        message: 'MongoDB replica set initialized successfully'
+      });
     }
     
+    // Add status fields
     res.status.databaseName = req.databaseName;
     res.status.connectionSecret = req.authSecret?.metadata?.name;
+    res.status.pvcName = req.pvcName;
     res.status.observedGeneration = req.parent.metadata.generation;
     
     return next();
@@ -691,13 +715,24 @@ function createTenantCompositeSync(config) {
     });
   }
   
-  // Return middleware pipeline
+  // Return middleware pipeline (Gen5: two-phase provisioning)
+  // 1. Initialize context from webhook request
+  // 2. Ensure MongoDB keyfile Secret (child resource)
+  // 3. Read mongo-auth Secret from spec reference (provisioner-owned)
+  // 4. Set runtime-required annotation for Gen3/Gen4 compatibility
+  // 5. Detect compute activation via ConfigMap presence
+  // 6. Ensure Nightscout Secret (conditional on compute)
+  // 7. Assert PVC exists from spec reference
+  // 8. Render children (conditional compute layer)
+  // 9. Send response
   return [
     initializeContext,
     ensureMongoKeyfile,
     ensureMongoAuthSecret,
+    setRuntimeRequiredAnnotation,
+    detectComputeActivation,
     ensureNightscoutSecret,
-    detectPhase,
+    assertPVCExists,
     renderChildren,
     sendResponse
   ];
@@ -1079,10 +1114,207 @@ function renderPod(tenantId, namespace, spec, pvcName, authSecret, keyfileSecret
 }
 
 /**
- * Render Init Job for MongoDB replica set initialization
+ * Render ReplicaSet for compute layer (Gen5)
+ * Co-located MongoDB + Nightscout containers, references provisioner-created PVC
+ */
+function renderReplicaSet(tenantId, namespace, spec, authSecret, keyfileSecret, nightscoutSecret, config) {
+  const mongoVersion = spec.mongodbVersion || '7.0';
+  const mongoImage = spec.mongodbImage || `mongo:${mongoVersion}`;
+  const nightscoutImage = spec.nightscoutImage || 'nightscout/cgm-remote-monitor:latest';
+  
+  const mongoResources = spec.mongoResources || {};
+  const nsResources = spec.nightscoutResources || {};
+  const pvcName = spec.pvcName;
+  
+  const authSecretName = authSecret.metadata.name;
+  const keyfileSecretName = keyfileSecret.metadata.name;
+  const nightscoutSecretName = nightscoutSecret.metadata.name;
+  
+  // Build selector labels from spec.selector or use defaults
+  const selectorLabels = spec.selector && Object.keys(spec.selector).length > 0
+    ? spec.selector
+    : { 'app.kubernetes.io/instance': tenantId };
+  
+  return {
+    apiVersion: 'apps/v1',
+    kind: 'ReplicaSet',
+    metadata: {
+      name: `${tenantId}-rs`,
+      namespace: namespace,
+      labels: {
+        'app.kubernetes.io/name': 'nightscout-tenant',
+        'app.kubernetes.io/component': 'application',
+        'app.kubernetes.io/part-of': 'nightscout-tenant',
+        'app.kubernetes.io/instance': tenantId,
+        'app.kubernetes.io/managed-by': 'metacontroller',
+        'ns.mdn.io/tenant': tenantId,
+        ...selectorLabels
+      }
+    },
+    spec: {
+      replicas: 1,
+      selector: {
+        matchLabels: selectorLabels
+      },
+      template: {
+        metadata: {
+          labels: {
+            'app.kubernetes.io/name': 'nightscout-tenant',
+            'app.kubernetes.io/component': 'application',
+            'app.kubernetes.io/part-of': 'nightscout-tenant',
+            'app.kubernetes.io/instance': tenantId,
+            'ns.mdn.io/tenant': tenantId,
+            ...selectorLabels
+          }
+        },
+        spec: {
+          initContainers: [
+            {
+              name: 'prepare-keyfile',
+              image: config.images?.utility || 'busybox:latest',
+              command: ['sh', '-c', 'cp /keyfile-secret/keyfile /keyfile-prep/keyfile && chmod 400 /keyfile-prep/keyfile && chown 999:999 /keyfile-prep/keyfile'],
+              volumeMounts: [
+                {
+                  name: 'keyfile-secret',
+                  mountPath: '/keyfile-secret',
+                  readOnly: true
+                },
+                {
+                  name: 'keyfile-prep',
+                  mountPath: '/keyfile-prep'
+                }
+              ]
+            }
+          ],
+          containers: [
+            {
+              name: 'mongodb',
+              image: mongoImage,
+              ports: [
+                {
+                  name: 'mongodb',
+                  containerPort: 27017
+                }
+              ],
+              env: [
+                {
+                  name: 'MONGO_INITDB_ROOT_USERNAME',
+                  valueFrom: {
+                    secretKeyRef: {
+                      name: authSecretName,
+                      key: 'MONGO_INITDB_ROOT_USERNAME'
+                    }
+                  }
+                },
+                {
+                  name: 'MONGO_INITDB_ROOT_PASSWORD',
+                  valueFrom: {
+                    secretKeyRef: {
+                      name: authSecretName,
+                      key: 'MONGO_INITDB_ROOT_PASSWORD'
+                    }
+                  }
+                },
+                {
+                  name: 'MONGO_INITDB_DATABASE',
+                  valueFrom: {
+                    secretKeyRef: {
+                      name: authSecretName,
+                      key: 'MONGO_INITDB_DATABASE'
+                    }
+                  }
+                }
+              ],
+              args: [
+                '--bind_ip_all',
+                '--replSet', 'rs0',
+                '--keyFile', '/keyfile/keyfile'
+              ],
+              volumeMounts: [
+                {
+                  name: 'data',
+                  mountPath: '/data/db'
+                },
+                {
+                  name: 'keyfile-prep',
+                  mountPath: '/keyfile',
+                  readOnly: true
+                }
+              ],
+              resources: {
+                requests: mongoResources.requests || {
+                  cpu: '100m',
+                  memory: '256Mi'
+                },
+                limits: mongoResources.limits || {
+                  cpu: '500m',
+                  memory: '512Mi'
+                }
+              }
+            },
+            {
+              name: 'nightscout',
+              image: nightscoutImage,
+              ports: [
+                {
+                  name: 'http',
+                  containerPort: 1337
+                }
+              ],
+              envFrom: [
+                {
+                  secretRef: {
+                    name: nightscoutSecretName
+                  }
+                }
+              ],
+              env: spec.env || [],
+              resources: {
+                requests: nsResources.requests || {
+                  cpu: '100m',
+                  memory: '256Mi'
+                },
+                limits: nsResources.limits || {
+                  cpu: '1000m',
+                  memory: '1Gi'
+                }
+              }
+            }
+          ],
+          volumes: [
+            {
+              name: 'data',
+              persistentVolumeClaim: {
+                claimName: pvcName
+              }
+            },
+            {
+              name: 'keyfile-secret',
+              secret: {
+                secretName: keyfileSecretName,
+                defaultMode: 0o400
+              }
+            },
+            {
+              name: 'keyfile-prep',
+              emptyDir: {}
+            }
+          ]
+        }
+      }
+    }
+  };
+}
+
+/**
+ * Render Init Job for MongoDB replica set initialization (Gen5)
+ * Uses ns-utility container with bundled init scripts
  */
 function renderInitJob(tenantId, namespace, databaseName, authSecret, config) {
   const authSecretName = authSecret.metadata.name;
+  
+  // Build MongoDB URI for localhost connection (pod-local)
+  const mongoHost = 'localhost:27017';
   
   return {
     apiVersion: 'batch/v1',
@@ -1115,7 +1347,12 @@ function renderInitJob(tenantId, namespace, databaseName, authSecret, config) {
           containers: [
             {
               name: 'init-replica-set',
-              image: config.images?.mongoInit || 'mongo:7.0',
+              image: config.images?.nsUtility || 'nightscout/ns-utility:latest',
+              command: ['/bin/bash', '-c'],
+              args: [
+                // Run both init scripts sequentially
+                '/scripts/init-replica-set.sh && /scripts/create-mongodb-user.sh'
+              ],
               env: [
                 {
                   name: 'MONGO_INITDB_ROOT_USERNAME',
@@ -1165,45 +1402,19 @@ function renderInitJob(tenantId, namespace, databaseName, authSecret, config) {
                       key: 'database'
                     }
                   }
+                },
+                {
+                  name: 'MONGO_HOST',
+                  value: mongoHost
+                },
+                {
+                  name: 'REPLICA_SET_NAME',
+                  value: 'rs0'
+                },
+                {
+                  name: 'POD_NAME',
+                  value: `${tenantId}-rs-`  // ReplicaSet pod name prefix
                 }
-              ],
-              command: ['bash', '-c'],
-              args: [
-                `
-                set -e
-                
-                echo "Waiting for MongoDB to be ready..."
-                until mongosh --host ${tenantId}-0.${tenantId} --eval "db.adminCommand('ping')" > /dev/null 2>&1; do
-                  echo "MongoDB not ready, waiting..."
-                  sleep 2
-                done
-                
-                echo "Initializing replica set..."
-                mongosh --host ${tenantId}-0.${tenantId} --eval "
-                  rs.initiate({
-                    _id: 'rs0',
-                    members: [{ _id: 0, host: '${tenantId}-0.${tenantId}:27017' }]
-                  })
-                "
-                
-                echo "Waiting for replica set to be ready..."
-                sleep 5
-                
-                echo "Creating application user..."
-                mongosh "mongodb://\${MONGO_INITDB_ROOT_USERNAME}:\${MONGO_INITDB_ROOT_PASSWORD}@${tenantId}-0.${tenantId}:27017/admin?authSource=admin" --eval "
-                  use \${APP_DATABASE};
-                  db.createUser({
-                    user: '\${APP_USERNAME}',
-                    pwd: '\${APP_PASSWORD}',
-                    roles: [
-                      { role: 'readWrite', db: '\${APP_DATABASE}' },
-                      { role: 'dbAdmin', db: '\${APP_DATABASE}' }
-                    ]
-                  });
-                "
-                
-                echo "MongoDB initialization complete: replica set initialized and user created"
-                `
               ]
             }
           ]
