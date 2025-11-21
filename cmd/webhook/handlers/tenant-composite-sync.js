@@ -956,11 +956,40 @@ function renderInitJob(tenantId, namespace, databaseName, authSecret, config) {
                 {
                   name: 'MONGO_INITDB_DATABASE',
                   value: databaseName
+                },
+                {
+                  name: 'APP_USERNAME',
+                  valueFrom: {
+                    secretKeyRef: {
+                      name: authSecretName,
+                      key: 'username'
+                    }
+                  }
+                },
+                {
+                  name: 'APP_PASSWORD',
+                  valueFrom: {
+                    secretKeyRef: {
+                      name: authSecretName,
+                      key: 'password'
+                    }
+                  }
+                },
+                {
+                  name: 'APP_DATABASE',
+                  valueFrom: {
+                    secretKeyRef: {
+                      name: authSecretName,
+                      key: 'database'
+                    }
+                  }
                 }
               ],
               command: ['bash', '-c'],
               args: [
                 `
+                set -e
+                
                 echo "Waiting for MongoDB to be ready..."
                 until mongosh --host ${tenantId}-0.${tenantId} --eval "db.adminCommand('ping')" > /dev/null 2>&1; do
                   echo "MongoDB not ready, waiting..."
@@ -975,7 +1004,23 @@ function renderInitJob(tenantId, namespace, databaseName, authSecret, config) {
                   })
                 "
                 
-                echo "Replica set initialized successfully"
+                echo "Waiting for replica set to be ready..."
+                sleep 5
+                
+                echo "Creating application user..."
+                mongosh "mongodb://\${MONGO_INITDB_ROOT_USERNAME}:\${MONGO_INITDB_ROOT_PASSWORD}@${tenantId}-0.${tenantId}:27017/admin?authSource=admin" --eval "
+                  use \${APP_DATABASE};
+                  db.createUser({
+                    user: '\${APP_USERNAME}',
+                    pwd: '\${APP_PASSWORD}',
+                    roles: [
+                      { role: 'readWrite', db: '\${APP_DATABASE}' },
+                      { role: 'dbAdmin', db: '\${APP_DATABASE}' }
+                    ]
+                  });
+                "
+                
+                echo "MongoDB initialization complete: replica set initialized and user created"
                 `
               ]
             }
