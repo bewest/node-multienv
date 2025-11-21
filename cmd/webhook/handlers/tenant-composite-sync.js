@@ -430,7 +430,7 @@ function createTenantCompositeSync(config) {
       // Initialization phase: render StatefulSet + Init Job
       console.log(`  Rendering StatefulSet for initialization`);
       
-      const statefulSet = renderStatefulSet(tenantId, req.namespace, spec, req.authSecret, req.keyfileSecret, config);
+      const statefulSet = renderStatefulSet(tenantId, req.namespace, spec, req.authSecret, req.keyfileSecret, req.nightscoutSecret, config);
       res.children.push(statefulSet);
       
       // Only render init job if auth secret has credentials
@@ -451,7 +451,7 @@ function createTenantCompositeSync(config) {
       // Steady state: render direct Pod
       console.log(`  Rendering direct Pod for steady state`);
       
-      const pod = renderPod(tenantId, req.namespace, spec, req.pvcName, req.authSecret, req.keyfileSecret, config);
+      const pod = renderPod(tenantId, req.namespace, spec, req.pvcName, req.authSecret, req.keyfileSecret, req.nightscoutSecret, config);
       res.children.push(pod);
       
       res.status.phase = 'Ready';
@@ -509,7 +509,7 @@ function createTenantCompositeSync(config) {
  * Render StatefulSet for initialization phase
  * Co-located MongoDB + Nightscout containers
  */
-function renderStatefulSet(tenantId, namespace, spec, authSecret, keyfileSecret, config) {
+function renderStatefulSet(tenantId, namespace, spec, authSecret, keyfileSecret, nightscoutSecret, config) {
   const mongoVersion = spec.mongodbVersion || '7.0';
   const mongoImage = spec.mongodbImage || `mongo:${mongoVersion}`;
   const nightscoutImage = spec.nightscoutImage || 'nightscout/cgm-remote-monitor:latest';
@@ -522,6 +522,7 @@ function renderStatefulSet(tenantId, namespace, spec, authSecret, keyfileSecret,
   
   const authSecretName = authSecret.metadata.name;
   const keyfileSecretName = keyfileSecret.metadata.name;
+  const nightscoutSecretName = nightscoutSecret.metadata.name;
   
   return {
     apiVersion: 'apps/v1',
@@ -654,22 +655,14 @@ function renderStatefulSet(tenantId, namespace, spec, authSecret, keyfileSecret,
                   containerPort: 1337
                 }
               ],
-              env: [
+              envFrom: [
                 {
-                  name: 'MONGO_CONNECTION',
-                  value: `mongodb://localhost:27017`
-                },
-                {
-                  name: 'MONGODB_URI',
-                  valueFrom: {
-                    secretKeyRef: {
-                      name: authSecretName,
-                      key: 'database'
-                    }
+                  secretRef: {
+                    name: nightscoutSecretName
                   }
-                },
-                ...(spec.env || [])
+                }
               ],
+              env: spec.env || [],
               resources: {
                 requests: nsResources.requests || {
                   cpu: '100m',
@@ -732,7 +725,7 @@ function renderStatefulSet(tenantId, namespace, spec, authSecret, keyfileSecret,
  * Render direct Pod for steady state
  * Mounts existing PVC created by StatefulSet
  */
-function renderPod(tenantId, namespace, spec, pvcName, authSecret, keyfileSecret, config) {
+function renderPod(tenantId, namespace, spec, pvcName, authSecret, keyfileSecret, nightscoutSecret, config) {
   const mongoVersion = spec.mongodbVersion || '7.0';
   const mongoImage = spec.mongodbImage || `mongo:${mongoVersion}`;
   const nightscoutImage = spec.nightscoutImage || 'nightscout/cgm-remote-monitor:latest';
@@ -742,6 +735,7 @@ function renderPod(tenantId, namespace, spec, pvcName, authSecret, keyfileSecret
   
   const authSecretName = authSecret.metadata.name;
   const keyfileSecretName = keyfileSecret.metadata.name;
+  const nightscoutSecretName = nightscoutSecret.metadata.name;
   
   return {
     apiVersion: 'v1',
@@ -843,22 +837,14 @@ function renderPod(tenantId, namespace, spec, pvcName, authSecret, keyfileSecret
               containerPort: 1337
             }
           ],
-          env: [
+          envFrom: [
             {
-              name: 'MONGO_CONNECTION',
-              value: `mongodb://localhost:27017`
-            },
-            {
-              name: 'MONGODB_URI',
-              valueFrom: {
-                secretKeyRef: {
-                  name: authSecretName,
-                  key: 'database'
-                }
+              secretRef: {
+                name: nightscoutSecretName
               }
-            },
-            ...(spec.env || [])
+            }
           ],
+          env: spec.env || [],
           resources: {
             requests: nsResources.requests || {
               cpu: '100m',
