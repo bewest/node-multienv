@@ -176,79 +176,173 @@ function createTenantCompositeSync(config) {
   }
   
   /**
-   * Stage 3: Ensure MongoDB auth Secret exists
+   * Stage 3: Read MongoDB auth Secret from spec.mongoAuthSecretRef
+   * Gen5: Provisioner owns mongo-auth Secret (not controller)
    */
   function ensureMongoAuthSecret(req, res, next) {
     const tenantId = req.tenantId;
     const namespace = req.namespace;
-    const authSecretName = `${tenantId}-mongo-auth`;
+    const spec = req.spec;
     
-    // Check if auth Secret already exists (robust lookup with namespace)
-    const existingAuth = findResource(req.children['secrets.v1'], authSecretName, namespace) ||
-                        findResource(req.related['secrets.v1'], authSecretName, namespace);
-    
-    if (existingAuth) {
-      console.log(`  Auth Secret ${authSecretName} exists`);
-      req.authSecret = existingAuth;
-      req.databaseName = Buffer.from(existingAuth.data?.MONGO_INITDB_DATABASE || '', 'base64').toString('utf-8');
-      // CRITICAL: Clean and add to res.children to keep it in desired state
-      res.children.push(cleanResource(existingAuth));
+    // Resolve mongo-auth Secret from spec reference
+    const mongoAuthSecretRef = spec.mongoAuthSecretRef;
+    if (!mongoAuthSecretRef || !mongoAuthSecretRef.name) {
+      console.error(`  ERROR: spec.mongoAuthSecretRef.name not provided for ${tenantId}`);
+      res.status.phase = 'Error';
+      res.status.conditions.push({
+        type: 'MongoAuthSecretResolved',
+        status: 'False',
+        reason: 'MissingReference',
+        message: 'spec.mongoAuthSecretRef.name is required but not provided'
+      });
+      req.authSecret = null;
       return next();
     }
     
-    // Generate new auth Secret
-    console.log(`  Generating auth Secret for ${tenantId}`);
-    const username = 'nsuser';
-    const password = crypto.randomBytes(32).toString('hex');
-    const databaseName = `ns_${tenantId.replace(/-/g, '_')}`;
+    const authSecretName = mongoAuthSecretRef.name;
+    console.log(`  Looking up mongo-auth Secret: ${authSecretName}`);
     
-    const authSecret = {
-      apiVersion: 'v1',
-      kind: 'Secret',
-      type: 'Opaque',
-      metadata: {
-        name: authSecretName,
-        namespace: namespace,
-        labels: {
-          'app.kubernetes.io/name': 'mongodb-auth',
-          'app.kubernetes.io/component': 'database',
-          'app.kubernetes.io/part-of': 'nightscout-tenant',
-          'app.kubernetes.io/instance': tenantId,
-          'app.kubernetes.io/managed-by': 'metacontroller',
-          'ns.mdn.io/tenant': tenantId
-        },
-        annotations: {
-          'ns.mdn.io/created-at': new Date().toISOString()
-        }
-      },
-      stringData: {
-        MONGO_INITDB_ROOT_USERNAME: 'root',
-        MONGO_INITDB_ROOT_PASSWORD: password,
-        MONGO_INITDB_DATABASE: databaseName,
-        username: username,
-        password: password,
-        database: databaseName
-      }
-    };
+    // Find Secret in related resources (provisioner-owned, not a child)
+    const existingAuth = findResource(req.related['secrets.v1'], authSecretName, namespace);
     
-    res.children.push(authSecret);
-    req.authSecret = authSecret;
-    req.databaseName = databaseName;
-    console.log(`  Added auth Secret to children`);
+    if (!existingAuth) {
+      console.error(`  ERROR: mongo-auth Secret ${authSecretName} not found in related resources`);
+      res.status.phase = 'Pending';
+      res.status.conditions.push({
+        type: 'MongoAuthSecretResolved',
+        status: 'False',
+        reason: 'SecretNotFound',
+        message: `mongo-auth Secret ${authSecretName} not found (provisioner must create it)`
+      });
+      req.authSecret = null;
+      return next();
+    }
+    
+    console.log(`  Found mongo-auth Secret ${authSecretName}`);
+    
+    // Hydrate derived values from Secret data (base64-encoded)
+    req.authSecret = existingAuth;
+    req.databaseName = Buffer.from(existingAuth.data?.MONGO_INITDB_DATABASE || '', 'base64').toString('utf-8') ||
+                      Buffer.from(existingAuth.data?.database || '', 'base64').toString('utf-8');
+    req.mongoUsername = Buffer.from(existingAuth.data?.username || '', 'base64').toString('utf-8');
+    req.mongoPassword = Buffer.from(existingAuth.data?.password || '', 'base64').toString('utf-8');
+    
+    console.log(`  Hydrated: database=${req.databaseName}, username=${req.mongoUsername}`);
+    
+    // DO NOT add to res.children (provisioner owns it, not Metacontroller)
+    
+    res.status.conditions.push({
+      type: 'MongoAuthSecretResolved',
+      status: 'True',
+      reason: 'SecretFound',
+      message: `mongo-auth Secret ${authSecretName} resolved successfully`
+    });
     
     return next();
   }
   
   /**
-   * Stage 3b: Ensure Nightscout application secret exists
+   * Stage 3a: Set runtime-required annotation from spec.initialStorageType
+   * Gen5: Enables Gen3/Gen4 migration compatibility
+   */
+  function setRuntimeRequiredAnnotation(req, res, next) {
+    const spec = req.spec;
+    const initialStorageType = spec.initialStorageType || 'shared';
+    
+    // Stamp annotation on parent CR for Gen3/Gen4 decorator compatibility
+    if (!res.annotations) {
+      res.annotations = {};
+    }
+    res.annotations['ns.mdn.io/runtime-required'] = initialStorageType;
+    
+    console.log(`  Set runtime-required annotation: ${initialStorageType}`);
+    
+    return next();
+  }
+  
+  /**
+   * Stage 3b: Detect compute activation via ConfigMap presence
+   * Gen5: ConfigMap signals compute layer should be rendered
+   */
+  function detectComputeActivation(req, res, next) {
+    const tenantId = req.tenantId;
+    const spec = req.spec;
+    const selector = spec.selector || {};
+    
+    console.log(`Stage 3b: Detecting compute activation for ${tenantId}`);
+    console.log(`  Selector: ${JSON.stringify(selector)}`);
+    
+    // No selector means no compute activation
+    if (Object.keys(selector).length === 0) {
+      console.log(`  No selector configured - compute disabled`);
+      req.computeEnabled = false;
+      req.computeConfigMap = null;
+      res.status.phase = 'Provisioned';
+      res.status.conditions.push({
+        type: 'ComputeActivated',
+        status: 'False',
+        reason: 'NoSelector',
+        message: 'No spec.selector configured (storage-only mode)'
+      });
+      return next();
+    }
+    
+    // Look for ConfigMap matching selector in related resources
+    const configMaps = req.related['configmaps.v1'];
+    let matchingConfigMap = null;
+    
+    if (Array.isArray(configMaps) && configMaps.length > 0) {
+      // Find first ConfigMap matching all selector labels
+      matchingConfigMap = configMaps.find(cm => {
+        const labels = cm.metadata?.labels || {};
+        return Object.entries(selector).every(([key, value]) => labels[key] === value);
+      });
+    }
+    
+    if (matchingConfigMap) {
+      console.log(`  Found compute ConfigMap: ${matchingConfigMap.metadata.name}`);
+      req.computeEnabled = true;
+      req.computeConfigMap = matchingConfigMap;
+      // Status phase will be set later based on ReplicaSet readiness
+      res.status.conditions.push({
+        type: 'ComputeActivated',
+        status: 'True',
+        reason: 'ConfigMapFound',
+        message: `ConfigMap ${matchingConfigMap.metadata.name} found (compute enabled)`
+      });
+    } else {
+      console.log(`  No matching ConfigMap found - compute disabled`);
+      req.computeEnabled = false;
+      req.computeConfigMap = null;
+      res.status.phase = 'Provisioned';
+      res.status.conditions.push({
+        type: 'ComputeActivated',
+        status: 'False',
+        reason: 'ConfigMapNotFound',
+        message: 'No ConfigMap matching spec.selector found (storage-only mode)'
+      });
+    }
+    
+    return next();
+  }
+  
+  /**
+   * Stage 3c: Ensure Nightscout application secret exists
    * Generates API_SECRET and MONGO_CONNECTION from MongoDB credentials
+   * Gen5: Only renders when compute is activated (ConfigMap present)
    */
   function ensureNightscoutSecret(req, res, next) {
     const tenantId = req.tenantId;
     const namespace = req.namespace;
     const nsSecretName = `${tenantId}-nightscout`;
     
-    console.log(`Stage 3b: Ensuring Nightscout secret ${nsSecretName}`);
+    console.log(`Stage 3c: Ensuring Nightscout secret ${nsSecretName}`);
+    
+    // Skip if compute not activated
+    if (!req.computeEnabled) {
+      console.log(`  Compute not activated - skipping Nightscout secret`);
+      return next();
+    }
     
     // Check if secret already exists
     const existingSecret = findResource(req.children['secrets.v1'], nsSecretName, namespace);
@@ -392,6 +486,61 @@ function createTenantCompositeSync(config) {
     } else {
       console.log(`  Phase: Initializing (waiting for: ${!pvcBoundDurable ? 'PVC' : ''} ${!replicaSetInitialized ? 'Job' : ''})`);
       req.targetPhase = 'Initializing';
+    }
+    
+    return next();
+  }
+  
+  /**
+   * Stage 4: Assert PVC exists before rendering compute layer
+   * Gen5: PVC is provisioner-owned (not a child)
+   */
+  function assertPVCExists(req, res, next) {
+    const spec = req.spec;
+    const pvcName = spec.pvcName;
+    
+    if (!pvcName) {
+      console.error(`  ERROR: spec.pvcName not provided`);
+      res.status.conditions.push({
+        type: 'PVCResolved',
+        status: 'False',
+        reason: 'MissingPVCReference',
+        message: 'spec.pvcName is required but not provided'
+      });
+      req.pvcExists = false;
+      return next();
+    }
+    
+    console.log(`  Checking PVC existence: ${pvcName}`);
+    
+    // Look for PVC in related resources
+    const pvc = findResource(req.related['persistentvolumeclaims.v1'], pvcName, req.namespace);
+    
+    if (!pvc) {
+      console.warn(`  WARNING: PVC ${pvcName} not found (provisioner must create it)`);
+      res.status.conditions.push({
+        type: 'PVCResolved',
+        status: 'False',
+        reason: 'PVCNotFound',
+        message: `PVC ${pvcName} not found (provisioner must create it)`
+      });
+      req.pvcExists = false;
+      req.pvcBound = false;
+    } else {
+      const pvcPhase = pvc.status?.phase;
+      const pvcBound = pvcPhase === 'Bound';
+      
+      console.log(`  PVC ${pvcName} found, phase: ${pvcPhase}`);
+      req.pvcExists = true;
+      req.pvcBound = pvcBound;
+      req.pvcName = pvcName;
+      
+      res.status.conditions.push({
+        type: 'PVCResolved',
+        status: 'True',
+        reason: 'PVCFound',
+        message: `PVC ${pvcName} found, phase: ${pvcPhase}`
+      });
     }
     
     return next();
