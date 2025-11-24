@@ -224,6 +224,9 @@ function createTenantInitializationDecoratorSync(config) {
     res.attachments.push(initJobResource);
     req.replicaSetInitialized = false;
     
+    // Request explicit requeue to ensure decorator re-runs when Job completes
+    res.resyncAfterSeconds = 15;
+    
     return next();
   }
   
@@ -282,6 +285,9 @@ function createTenantInitializationDecoratorSync(config) {
     
     res.attachments.push(createUserJobResource);
     
+    // Request explicit requeue to ensure decorator re-runs when Job completes
+    res.resyncAfterSeconds = 15;
+    
     return next();
   }
   
@@ -291,6 +297,7 @@ function createTenantInitializationDecoratorSync(config) {
   function formatResponse(req, res, next) {
     const hasAttachments = res.attachments.length > 0;
     const hasAnnotations = Object.keys(res.annotations).length > 0;
+    const hasResync = res.resyncAfterSeconds !== undefined;
     
     const response = {};
     
@@ -302,6 +309,11 @@ function createTenantInitializationDecoratorSync(config) {
     if (hasAnnotations) {
       response.annotations = res.annotations;
       console.log(`  Setting annotations: ${Object.keys(res.annotations).join(', ')}`);
+    }
+    
+    if (hasResync) {
+      response.resyncAfterSeconds = res.resyncAfterSeconds;
+      console.log(`  Requesting requeue after ${res.resyncAfterSeconds} seconds`);
     }
     
     // Always return response (may be empty object for no-op)
