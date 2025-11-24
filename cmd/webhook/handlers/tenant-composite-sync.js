@@ -10,15 +10,16 @@
  *   - mongo-auth Secret (referenced by spec.mongoAuthSecretRef)
  *   - NightscoutTenant CR (minimal spec with refs)
  * 
- * Phase 2 (ConfigMap signals compute):
- *   - Provisioner creates ConfigMap matching spec.selector
- *   - Controller detects ConfigMap and renders compute layer
+ * Phase 2 (ConfigMap activates compute):
+ *   Pattern A (Explicit Reference): spec.configMapRef provided
+ *     - Provisioner creates ConfigMap for migration/adoption
+ *     - Controller adopts existing ConfigMap (preserves name/namespace)
+ *   Pattern B (Default Creation): No spec.configMapRef
+ *     - Controller creates default ConfigMap with tenantId as name
+ *     - Uses Nightscout runtime defaults (DISPLAY_UNITS, CUSTOM_TITLE, etc.)
  * 
- * Children (Storage Only - No ConfigMap):
- *   - MongoDB Keyfile Secret
- *   - Init Replica Set Job (if needed)
- * 
- * Children (Storage + Compute - ConfigMap Present):
+ * Children (Storage + Compute - Always Rendered):
+ *   - ConfigMap (adopted from provisioner OR created with defaults)
  *   - ReplicaSet (replicas: 1, co-located MongoDB + Nightscout)
  *   - MongoDB Keyfile Secret
  *   - App-Credentials Secret (THE Nightscout app Secret with MongoDB credentials + runtime config)
@@ -27,7 +28,7 @@
  * Related (not owned):
  *   - PVC (created by provisioner, referenced in spec)
  *   - mongo-auth Secret (created by provisioner, referenced in spec)
- *   - ConfigMap (created by provisioner, fetched via customize hook)
+ *   - ConfigMap (optional - provisioner-managed for migration, referenced in spec.configMapRef)
  */
 
 const crypto = require('crypto');
@@ -36,7 +37,8 @@ const {
   generateSecurePassword, 
   generateUsername,
   generateAppCredentials,
-  renderAppCredentialsSecret
+  renderAppCredentialsSecret,
+  renderDefaultConfigMap
 } = require('./resources');
 
 function createTenantCompositeSync(config) {
@@ -285,90 +287,146 @@ function createTenantCompositeSync(config) {
   }
   
   /**
-   * Stage 3b: Detect compute activation via ConfigMap presence
-   * Gen5: ConfigMap signals compute layer should be rendered
+   * Stage 3b: Ensure ConfigMap exists (adopt from provisioner OR create with defaults)
+   * Gen5: ConfigMap activates compute layer
+   * 
+   * Pattern 1 (Explicit Reference): spec.configMapRef provided
+   *   - Provisioner creates ConfigMap for migration/adoption
+   *   - Controller adopts existing ConfigMap (preserves name/namespace)
+   * 
+   * Pattern 2 (Default Creation): No spec.configMapRef
+   *   - Controller creates default ConfigMap with tenantId as name
+   *   - Uses Nightscout runtime defaults (DISPLAY_UNITS, CUSTOM_TITLE, etc.)
    */
-  function detectComputeActivation(req, res, next) {
+  function ensureConfigMap(req, res, next) {
     const tenantId = req.tenantId;
+    const namespace = req.namespace;
     const spec = req.spec;
-    const selector = spec.selector || {};
+    const configMapRef = spec.configMapRef;
     
-    console.log(`Stage 3b: Detecting compute activation for ${tenantId}`);
-    console.log(`  Selector: ${JSON.stringify(selector)}`);
+    console.log(`Stage 3b: Ensuring ConfigMap for ${tenantId}`);
+    console.log(`  configMapRef: ${JSON.stringify(configMapRef)}`);
     
-    // Preserve existing Error phase (don't override)
-    const currentPhase = res.status.phase;
-    const inErrorState = currentPhase === 'Error';
-    
-    // No selector means no compute activation
-    if (Object.keys(selector).length === 0) {
-      console.log(`  No selector configured - compute disabled`);
-      req.computeEnabled = false;
-      req.computeConfigMap = null;
+    // Pattern 1: Explicit configMapRef - adopt provisioner-managed ConfigMap
+    if (configMapRef && configMapRef.name) {
+      const configMapName = configMapRef.name;
+      const configMapNamespace = configMapRef.namespace || namespace;
       
-      // Only set phase if not already in Error state
-      if (!inErrorState) {
-        res.status.phase = 'Provisioned';
+      console.log(`  Looking for referenced ConfigMap: ${configMapNamespace}/${configMapName}`);
+      
+      // Look for referenced ConfigMap in related resources
+      const existingConfigMap = findResource(
+        req.related['configmaps.v1'],
+        configMapName,
+        configMapNamespace
+      );
+      
+      if (existingConfigMap) {
+        console.log(`  Found existing ConfigMap - adopting for compute activation`);
+        
+        // Adopt existing ConfigMap (preserves name/namespace, adds management labels)
+        const adoptedConfigMap = cleanResource(existingConfigMap);
+        
+        // Add management labels
+        if (!adoptedConfigMap.metadata.labels) {
+          adoptedConfigMap.metadata.labels = {};
+        }
+        adoptedConfigMap.metadata.labels['app.kubernetes.io/managed-by'] = 'metacontroller';
+        adoptedConfigMap.metadata.labels['app.kubernetes.io/instance'] = tenantId;
+        
+        res.children.push(adoptedConfigMap);
+        req.computeEnabled = true;
+        req.computeConfigMap = adoptedConfigMap;
+        
+        res.status.conditions.push({
+          type: 'ComputeActivated',
+          status: 'True',
+          reason: 'ConfigMapAdopted',
+          message: `ConfigMap ${configMapNamespace}/${configMapName} adopted (compute enabled)`
+        });
+        
+        return next();
       }
       
-      res.status.conditions.push({
-        type: 'ComputeActivated',
-        status: 'False',
-        reason: 'NoSelector',
-        message: 'No spec.selector configured (storage-only mode)'
-      });
-      return next();
-    }
-    
-    // Look for ConfigMap matching selector in related resources
-    // Handle both array and object map formats
-    const configMaps = req.related['configmaps.v1'];
-    let matchingConfigMap = null;
-    
-    if (Array.isArray(configMaps)) {
-      // Array format
-      matchingConfigMap = configMaps.find(cm => {
-        const labels = cm.metadata?.labels || {};
-        return Object.entries(selector).every(([key, value]) => labels[key] === value);
-      });
-    } else if (configMaps && typeof configMaps === 'object') {
-      // Object map format
-      const configMapArray = Object.values(configMaps);
-      matchingConfigMap = configMapArray.find(cm => {
-        const labels = cm.metadata?.labels || {};
-        return Object.entries(selector).every(([key, value]) => labels[key] === value);
-      });
-    }
-    
-    if (matchingConfigMap) {
-      console.log(`  Found compute ConfigMap: ${matchingConfigMap.metadata.name}`);
-      req.computeEnabled = true;
-      req.computeConfigMap = matchingConfigMap;
-      // Status phase will be set later based on ReplicaSet readiness
-      // Don't override Error phase
-      res.status.conditions.push({
-        type: 'ComputeActivated',
-        status: 'True',
-        reason: 'ConfigMapFound',
-        message: `ConfigMap ${matchingConfigMap.metadata.name} found (compute enabled)`
-      });
-    } else {
-      console.log(`  No matching ConfigMap found - compute disabled`);
+      // Referenced ConfigMap not found - error state
+      console.log(`  ERROR: ConfigMap ${configMapNamespace}/${configMapName} not found`);
       req.computeEnabled = false;
       req.computeConfigMap = null;
-      
-      // Only set phase if not already in Error state
-      if (!inErrorState) {
-        res.status.phase = 'Provisioned';
-      }
+      res.status.phase = 'Error';
       
       res.status.conditions.push({
         type: 'ComputeActivated',
         status: 'False',
         reason: 'ConfigMapNotFound',
-        message: 'No ConfigMap matching spec.selector found (storage-only mode)'
+        message: `Referenced ConfigMap ${configMapNamespace}/${configMapName} not found`
       });
+      
+      return next();
     }
+    
+    // Pattern 2: No configMapRef - create default ConfigMap with tenantId as name
+    console.log(`  No configMapRef - creating default ConfigMap`);
+    const defaultConfigMapName = tenantId;
+    
+    // Check if default ConfigMap already exists in children (owned)
+    let existingDefaultConfigMap = findResource(
+      req.children['configmaps.v1'],
+      defaultConfigMapName,
+      namespace
+    );
+    
+    // Also check related resources (actual cluster state for first reconcile)
+    if (!existingDefaultConfigMap) {
+      existingDefaultConfigMap = findResource(
+        req.related['configmaps.v1'],
+        defaultConfigMapName,
+        namespace
+      );
+    }
+    
+    if (existingDefaultConfigMap) {
+      console.log(`  Found existing default ConfigMap - adopting`);
+      const cleaned = cleanResource(existingDefaultConfigMap);
+      
+      // Ensure management labels are present
+      if (!cleaned.metadata.labels) {
+        cleaned.metadata.labels = {};
+      }
+      cleaned.metadata.labels['app.kubernetes.io/managed-by'] = 'metacontroller';
+      cleaned.metadata.labels['app.kubernetes.io/instance'] = tenantId;
+      
+      res.children.push(cleaned);
+      req.computeEnabled = true;
+      req.computeConfigMap = cleaned;
+      
+      res.status.conditions.push({
+        type: 'ComputeActivated',
+        status: 'True',
+        reason: 'ConfigMapExists',
+        message: `Default ConfigMap ${defaultConfigMapName} exists (compute enabled)`
+      });
+      
+      return next();
+    }
+    
+    // Create new default ConfigMap with Nightscout runtime defaults
+    console.log(`  Creating new default ConfigMap with runtime defaults`);
+    const defaultConfigMap = renderDefaultConfigMap(
+      tenantId,
+      namespace,
+      req.parent.metadata.labels || {}
+    );
+    
+    res.children.push(defaultConfigMap);
+    req.computeEnabled = true;
+    req.computeConfigMap = defaultConfigMap;
+    
+    res.status.conditions.push({
+      type: 'ComputeActivated',
+      status: 'True',
+      reason: 'ConfigMapCreated',
+      message: `Default ConfigMap ${defaultConfigMapName} created (compute enabled)`
+    });
     
     return next();
   }
@@ -565,7 +623,7 @@ function createTenantCompositeSync(config) {
     if (!req.computeEnabled) {
       console.log(`  Storage-only mode - no compute layer`);
       
-      // Status already set to 'Provisioned' by detectComputeActivation
+      // Status already set to 'Provisioned' by ensureConfigMap
       // or 'Error' by ensureMongoAuthSecret
       
       res.status.conditions.push({
@@ -819,7 +877,7 @@ function createTenantCompositeSync(config) {
     ensureMongoKeyfile,
     ensureMongoAuthSecret,
     setRuntimeRequiredAnnotation,
-    detectComputeActivation,
+    ensureConfigMap,
     ensureAppCredentialsSecret,
     planUserDataMigration,
     assertPVCExists,
