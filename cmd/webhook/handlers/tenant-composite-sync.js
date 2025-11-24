@@ -248,14 +248,30 @@ function createTenantCompositeSync(config) {
   }
   
   /**
-   * Stage 3a: Set runtime-required annotation from spec.initialStorageType
-   * Gen5: Enables Gen3/Gen4 migration compatibility
+   * Stage 3a: Set runtime-required annotation and detect credential requirements
+   * Gen5: Standardized credential detection logic (shared with Gen4)
+   * 
+   * Credentials required when:
+   * 1. Storage type is 'dedicated' (from mongo-auth Secret annotation or spec)
+   * 2. Migration requested (nightscout.io/migrate-to-dedicated annotation)
    */
   function setRuntimeRequiredAnnotation(req, res, next) {
     const spec = req.spec;
     const initialStorageType = spec?.initialStorageType;
-    const currentValue = req.secret.metadata.annotations?.['ns.mdn.io/runtime-required'];
-    req.credentialsRequested = req.storageType == 'dedicated' || req.migrationRequested;
+    
+    // Check migration annotation on parent CR
+    req.migrationRequested = req.parent.metadata?.annotations?.['nightscout.io/migrate-to-dedicated'] === 'true';
+    
+    // Read runtime-required from mongo-auth Secret (set by provisioner or decorator)
+    const runtimeRequired = req.authSecret?.metadata?.annotations?.['ns.mdn.io/runtime-required'];
+    req.storageType = runtimeRequired || initialStorageType;
+    
+    // Standardized credential detection (matches Gen4 storage-credentials decorator)
+    req.credentialsRequested = req.storageType === 'dedicated' || req.migrationRequested;
+    
+    console.log(`  Migration requested: ${req.migrationRequested}`);
+    console.log(`  Storage type: ${req.storageType}`);
+    console.log(`  Credentials requested: ${req.credentialsRequested}`);
     
     // Stamp annotation on parent CR for Gen3/Gen4 decorator compatibility
     if (!res.annotations) {
