@@ -356,7 +356,38 @@
       resyncPeriodSeconds=resyncPeriodSeconds,
     ),
 
-  // Tenant Composite Controller (NightscoutTenant CRD → ReplicaSet + Secrets + Init Job)
+  // Tenant Initialization Decorator (Gen 5: Job Orchestration for NightscoutTenant)
+  // Watches NightscoutTenant CRs, renders init-replica-set and create-user Jobs as attachments
+  // Sets annotations for replica-set-initialized and user-initialized on parent CR
+  tenantInitializationDecorator(
+    webhookServiceUrl='http://webhook-service:3000',
+    crdGroup='nightscout.io',
+    crdVersion='v1alpha1',
+    resyncPeriodSeconds=30,
+  )::
+    $.decoratorController(
+      name='tenant-initialization-decorator',
+      webhookUrl=webhookServiceUrl + '/decorator/tenant-initialization/sync',
+      customizeUrl=webhookServiceUrl + '/decorator/tenant-initialization/customize',
+      resources=[
+        {
+          apiVersion: crdGroup + '/' + crdVersion,
+          resource: 'nightscouttenants',
+          labelSelector: {
+            matchExpressions: [
+              {
+                key: 'app.kubernetes.io/managed-by',
+                operator: 'In',
+                values: ['metacontroller', 'provisioner'],
+              },
+            ],
+          },
+        },
+      ],
+      resyncPeriodSeconds=resyncPeriodSeconds,
+    ),
+
+  // Tenant Composite Controller (NightscoutTenant CRD → ReplicaSet + Secrets)
   // Gen 5 architecture: Two-phase provisioning with ConfigMap-based compute activation
   // Storage: Provisioner creates PVC + mongo-auth secret (outside Metacontroller)
   // Compute: Controller renders ReplicaSet when ConfigMap exists

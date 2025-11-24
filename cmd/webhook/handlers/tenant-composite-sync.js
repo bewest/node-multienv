@@ -576,8 +576,10 @@ function createTenantCompositeSync(config) {
   }
   
   /**
-   * Stage 5: Render children based on compute activation and storage state
-   * Gen5: Conditional rendering based on ConfigMap presence and PVC availability
+   * Stage 5: Render children based on compute activation and initialization annotations
+   * Gen5 Decorator-Driven: Read annotations set by tenant-initialization-decorator
+   *   - ns.mdn.io/replica-set-initialized: Job orchestration complete
+   *   - ns.mdn.io/user-initialized: User creation complete
    */
   function renderChildren(req, res, next) {
     const tenantId = req.tenantId;
@@ -630,18 +632,53 @@ function createTenantCompositeSync(config) {
       return next();
     }
     
-    // Check if ReplicaSet exists and is ready
-    const replicaSet = findResource(req.children['replicasets.v1.apps'], `${tenantId}-rs`, req.namespace);
-    const replicaSetReady = replicaSet?.status?.readyReplicas > 0;
+    // Read initialization annotations from parent (set by decorator)
+    const annotations = req.parent.metadata?.annotations || {};
+    const replicaSetInitialized = annotations['ns.mdn.io/replica-set-initialized'];
+    const userInitialized = annotations['ns.mdn.io/user-initialized'];
     
-    // Check init job completion
-    const initJob = findResource(req.children['jobs.v1.batch'], `${tenantId}-init-rs`, req.namespace);
-    const initJobSucceeded = initJob?.status?.succeeded > 0;
+    console.log(`  Replica set initialized: ${replicaSetInitialized || 'no'}`);
+    console.log(`  User initialized: ${userInitialized || 'no'}`);
     
-    console.log(`  ReplicaSet ready: ${replicaSetReady}, Init job succeeded: ${initJobSucceeded}`);
+    // Compute enabled but initialization not complete (decorator Jobs still running)
+    if (!replicaSetInitialized || !userInitialized) {
+      console.log(`  Waiting for initialization Jobs (managed by decorator)`);
+      
+      res.status.phase = 'Initializing';
+      res.status.conditions.push({
+        type: 'Ready',
+        status: 'False',
+        reason: 'WaitingForInitialization',
+        message: `Waiting for: ${!replicaSetInitialized ? 'replica set init ' : ''}${!userInitialized ? 'user creation' : ''}`
+      });
+      
+      if (replicaSetInitialized) {
+        res.status.conditions.push({
+          type: 'ReplicaSetInitialized',
+          status: 'True',
+          reason: 'InitJobSucceeded',
+          message: `MongoDB replica set initialized at ${replicaSetInitialized}`
+        });
+      }
+      
+      if (userInitialized) {
+        res.status.conditions.push({
+          type: 'UserInitialized',
+          status: 'True',
+          reason: 'CreateUserJobSucceeded',
+          message: `MongoDB user created at ${userInitialized}`
+        });
+      }
+      
+      res.status.databaseName = req.databaseName;
+      res.status.connectionSecret = req.authSecret?.metadata?.name;
+      res.status.observedGeneration = req.parent.metadata.generation;
+      
+      return next();
+    }
     
-    // Render compute layer (ReplicaSet + optional init job)
-    console.log(`  Rendering compute layer (ReplicaSet)`);
+    // Prerequisites satisfied and initialization complete - render ReplicaSet
+    console.log(`  All prerequisites satisfied - rendering ReplicaSet`);
     
     const replicaSetResource = renderReplicaSet(
       tenantId, 
@@ -654,18 +691,11 @@ function createTenantCompositeSync(config) {
     );
     res.children.push(replicaSetResource);
     
-    // Render init job if not yet completed
-    if (!initJobSucceeded && req.databaseName) {
-      console.log(`  Rendering init job`);
-      const initJobResource = renderInitJob(
-        tenantId, 
-        req.namespace, 
-        req.databaseName, 
-        req.authSecret, 
-        config
-      );
-      res.children.push(initJobResource);
-    }
+    // Check if ReplicaSet is ready
+    const replicaSet = findResource(req.children['replicasets.v1.apps'], `${tenantId}-rs`, req.namespace);
+    const replicaSetReady = replicaSet?.status?.readyReplicas > 0;
+    
+    console.log(`  ReplicaSet ready: ${replicaSetReady}`);
     
     // Set phase and conditions based on ReplicaSet readiness
     if (replicaSetReady) {
@@ -681,20 +711,25 @@ function createTenantCompositeSync(config) {
       res.status.conditions.push({
         type: 'Ready',
         status: 'False',
-        reason: 'Initializing',
+        reason: 'WaitingForPods',
         message: 'ReplicaSet created, waiting for pod to be ready'
       });
     }
     
-    // Add init job status condition if relevant
-    if (initJobSucceeded) {
-      res.status.conditions.push({
-        type: 'ReplicaSetInitialized',
-        status: 'True',
-        reason: 'InitJobSucceeded',
-        message: 'MongoDB replica set initialized successfully'
-      });
-    }
+    // Add initialization completion conditions
+    res.status.conditions.push({
+      type: 'ReplicaSetInitialized',
+      status: 'True',
+      reason: 'InitJobSucceeded',
+      message: `MongoDB replica set initialized at ${replicaSetInitialized}`
+    });
+    
+    res.status.conditions.push({
+      type: 'UserInitialized',
+      status: 'True',
+      reason: 'CreateUserJobSucceeded',
+      message: `MongoDB user created at ${userInitialized}`
+    });
     
     // Add status fields
     res.status.databaseName = req.databaseName;
@@ -1298,124 +1333,6 @@ function renderReplicaSet(tenantId, namespace, spec, authSecret, keyfileSecret, 
             {
               name: 'keyfile-prep',
               emptyDir: {}
-            }
-          ]
-        }
-      }
-    }
-  };
-}
-
-/**
- * Render Init Job for MongoDB replica set initialization (Gen5)
- * Uses ns-utility container with bundled init scripts
- */
-function renderInitJob(tenantId, namespace, databaseName, authSecret, config) {
-  const authSecretName = authSecret.metadata.name;
-  
-  // Build MongoDB URI for localhost connection (pod-local)
-  const mongoHost = 'localhost:27017';
-  
-  return {
-    apiVersion: 'batch/v1',
-    kind: 'Job',
-    metadata: {
-      name: `${tenantId}-init-rs`,
-      namespace: namespace,
-      labels: {
-        'app.kubernetes.io/name': 'mongodb-init',
-        'app.kubernetes.io/component': 'database',
-        'app.kubernetes.io/part-of': 'nightscout-tenant',
-        'app.kubernetes.io/instance': tenantId,
-        'app.kubernetes.io/managed-by': 'metacontroller',
-        'ns.mdn.io/tenant': tenantId
-      }
-    },
-    spec: {
-      ttlSecondsAfterFinished: 86400, // 24 hours
-      backoffLimit: 3,
-      template: {
-        metadata: {
-          labels: {
-            'app.kubernetes.io/name': 'mongodb-init',
-            'app.kubernetes.io/component': 'database',
-            'ns.mdn.io/tenant': tenantId
-          }
-        },
-        spec: {
-          restartPolicy: 'OnFailure',
-          containers: [
-            {
-              name: 'init-replica-set',
-              image: config.images?.nsUtility || 'nightscout/ns-utility:latest',
-              command: ['/bin/bash', '-c'],
-              args: [
-                // Run both init scripts sequentially
-                '/scripts/init-replica-set.sh && /scripts/create-mongodb-user.sh'
-              ],
-              env: [
-                {
-                  name: 'MONGO_INITDB_ROOT_USERNAME',
-                  valueFrom: {
-                    secretKeyRef: {
-                      name: authSecretName,
-                      key: 'MONGO_INITDB_ROOT_USERNAME'
-                    }
-                  }
-                },
-                {
-                  name: 'MONGO_INITDB_ROOT_PASSWORD',
-                  valueFrom: {
-                    secretKeyRef: {
-                      name: authSecretName,
-                      key: 'MONGO_INITDB_ROOT_PASSWORD'
-                    }
-                  }
-                },
-                {
-                  name: 'MONGO_INITDB_DATABASE',
-                  value: databaseName
-                },
-                {
-                  name: 'APP_USERNAME',
-                  valueFrom: {
-                    secretKeyRef: {
-                      name: authSecretName,
-                      key: 'username'
-                    }
-                  }
-                },
-                {
-                  name: 'APP_PASSWORD',
-                  valueFrom: {
-                    secretKeyRef: {
-                      name: authSecretName,
-                      key: 'password'
-                    }
-                  }
-                },
-                {
-                  name: 'APP_DATABASE',
-                  valueFrom: {
-                    secretKeyRef: {
-                      name: authSecretName,
-                      key: 'database'
-                    }
-                  }
-                },
-                {
-                  name: 'MONGO_HOST',
-                  value: mongoHost
-                },
-                {
-                  name: 'REPLICA_SET_NAME',
-                  value: 'rs0'
-                },
-                {
-                  name: 'POD_NAME',
-                  value: `${tenantId}-rs-`  // ReplicaSet pod name prefix
-                }
-              ]
             }
           ]
         }

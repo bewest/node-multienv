@@ -14,6 +14,8 @@ const createDecoratorFinalize = require('./handlers/decorator-finalize');
 const { createStorageCredentialsDecoratorSync } = require('./handlers/storage-credentials-decorator-sync');
 const { createStorageInitializationDecoratorSync } = require('./handlers/storage-initialization-decorator-sync');
 const { createStorageInitializationDecoratorCustomize } = require('./handlers/storage-initialization-decorator-customize');
+const { createTenantInitializationDecoratorSync } = require('./handlers/tenant-initialization-decorator-sync');
+const { createTenantInitializationDecoratorCustomize } = require('./handlers/tenant-initialization-decorator-customize');
 const createInstanceUserdataDecorator = require('./handlers/instance-userdata-decorator');
 
 // Create handlers with config
@@ -28,6 +30,8 @@ const decoratorFinalize = createDecoratorFinalize(config);
 const { sync: storageCredentialsDecoratorSync, customize: storageCredentialsDecoratorCustomize } = createStorageCredentialsDecoratorSync(config);
 const storageInitializationDecoratorSync = createStorageInitializationDecoratorSync(config);
 const storageInitializationDecoratorCustomize = createStorageInitializationDecoratorCustomize(config);
+const tenantInitializationDecoratorSync = createTenantInitializationDecoratorSync(config);
+const tenantInitializationDecoratorCustomize = createTenantInitializationDecoratorCustomize(config);
 const instanceUserdataDecorator = createInstanceUserdataDecorator(config);
 const instanceUserdataDecoratorSync = instanceUserdataDecorator.sync;
 const instanceUserdataDecoratorCustomize = instanceUserdataDecorator.customize;
@@ -85,6 +89,10 @@ server.post('/decorator/storage-initialization/sync', ...storageInitializationDe
 server.post('/decorator/instance-userdata/customize', ...instanceUserdataDecoratorCustomize);
 server.post('/decorator/instance-userdata/sync', ...instanceUserdataDecoratorSync);
 
+// Decorator: Tenant initialization (Gen 5: Job orchestration for NightscoutTenant)
+server.post('/decorator/tenant-initialization/customize', tenantInitializationDecoratorCustomize);
+server.post('/decorator/tenant-initialization/sync', ...tenantInitializationDecoratorSync);
+
 server.get('/health', (req, res, next) => {
   res.send({ status: 'healthy', timestamp: new Date().toISOString() });
   return next();
@@ -92,14 +100,14 @@ server.get('/health', (req, res, next) => {
 
 server.listen(port, '0.0.0.0', () => {
   console.log(`Metacontroller webhook server listening on port ${port}`);
-  console.log(`Gen 4/5: Multi-Architecture Support (3 Composites + 4 Decorators)`);
+  console.log(`Gen 4/5: Multi-Architecture Support (3 Composites + 5 Decorators)`);
   console.log(`Endpoints:`);
   console.log(`  POST /composite/storage/customize - Gen4: Storage: Related resource discovery`);
   console.log(`  POST /composite/storage/sync - Gen4: StorageAccount → MongoDB + Migration`);
   console.log(`  POST /composite/compute/customize - Gen4: Compute: Related resource discovery`);
   console.log(`  POST /composite/compute/sync - Gen4: ComputeInstance → Nightscout + CDC`);
   console.log(`  POST /composite/tenant/customize - Gen5: NightscoutTenant: ConfigMap discovery`);
-  console.log(`  POST /composite/tenant/sync - Gen5: NightscoutTenant → ReplicaSet (co-located)`);
+  console.log(`  POST /composite/tenant/sync - Gen5: NightscoutTenant → ReplicaSet (infrastructure)`);
   console.log(`  POST /decorator/sync - PVC backup policy`);
   console.log(`  POST /decorator/finalize - PVC cleanup`);
   console.log(`  POST /decorator/storage-credentials/sync - Credentials: ComputeInstance → App Creds + User Init`);
@@ -107,5 +115,7 @@ server.listen(port, '0.0.0.0', () => {
   console.log(`  POST /decorator/storage-initialization/sync - Initialization: Replica set init marker`);
   console.log(`  POST /decorator/instance-userdata/customize - ConfigMap migration: Related resource discovery`);
   console.log(`  POST /decorator/instance-userdata/sync - ConfigMap migration: Gen 3 → Gen 4 cutover`);
+  console.log(`  POST /decorator/tenant-initialization/customize - Tenant Init: Job orchestration discovery`);
+  console.log(`  POST /decorator/tenant-initialization/sync - Tenant Init: MongoDB Jobs (init-rs, create-user)`);
   console.log(`  GET  /health - Health check`);
 });
