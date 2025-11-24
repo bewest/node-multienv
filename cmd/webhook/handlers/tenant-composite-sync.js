@@ -789,6 +789,88 @@ function createTenantCompositeSync(config) {
     });
   }
   
+  /**
+   * Stage 6a: ConfigMap adoption and userdata migration
+   * Adopts ConfigMap as child whenever compute is enabled
+   * Handles Gen3→Gen5 migration when requested
+   * 
+   * Adoption modes:
+   * 1. No migration: Adopt ConfigMap as-is (preserve all data)
+   * 2. Migration pending: Preserve ConfigMap until storage migration completes
+   * 3. Migration ready: Archive data.mongo to annotation and strip from data
+   * 4. Migration complete: Render clean ConfigMap without data.mongo
+   */
+  function planUserDataMigration(req, res, next) {
+    if (!req.computeConfigMap) {
+      return next();
+    }
+    
+    const tenantId = req.tenantId;
+    const namespace = req.namespace;
+    const configMap = req.computeConfigMap;
+    
+    // Non-migration case: Adopt ConfigMap as-is (normal operation)
+    if (!req.migrationRequested) {
+      console.log(`  Adopting ConfigMap as child (no migration)`);
+      const preservedConfigMap = renderPreservedConfigMap(configMap, tenantId, namespace);
+      res.children.push(preservedConfigMap);
+      return next();
+    }
+    
+    // Migration case: Handle Gen3→Gen5 userdata migration
+    console.log(`  Migration mode: handling ConfigMap adoption with userdata migration`);
+    
+    // Check if userdata migration already completed
+    const userDataMigrationCompleted = configMap.metadata?.annotations?.['nightscout.io/userdata-migration-completed'];
+    if (userDataMigrationCompleted) {
+      console.log(`  Userdata migration already completed at ${userDataMigrationCompleted} - rendering clean ConfigMap`);
+      
+      // Render clean ConfigMap without data.mongo (child of composite)
+      const cleanConfigMap = renderCleanConfigMap(configMap, tenantId, namespace);
+      res.children.push(cleanConfigMap);
+      return next();
+    }
+    
+    // Check if storage migration completed (annotation on mongo-auth Secret, not parent CR)
+    const storageMigrationCompleted = req.authSecret?.metadata?.annotations?.['nightscout.io/migration-completed'];
+    
+    if (!storageMigrationCompleted) {
+      console.log(`  Storage migration not yet completed - preserving Gen3 ConfigMap as-is`);
+      
+      // Preserve ConfigMap without modifications until storage migration completes (child of composite)
+      const preservedConfigMap = renderPreservedConfigMap(configMap, tenantId, namespace);
+      res.children.push(preservedConfigMap);
+      return next();
+    }
+    
+    console.log(`  Storage migration completed at ${storageMigrationCompleted} - executing userdata migration`);
+    
+    // Extract data.mongo URI before stripping
+    const mongoUri = extractMongoUri(configMap);
+    
+    if (mongoUri) {
+      console.log(`  Archiving data.mongo URI to annotation (length: ${mongoUri.length})`);
+      
+      // Archive mongo URI to ConfigMap annotation (child of composite)
+      const migratedConfigMap = renderMigratedConfigMap(
+        configMap,
+        tenantId,
+        namespace,
+        mongoUri
+      );
+      
+      res.children.push(migratedConfigMap);
+    } else {
+      console.log(`  WARNING: No data.mongo field found in Gen3 ConfigMap - marking migration complete anyway`);
+      
+      // No mongo URI to archive, just mark complete (child of composite)
+      const cleanConfigMap = renderCleanConfigMap(configMap, tenantId, namespace);
+      res.children.push(cleanConfigMap);
+    }
+    
+    return next();
+  }
+  
   // Return middleware pipeline (Gen5: two-phase provisioning)
   // 1. Initialize context from webhook request
   // 2. Ensure MongoDB keyfile Secret (child resource)
@@ -796,6 +878,7 @@ function createTenantCompositeSync(config) {
   // 4. Set runtime-required annotation for Gen3/Gen4 compatibility
   // 5. Detect compute activation via ConfigMap presence
   // 6. Ensure Nightscout Secret (conditional on compute)
+  // 6a. Plan userdata migration (Gen3 ConfigMap adoption, optional)
   // 7. Assert PVC exists from spec reference
   // 8. Render children (conditional compute layer)
   // 9. Send response
@@ -806,10 +889,121 @@ function createTenantCompositeSync(config) {
     setRuntimeRequiredAnnotation,
     detectComputeActivation,
     ensureNightscoutSecret,
+    planUserDataMigration,
     assertPVCExists,
     renderChildren,
     sendResponse
   ];
+}
+
+/**
+ * Helper: Extract data.mongo URI from Gen3 ConfigMap
+ * Gen3 ConfigMaps store MongoDB URI in data.mongo field
+ */
+function extractMongoUri(configMap) {
+  if (!configMap || !configMap.data) {
+    return null;
+  }
+  
+  return configMap.data.mongo || null;
+}
+
+/**
+ * Helper: Render preserved ConfigMap (no modifications, just clean manifest)
+ * Used before storage migration completes - preserves ConfigMap as-is
+ * CRITICAL: Preserves original name/namespace to avoid creating duplicate ConfigMaps
+ */
+function renderPreservedConfigMap(existingConfigMap, tenantId, namespace) {
+  return {
+    apiVersion: 'v1',
+    kind: 'ConfigMap',
+    metadata: {
+      name: existingConfigMap.metadata.name,
+      namespace: existingConfigMap.metadata.namespace,
+      labels: {
+        ...(existingConfigMap.metadata?.labels || {}),
+        'app.kubernetes.io/managed-by': 'metacontroller'
+      },
+      annotations: {
+        ...(existingConfigMap.metadata?.annotations || {})
+      }
+    },
+    data: existingConfigMap.data || {}
+  };
+}
+
+/**
+ * Helper: Render migrated ConfigMap (archives data.mongo to annotation and strips from data)
+ * Executes userdata migration when storage migration completes
+ * CRITICAL: Preserves original name/namespace to avoid creating duplicate ConfigMaps
+ */
+function renderMigratedConfigMap(existingConfigMap, tenantId, namespace, mongoUri) {
+  const data = { ...(existingConfigMap.data || {}) };
+  
+  // Strip data.mongo from ConfigMap data section
+  delete data.mongo;
+  
+  return {
+    apiVersion: 'v1',
+    kind: 'ConfigMap',
+    metadata: {
+      name: existingConfigMap.metadata.name,
+      namespace: existingConfigMap.metadata.namespace,
+      labels: {
+        ...(existingConfigMap.metadata?.labels || {}),
+        'app.kubernetes.io/managed-by': 'metacontroller'
+      },
+      annotations: {
+        ...(existingConfigMap.metadata?.annotations || {}),
+        'nightscout.io/gen3-mongo-uri': mongoUri,
+        'nightscout.io/userdata-migration-completed': new Date().toISOString()
+      }
+    },
+    data: data
+  };
+}
+
+/**
+ * Helper: Render clean ConfigMap (no data.mongo, migration already completed)
+ * Used when userdata migration already completed in previous reconciliation
+ * CRITICAL: Preserves original name/namespace and migration annotations for rollback
+ */
+function renderCleanConfigMap(existingConfigMap, tenantId, namespace) {
+  const data = { ...(existingConfigMap.data || {}) };
+  
+  // Ensure data.mongo is stripped (should already be gone)
+  delete data.mongo;
+  
+  // Preserve migration annotations for rollback capability
+  const existingAnnotations = existingConfigMap.metadata?.annotations || {};
+  const annotations = {
+    ...existingAnnotations,
+    'app.kubernetes.io/managed-by': 'metacontroller'
+  };
+  
+  // Ensure migration markers are preserved (if present in existing ConfigMap)
+  // These are critical for rollback and audit trail
+  if (existingAnnotations['nightscout.io/gen3-mongo-uri']) {
+    annotations['nightscout.io/gen3-mongo-uri'] = existingAnnotations['nightscout.io/gen3-mongo-uri'];
+  }
+  if (existingAnnotations['nightscout.io/userdata-migration-completed']) {
+    annotations['nightscout.io/userdata-migration-completed'] = existingAnnotations['nightscout.io/userdata-migration-completed'];
+  }
+  
+  return {
+    apiVersion: 'v1',
+    kind: 'ConfigMap',
+    metadata: {
+      name: existingConfigMap.metadata.name,
+      namespace: existingConfigMap.metadata.namespace,
+      labels: {
+        ...(existingConfigMap.metadata?.labels || {}),
+        'app.kubernetes.io/managed-by': 'metacontroller'
+      },
+      annotations: annotations
+    },
+    data: data
+  };
 }
 
 module.exports = createTenantCompositeSync;

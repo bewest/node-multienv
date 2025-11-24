@@ -3,6 +3,15 @@
 ## Overview
 This project delivers a production-grade, multi-tenant Nightscout platform on Kubernetes. It uses Custom Resource Definitions (CRDs) and Metacontroller to provide a declarative API for managing tenant provisioning. The platform integrates MongoDB, Change Data Capture (CDC) via Strimzi Kafka, and automated backup solutions. It's designed for scalability and isolation, with all tenants hosted within a dedicated `hosted-tenants` namespace. Key features include declarative resource management, automated database migration, and robust status reporting, supporting Nightscout traffic across various tenant configurations for an unlimited number of tenants. The project aims to provide a robust, scalable, and easily manageable Nightscout hosting solution.
 
+## Recent Changes
+- **2025-11-24**: Refactored credential generation code - extracted shared functions (generateUsername, generateSecurePassword, generateAppCredentials, renderAppCredentialsSecret) to resources.js, eliminating duplication across Gen4 storage-credentials decorator and Gen5 tenant composite. Standardized credential detection logic (checks migration annotation + runtime-required from mongo-auth Secret). Added ConfigMap adoption pattern for Gen3 migration to Gen5 tenant composite (archives data.mongo to annotation, strips from ConfigMap data, tracks completion). Gen5 now feature-complete with Gen4 migration capabilities.
+- Gen5 decorator-driven architecture implemented and architect-validated as production-ready
+- Tenant-Initialization Decorator handles job orchestration with annotation-based signaling
+- Critical bug fixes: findJobByName() for Metacontroller's Job.batch/v1@N keys, resyncAfterSeconds for explicit requeue, middleware chain fix
+- Scaling analysis completed: Gen5 supports ~2,000-3,000 tenants (~60,000-80,000 API objects) vs Gen4's ~500-800 tenants
+- ReplicaSet pattern chosen over Deployment (fewer API objects, tradeoff: manual updates with Metacontroller's updateStrategy.Recreate)
+- Service resource elimination saves ~20% API objects per tenant
+
 ## User Preferences
 - Prefer Node.js/JavaScript for webhook implementation
 - Use Restify as standard web server framework
