@@ -33,6 +33,13 @@
 
 const crypto = require('crypto');
 const { ANNOTATIONS, LABELS, RESOURCE_TYPES } = require('./constants');
+const { 
+  generateSecurePassword, 
+  generateUsername, 
+  generateDatabaseName,
+  generateAppCredentials,
+  renderAppCredentialsSecret 
+} = require('./resources');
 
 /**
  * Create storage credentials decorator sync handler with pipeline pattern
@@ -507,37 +514,6 @@ function collectExistingAttachments(attachments) {
 }
 
 /**
- * Generate secure random password
- */
-function generateSecurePassword(length = 32) {
-  const charset = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.~';
-  const randomBytes = crypto.randomBytes(length);
-  let password = '';
-  
-  for (let i = 0; i < length; i++) {
-    password += charset[randomBytes[i] % charset.length];
-  }
-  
-  return password;
-}
-
-/**
- * Generate deterministic username from tenant ID
- */
-function generateUsername(tenantId, prefix = 'nsuser') {
-  const hash = crypto.createHash('sha256').update(tenantId).digest('hex').substring(0, 8);
-  return `${prefix}-${hash}`;
-}
-
-/**
- * Generate deterministic database name from storage account
- */
-function generateDatabaseName(storageAccount) {
-  const hash = crypto.createHash('sha256').update(storageAccount).digest('hex').substring(0, 6);
-  return `ns-${hash}`;
-}
-
-/**
  * Extract credentials from existing Secret
  * Decodes BASE64-encoded data fields to reconstruct credential object
  */
@@ -558,109 +534,6 @@ function extractCredentialsFromSecret(secret) {
   }
   
   return credentials;
-}
-
-/**
- * Generate app credentials object
- */
-function generateAppCredentials(tenantId, mongoHost, mongoPort, databaseName, username, password) {
-  const mongoUri = `mongodb://${username}:${password}@${mongoHost}:${mongoPort}/${databaseName}?authSource=${databaseName}`;
-  
-  return {
-    MONGO_USERNAME: username,
-    MONGO_PASSWORD: password,
-    MONGO_HOST: mongoHost,
-    MONGO_PORT: mongoPort,
-    MONGO_DATABASE: databaseName,
-    MONGODB_URI: mongoUri
-  };
-}
-
-/**
- * Render app-credentials Secret
- * @param {object} existingAnnotations - Annotations to preserve from existing Secret
-      const secret = renderAppCredentialsSecret(
-        req.tenantId,
-        req.namespace,
-        req.databaseName,
-        req.existingSecret,
-        req.computeInstance.metadata.labels
-      );
- */
-function renderAppCredentialsSecret(tenantId, namespace, databaseName, existingSecret, labels) {
-      
-  const secretName = `${tenantId}-app-credentials`;
-  var existingAnnotations = existingSecret?.metadata?.annotations || { };
-  var existingLabels = existingSecret?.metadata?.labels || { };
-
-  // Standard annotations that are always set
-  const standardAnnotations = {
-    'ns.mdn.io/created-at': new Date().toISOString(),
-    'ns.mdn.io/tenant': tenantId,
-    'ns.mdn.io/description': 'MongoDB credentials for Nightscout application pods',
-    [ANNOTATIONS.PROTECTED_RESOURCE]: 'true'
-  };
-  
-  // Merge existing annotations (lifecycle tracking) with standard annotations
-  // Existing annotations take precedence to preserve user-initialized state
-  const mergedAnnotations = {
-    ...standardAnnotations,
-    ...existingAnnotations
-  };
-
-  const mergedLabels = {
-    ...labels,
-    ...existingLabels
-  };
-
-  var secret = {
-    apiVersion: 'v1',
-    kind: 'Secret',
-    metadata: {
-      name: secretName,
-      namespace: namespace,
-      labels: {
-        ...mergedLabels,
-        'app.kubernetes.io/component': 'app-credentials',
-        'app.kubernetes.io/managed-by': 'metacontroller',
-        'ns.mdn.io/decorator': 'storage-credentials',
-        'ns.mdn.io/credential-type': 'application',
-        [LABELS.RESOURCE_TYPE]: RESOURCE_TYPES.APP_CREDENTIALS_SECRET
-      },
-      annotations: mergedAnnotations
-    },
-    type: 'Opaque',
-
-  };
-
-  if (existingSecret) {
-    secret.data = existingSecret.data;
-    secret.type = existingSecret.type;
-  } else {
-    console.log(`  FIRST CYCLE - GENERATING NEW APP CREDENTIALS`);
-    const username = generateUsername(tenantId);
-    const password = generateSecurePassword(16);
-    
-    const mongoHost = `mongo-${databaseName}`;
-    const mongoPort = '27017';
-    
-    const appCredentials = generateAppCredentials(
-      tenantId,
-      mongoHost,
-      mongoPort,
-      databaseName,
-      username,
-      password
-    );
-
-    // Encode all credential fields to base64
-    var encodedData = {};
-    Object.keys(appCredentials).forEach(key => {
-      encodedData[key] = Buffer.from(appCredentials[key]).toString('base64');
-    });
-    secret.data = encodedData;
-  }
-  return secret;
 }
 
 /**

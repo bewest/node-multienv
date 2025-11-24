@@ -871,10 +871,157 @@ function generatePassword() {
   return Math.random().toString(36).slice(-16) + Math.random().toString(36).slice(-16);
 }
 
+/**
+ * Shared Credential Generation Functions (Gen4 & Gen5)
+ * Used by storage-credentials decorator and tenant composite
+ */
+
+const crypto = require('crypto');
+const { ANNOTATIONS, LABELS, RESOURCE_TYPES } = require('./constants');
+
+/**
+ * Generate secure random password with URL-safe characters
+ */
+function generateSecurePassword(length = 32) {
+  const charset = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.~';
+  const randomBytes = crypto.randomBytes(length);
+  let password = '';
+  
+  for (let i = 0; i < length; i++) {
+    password += charset[randomBytes[i] % charset.length];
+  }
+  
+  return password;
+}
+
+/**
+ * Generate deterministic username from tenant ID
+ */
+function generateUsername(tenantId, prefix = 'nsuser') {
+  const hash = crypto.createHash('sha256').update(tenantId).digest('hex').substring(0, 8);
+  return `${prefix}-${hash}`;
+}
+
+/**
+ * Generate deterministic database name from storage account
+ */
+function generateDatabaseName(storageAccount) {
+  const hash = crypto.createHash('sha256').update(storageAccount).digest('hex').substring(0, 6);
+  return `ns-${hash}`;
+}
+
+/**
+ * Generate app credentials object with MongoDB connection details
+ */
+function generateAppCredentials(tenantId, mongoHost, mongoPort, databaseName, username, password) {
+  const mongoUri = `mongodb://${username}:${password}@${mongoHost}:${mongoPort}/${databaseName}?authSource=${databaseName}`;
+  
+  return {
+    MONGO_USERNAME: username,
+    MONGO_PASSWORD: password,
+    MONGO_HOST: mongoHost,
+    MONGO_PORT: mongoPort,
+    MONGO_DATABASE: databaseName,
+    MONGODB_URI: mongoUri
+  };
+}
+
+/**
+ * Render app-credentials Secret
+ * Shared between Gen4 storage-credentials decorator and Gen5 tenant composite
+ * 
+ * @param {string} tenantId - Tenant identifier
+ * @param {string} namespace - Kubernetes namespace
+ * @param {string} databaseName - MongoDB database name
+ * @param {object} existingSecret - Existing Secret to preserve (null for first cycle)
+ * @param {object} labels - Parent resource labels to merge
+ * @returns {object} Secret manifest
+ */
+function renderAppCredentialsSecret(tenantId, namespace, databaseName, existingSecret, labels) {
+  const secretName = `${tenantId}-app-credentials`;
+  const existingAnnotations = existingSecret?.metadata?.annotations || {};
+  const existingLabels = existingSecret?.metadata?.labels || {};
+
+  // Standard annotations that are always set
+  const standardAnnotations = {
+    'ns.mdn.io/created-at': new Date().toISOString(),
+    'ns.mdn.io/tenant': tenantId,
+    'ns.mdn.io/description': 'MongoDB credentials for Nightscout application pods',
+    [ANNOTATIONS.PROTECTED_RESOURCE]: 'true'
+  };
+  
+  // Merge existing annotations (lifecycle tracking) with standard annotations
+  // Existing annotations take precedence to preserve user-initialized state
+  const mergedAnnotations = {
+    ...standardAnnotations,
+    ...existingAnnotations
+  };
+
+  const mergedLabels = {
+    ...labels,
+    ...existingLabels
+  };
+
+  const secret = {
+    apiVersion: 'v1',
+    kind: 'Secret',
+    metadata: {
+      name: secretName,
+      namespace: namespace,
+      labels: {
+        ...mergedLabels,
+        'app.kubernetes.io/component': 'app-credentials',
+        'app.kubernetes.io/managed-by': 'metacontroller',
+        'ns.mdn.io/credential-type': 'application',
+        [LABELS.RESOURCE_TYPE]: RESOURCE_TYPES.APP_CREDENTIALS_SECRET
+      },
+      annotations: mergedAnnotations
+    },
+    type: 'Opaque'
+  };
+
+  if (existingSecret) {
+    // Preserve existing credentials
+    secret.data = existingSecret.data;
+    secret.type = existingSecret.type;
+  } else {
+    // First cycle - generate new credentials
+    console.log(`  Generating new app credentials for tenant: ${tenantId}`);
+    const username = generateUsername(tenantId);
+    const password = generateSecurePassword(16);
+    
+    const mongoHost = `mongo-${databaseName}`;
+    const mongoPort = '27017';
+    
+    const appCredentials = generateAppCredentials(
+      tenantId,
+      mongoHost,
+      mongoPort,
+      databaseName,
+      username,
+      password
+    );
+
+    // Encode all credential fields to base64
+    const encodedData = {};
+    Object.keys(appCredentials).forEach(key => {
+      encodedData[key] = Buffer.from(appCredentials[key]).toString('base64');
+    });
+    secret.data = encodedData;
+  }
+  
+  return secret;
+}
+
 module.exports = {
   renderMongoDB,
   renderNightscout,
   renderKafkaTopics,
   renderKafkaConnector,
-  renderInitMongoClusterJob
+  renderInitMongoClusterJob,
+  generateSecurePassword,
+  generateUsername,
+  generateDatabaseName,
+  generateAppCredentials,
+  renderAppCredentialsSecret
 };
