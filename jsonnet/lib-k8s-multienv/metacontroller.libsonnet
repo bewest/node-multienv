@@ -375,12 +375,22 @@
           resource: 'nightscouttenants',
           labelSelector: {
             matchExpressions: [
+              // Match tenants with ns.mdn.io/storage label (set by provisioner)
               {
-                key: 'app.kubernetes.io/managed-by',
-                operator: 'In',
-                values: ['metacontroller', 'provisioner'],
+                key: 'ns.mdn.io/storage',
+                operator: 'Exists',
               },
             ],
+          },
+        },
+      ],
+      // Jobs are rendered as attachments by the decorator (init-rs, create-user)
+      attachments=[
+        {
+          apiVersion: 'batch/v1',
+          resource: 'jobs',
+          updateStrategy: {
+            method: 'InPlace',
           },
         },
       ],
@@ -418,17 +428,21 @@
         },
         // Secrets for MongoDB keyfile and Nightscout config
         { apiVersion: 'v1', resource: 'secrets' },
-        // Init Job for replica set + user creation
-        { apiVersion: 'batch/v1', resource: 'jobs' },
+        // ConfigMaps for tenant settings (adopted from provisioner via spec.configMapRef)
+        { apiVersion: 'v1', resource: 'configmaps' },
+        // Note: Jobs managed by tenant-initialization-decorator (not this composite)
       ],
       relatedResources=[
-        // PVCs created by provisioner (not owned, referenced by name in spec)
+        // PVCs created by provisioner (not owned, discovered via customize hook)
         {
           apiVersion: 'v1',
           resource: 'persistentvolumeclaims',
         },
-        // ConfigMaps signal compute activation (not owned, fetched via customize hook)
-        // Dynamically fetched by selector in customize hook
+        // ConfigMaps signal compute activation (fetched via customize hook using spec.configMapRef)
+        {
+          apiVersion: 'v1',
+          resource: 'configmaps',
+        },
       ],
       resyncPeriodSeconds=resyncPeriodSeconds,
     ),
@@ -485,6 +499,12 @@
       crdGroup=crdGroup,
       crdVersion=crdVersion,
       resyncPeriodSeconds=userdataResyncSeconds,
+    ),
+    tenantInitialization: $.tenantInitializationDecorator(
+      webhookServiceUrl=webhookServiceUrl,
+      crdGroup=crdGroup,
+      crdVersion=crdVersion,
+      resyncPeriodSeconds=initializationResyncSeconds,
     ),
   },
 

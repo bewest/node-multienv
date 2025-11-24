@@ -3,9 +3,14 @@
  * 
  * Orchestrates MongoDB initialization Jobs for NightscoutTenant CRs
  * 
+ * Identity Field Pattern:
+ * - resourceName (CR name): Used for Job naming prefixes (DNS-safe)
+ * - spec.storage: Required, used for ns.mdn.io/storage label on all Jobs
+ * - spec.tenant: Optional, used for ns.mdn.io/tenant label when set
+ * 
  * Target: NightscoutTenant CRD
  * Related Resources:
- *   - ConfigMap (to detect compute activation via spec.selector)
+ *   - ConfigMap (to detect compute activation via spec.configMapRef)
  *   - Jobs (init-replica-set, create-user) for tracking completion
  *   - mongo-auth Secret (for Job credential injection)
  * 
@@ -72,6 +77,23 @@ function createTenantInitializationDecoratorSync(config) {
   }
   
   /**
+   * Helper: Build identity labels for child resources
+   * - ns.mdn.io/storage: Always included (from spec.storage)
+   * - ns.mdn.io/tenant: Only included when spec.tenant is explicitly set
+   */
+  function buildIdentityLabels(req) {
+    const labels = {
+      'ns.mdn.io/storage': req.storageId
+    };
+    
+    if (req.tenantSet && req.tenantId) {
+      labels['ns.mdn.io/tenant'] = req.tenantId;
+    }
+    
+    return labels;
+  }
+  
+  /**
    * Stage 1: Initialize context and response containers
    */
   function initialize(req, res, next) {
@@ -79,49 +101,66 @@ function createTenantInitializationDecoratorSync(config) {
     
     req.tenant = tenant;
     req.related = related || {};
-    req.tenantId = tenant.metadata.name;
     req.namespace = tenant.metadata.namespace;
     req.spec = tenant.spec || {};
-    req.selector = req.spec.selector || {};
+    
+    // Identity field extraction (matching composite controller pattern)
+    req.resourceName = tenant.metadata.name;  // Used for resource naming
+    req.storageId = req.spec.storage;          // Used for ns.mdn.io/storage label
+    req.tenantId = req.spec.tenant;            // Used for ns.mdn.io/tenant label (when set)
+    req.tenantSet = !!req.spec.tenant;         // Track if tenant ID was explicitly set
+    
+    // ConfigMap ref for compute activation
+    req.configMapRef = req.spec.configMapRef;
     
     // Response containers
     res.attachments = [];
     res.annotations = {};
     
-    console.log(`Tenant Init Decorator: ${req.tenantId}`);
+    console.log(`Tenant Init Decorator: ${req.resourceName}`);
     console.log(`  Namespace: ${req.namespace}`);
-    console.log(`  Selector: ${JSON.stringify(req.selector)}`);
+    console.log(`  Storage ID: ${req.storageId}`);
+    console.log(`  Tenant ID: ${req.tenantId || '(not set)'} (explicit: ${req.tenantSet})`);
+    
+    // Validate required spec.storage field
+    if (!req.storageId) {
+      console.error(`  ERROR: spec.storage is required but not provided`);
+      res.send({ attachments: [] });
+      return; // Skip remaining middleware
+    }
     
     return next();
   }
   
   /**
    * Stage 2: Discover ConfigMap (compute activation signal)
-   * Sets req.computeActivated flag based on ConfigMap presence
+   * Sets req.computeActivated flag based on ConfigMap presence via spec.configMapRef
    */
   function discoverConfigMap(req, res, next) {
-    const selector = req.selector;
+    const configMapRef = req.configMapRef;
     
-    // No selector means no compute activation
-    if (Object.keys(selector).length === 0) {
-      console.log('  No selector - compute not activated');
+    // No configMapRef means no compute activation
+    if (!configMapRef || !configMapRef.name) {
+      console.log('  No configMapRef - compute not activated');
       req.computeActivated = false;
       return next();
     }
     
-    // Look for ConfigMap matching selector
+    // Look for ConfigMap by name
     const configMaps = req.related['ConfigMap.v1'] || {};
-    const matchingConfigMap = findResource(configMaps, cm => {
-      const labels = cm.metadata?.labels || {};
-      return Object.entries(selector).every(([key, value]) => labels[key] === value);
-    });
+    const refNamespace = configMapRef.namespace || req.namespace;
+    
+    const matchingConfigMap = findResource(configMaps, cm => 
+      cm.metadata?.name === configMapRef.name &&
+      cm.metadata?.namespace === refNamespace
+    );
     
     if (matchingConfigMap) {
       console.log(`  ConfigMap found: ${matchingConfigMap.metadata.name} - compute activated`);
       req.computeActivated = true;
       req.configMap = matchingConfigMap;
     } else {
-      console.log('  No matching ConfigMap - compute not activated');
+      console.log(`  ConfigMap ${configMapRef.name} not found - compute not activated`);
       req.computeActivated = false;
     }
     
@@ -191,8 +230,8 @@ function createTenantInitializationDecoratorSync(config) {
     }
     
     // Check if init Job already exists and succeeded
-    // Use helper to find Job across all related Job collections (Job.batch/v1@0, Job.batch/v1@1, etc.)
-    const initJobName = `${req.tenantId}-init-rs`;
+    // Use resourceName for Job naming (DNS-safe, stable)
+    const initJobName = `${req.resourceName}-init-rs`;
     const initJob = findJobByName(req.related, initJobName, req.namespace);
     
     if (initJob) {
@@ -213,11 +252,13 @@ function createTenantInitializationDecoratorSync(config) {
     
     // No Job exists yet - render it as attachment
     console.log('  Rendering init-replica-set Job');
+    const identityLabels = buildIdentityLabels(req);
     const initJobResource = renderInitReplicaSetJob_(
-      req.tenantId,
+      req.resourceName,
       req.namespace,
       req.databaseName,
       req.mongoAuthSecret,
+      identityLabels,
       config
     );
     
@@ -255,8 +296,8 @@ function createTenantInitializationDecoratorSync(config) {
     }
     
     // Check if create-user Job already exists and succeeded
-    // Use helper to find Job across all related Job collections (Job.batch/v1@0, Job.batch/v1@1, etc.)
-    const createUserJobName = `${req.tenantId}-create-user`;
+    // Use resourceName for Job naming (DNS-safe, stable)
+    const createUserJobName = `${req.resourceName}-create-user`;
     const createUserJob = findJobByName(req.related, createUserJobName, req.namespace);
     
     if (createUserJob) {
@@ -275,11 +316,13 @@ function createTenantInitializationDecoratorSync(config) {
     
     // No Job exists yet - render it as attachment
     console.log('  Rendering create-user Job');
+    const identityLabels = buildIdentityLabels(req);
     const createUserJobResource = renderCreateUserJob_(
-      req.tenantId,
+      req.resourceName,
       req.namespace,
       req.databaseName,
       req.mongoAuthSecret,
+      identityLabels,
       config
     );
     
@@ -337,8 +380,15 @@ function createTenantInitializationDecoratorSync(config) {
 /**
  * Render init-replica-set Job (Gen5)
  * Uses ns-utility container with bundled scripts
+ * 
+ * @param resourceName - CR name, used for Job naming prefix
+ * @param namespace - Target namespace
+ * @param databaseName - MongoDB database name
+ * @param authSecret - mongo-auth Secret for credentials
+ * @param identityLabels - Pre-built identity labels (ns.mdn.io/storage, ns.mdn.io/tenant)
+ * @param config - Controller configuration
  */
-function renderInitReplicaSetJob_(tenantId, namespace, databaseName, authSecret, config) {
+function renderInitReplicaSetJob_(resourceName, namespace, databaseName, authSecret, identityLabels, config) {
   const authSecretName = authSecret.metadata.name;
   const mongoHost = 'localhost:27017';  // Pod-local MongoDB
   
@@ -346,16 +396,16 @@ function renderInitReplicaSetJob_(tenantId, namespace, databaseName, authSecret,
     apiVersion: 'batch/v1',
     kind: 'Job',
     metadata: {
-      name: `${tenantId}-init-rs`,
+      name: `${resourceName}-init-rs`,
       namespace: namespace,
       labels: {
         'app.kubernetes.io/name': 'mongodb-init',
         'app.kubernetes.io/component': 'database',
         'app.kubernetes.io/part-of': 'nightscout-tenant',
-        'app.kubernetes.io/instance': tenantId,
+        'app.kubernetes.io/instance': resourceName,
         'app.kubernetes.io/managed-by': 'metacontroller',
-        'ns.mdn.io/tenant': tenantId,
-        'ns.mdn.io/decorator': 'tenant-initialization'
+        'ns.mdn.io/decorator': 'tenant-initialization',
+        ...identityLabels
       }
     },
     spec: {
@@ -366,7 +416,7 @@ function renderInitReplicaSetJob_(tenantId, namespace, databaseName, authSecret,
           labels: {
             'app.kubernetes.io/name': 'mongodb-init',
             'app.kubernetes.io/component': 'database',
-            'ns.mdn.io/tenant': tenantId
+            ...identityLabels
           }
         },
         spec: {
@@ -410,7 +460,7 @@ function renderInitReplicaSetJob_(tenantId, namespace, databaseName, authSecret,
                 },
                 {
                   name: 'POD_NAME',
-                  value: `${tenantId}-rs-`  // ReplicaSet pod name prefix
+                  value: `${resourceName}-rs-`  // ReplicaSet pod name prefix
                 }
               ]
             }
@@ -424,8 +474,15 @@ function renderInitReplicaSetJob_(tenantId, namespace, databaseName, authSecret,
 /**
  * Render create-user Job (Gen5)
  * Uses ns-utility container with create-mongodb-user.sh script
+ * 
+ * @param resourceName - CR name, used for Job naming prefix
+ * @param namespace - Target namespace
+ * @param databaseName - MongoDB database name
+ * @param authSecret - mongo-auth Secret for credentials
+ * @param identityLabels - Pre-built identity labels (ns.mdn.io/storage, ns.mdn.io/tenant)
+ * @param config - Controller configuration
  */
-function renderCreateUserJob_(tenantId, namespace, databaseName, authSecret, config) {
+function renderCreateUserJob_(resourceName, namespace, databaseName, authSecret, identityLabels, config) {
   const authSecretName = authSecret.metadata.name;
   const mongoHost = 'localhost:27017';  // Pod-local MongoDB
   
@@ -433,16 +490,16 @@ function renderCreateUserJob_(tenantId, namespace, databaseName, authSecret, con
     apiVersion: 'batch/v1',
     kind: 'Job',
     metadata: {
-      name: `${tenantId}-create-user`,
+      name: `${resourceName}-create-user`,
       namespace: namespace,
       labels: {
         'app.kubernetes.io/name': 'mongodb-user',
         'app.kubernetes.io/component': 'user-initialization',
         'app.kubernetes.io/part-of': 'nightscout-tenant',
-        'app.kubernetes.io/instance': tenantId,
+        'app.kubernetes.io/instance': resourceName,
         'app.kubernetes.io/managed-by': 'metacontroller',
-        'ns.mdn.io/tenant': tenantId,
-        'ns.mdn.io/decorator': 'tenant-initialization'
+        'ns.mdn.io/decorator': 'tenant-initialization',
+        ...identityLabels
       }
     },
     spec: {
@@ -453,7 +510,7 @@ function renderCreateUserJob_(tenantId, namespace, databaseName, authSecret, con
           labels: {
             'app.kubernetes.io/name': 'mongodb-user',
             'app.kubernetes.io/component': 'user-initialization',
-            'ns.mdn.io/tenant': tenantId
+            ...identityLabels
           }
         },
         spec: {
