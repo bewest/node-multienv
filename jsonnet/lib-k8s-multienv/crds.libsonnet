@@ -580,6 +580,18 @@
           },
           additionalPrinterColumns: [
             {
+              name: 'Storage',
+              type: 'string',
+              jsonPath: '.spec.storage',
+              description: 'Storage account ID',
+            },
+            {
+              name: 'Tenant',
+              type: 'string',
+              jsonPath: '.spec.tenant',
+              description: 'Tenant ID (set on site creation)',
+            },
+            {
               name: 'Phase',
               type: 'string',
               jsonPath: '.status.phase',
@@ -610,8 +622,18 @@
               properties: {
                 spec: {
                   type: 'object',
-                  required: ['pvcName', 'mongoAuthSecretRef', 'selector', 'initialStorageType', 'mongodbVersion'],
+                  required: ['storage', 'pvcName', 'mongoAuthSecretRef', 'selector', 'initialStorageType', 'mongodbVersion'],
                   properties: {
+                    // Identity fields (set by provisioner facade)
+                    storage: {
+                      type: 'string',
+                      description: 'Storage account ID from provisioner facade (POST /accounts/:storageAccountId). Required on initial CR creation.',
+                    },
+                    tenant: {
+                      type: 'string',
+                      description: 'Tenant ID from provisioner facade (POST /accounts/:storageAccountId/sites/:tenantId). Set when site is created, enables /environs/ API access.',
+                    },
+                    
                     // Provisioner-managed resources (created externally)
                     pvcName: {
                       type: 'string',
