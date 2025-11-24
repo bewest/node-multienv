@@ -29,7 +29,9 @@ const config = {
 
   // Container images
   multienv: {
-    imagePullSecrets: parseArray(process.env.MULTIENV_IMAGE_PULLSECRETS) || [],
+    // imagePullSecrets: parseArray(process.env.MULTIENV_IMAGE_PULLSECRETS) || [],
+    imagePullSecrets: (parseArray(process.env.MULTIENV_IMAGE_PULLSECRETS) || [])
+      .map(function (el, v) { return { name: el }; }),
   },
   images: {
     mongodb: process.env.MONGODB_IMAGE || 'mongo:6',

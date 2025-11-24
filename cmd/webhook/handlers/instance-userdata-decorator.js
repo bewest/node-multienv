@@ -176,6 +176,7 @@ function createDecoratorSync(config) {
         name: archiveName,
         namespace: ARCHIVE_NAMESPACE,
         labels: {
+          'tenant': req.tenantId,
           'nightscout.io/tenant': req.tenantId,
           'ns.mdn.io/archived': 'true',
           'ns.mdn.io/archived-from': 'gen3'
@@ -240,7 +241,7 @@ function createDecoratorSync(config) {
     // Plan label removal
     res.labels = {
       role: 'dedicated',  // Remove config-as-deploy label
-      'nightscout.io/migrated-at': new Date().toISOString()
+      // 'nightscout.io/migrated-at': new Date().toISOString()
     };
     
     console.log('  Planned label removal: role=config-as-deploy → null');

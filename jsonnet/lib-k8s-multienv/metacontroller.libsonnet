@@ -480,7 +480,7 @@
       crdVersion=crdVersion,
       resyncPeriodSeconds=initializationResyncSeconds,
     ),
-    instanceUserdata:: $.instanceUserdataDecorator(
+    instanceUserdata: $.instanceUserdataDecorator(
       webhookServiceUrl=webhookServiceUrl,
       crdGroup=crdGroup,
       crdVersion=crdVersion,

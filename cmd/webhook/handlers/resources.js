@@ -129,7 +129,7 @@ function renderMongoDB(parent, databaseName, config, storage) {
         spec: {
           imagePullSecrets: parent.data.IMAGE_PULL_SECRET 
             ? [{ name: parent.data.IMAGE_PULL_SECRET }] 
-            : config.multienv.imagePullSecrets.map(function (el, v) { return { name: el }; }),
+            : config.multienv.imagePullSecrets,
           initContainers: [
             {
               name: 'prepare-keyfile',
@@ -439,7 +439,7 @@ function renderNightscout(parent, config) {
         spec: {
           imagePullSecrets: parent.data.IMAGE_PULL_SECRET 
             ? [{ name: parent.data.IMAGE_PULL_SECRET }] 
-            : undefined,
+            : config.multienv.imagePullSecrets,
           containers: buildContainers()
         }
       }
