@@ -21,7 +21,7 @@
  * Children (Storage + Compute - ConfigMap Present):
  *   - ReplicaSet (replicas: 1, co-located MongoDB + Nightscout)
  *   - MongoDB Keyfile Secret
- *   - Nightscout Secret (generated from mongo-auth)
+ *   - App-Credentials Secret (THE Nightscout app Secret with MongoDB credentials + runtime config)
  *   - Init Replica Set Job (if needed)
  * 
  * Related (not owned):
@@ -36,8 +36,7 @@ const {
   generateSecurePassword, 
   generateUsername,
   generateAppCredentials,
-  renderAppCredentialsSecret,
-  renderNightscoutSecret
+  renderAppCredentialsSecret
 } = require('./resources');
 
 function createTenantCompositeSync(config) {
@@ -375,80 +374,54 @@ function createTenantCompositeSync(config) {
   }
   
   /**
-   * Stage 3c: Ensure Nightscout application secret exists
-   * Generates API_SECRET and MONGO_CONNECTION from MongoDB credentials
+   * Stage 3c: Ensure app-credentials Secret exists (THE Nightscout app Secret)
+   * Contains MongoDB credentials + Nightscout runtime configuration
    * Gen5: Only renders when compute is activated (ConfigMap present)
    */
-  function ensureNightscoutSecret(req, res, next) {
+  function ensureAppCredentialsSecret(req, res, next) {
     const tenantId = req.tenantId;
     const namespace = req.namespace;
-    const nsSecretName = `${tenantId}-nightscout`;
+    const secretName = `${tenantId}-app-credentials`;
     
-    console.log(`Stage 3c: Ensuring Nightscout secret ${nsSecretName}`);
+    console.log(`Stage 3c: Ensuring app-credentials Secret ${secretName}`);
     
     // Skip if compute not activated
     if (!req.computeEnabled) {
-      console.log(`  Compute not activated - skipping Nightscout secret`);
+      console.log(`  Compute not activated - skipping app-credentials Secret`);
       return next();
     }
     
     // Guard: Skip if authSecret is missing (Error state from ensureMongoAuthSecret)
     if (!req.authSecret) {
-      console.log(`  Auth secret missing - skipping Nightscout secret (Error state)`);
+      console.log(`  Auth secret missing - skipping app-credentials Secret (Error state)`);
       return next();
     }
     
     // Check if secret already exists
-    const existingSecret = findResource(req.children['secrets.v1'], nsSecretName, namespace);
+    const existingSecret = findResource(req.children['secrets.v1'], secretName, namespace);
     
     if (existingSecret) {
-      console.log(`  Found existing Nightscout secret`);
+      console.log(`  Found existing app-credentials Secret`);
       const cleaned = cleanResource(existingSecret);
       res.children.push(cleaned);
-      req.nightscoutSecret = cleaned;
+      req.appCredentialsSecret = cleaned;
       return next();
     }
     
-    // Generate new Nightscout secret using shared helper
-    console.log(`  Generating Nightscout Secret`);
+    // Generate new app-credentials Secret using shared helper
+    console.log(`  Generating new app-credentials Secret (Nightscout app Secret)`);
     
-    // Extract MongoDB credentials from auth secret
-    // Handle both stringData (newly created) and data (existing, base64-encoded)
-    let mongoUsername, mongoPassword, mongoDatabase;
-    
-    if (req.authSecret.stringData) {
-      // New secret with stringData
-      mongoUsername = req.authSecret.stringData.username;
-      mongoPassword = req.authSecret.stringData.password;
-      mongoDatabase = req.authSecret.stringData.database;
-    } else if (req.authSecret.data) {
-      // Existing secret with base64-encoded data
-      mongoUsername = Buffer.from(req.authSecret.data.username || '', 'base64').toString('utf8');
-      mongoPassword = Buffer.from(req.authSecret.data.password || '', 'base64').toString('utf8');
-      mongoDatabase = Buffer.from(req.authSecret.data.database || '', 'base64').toString('utf8');
-    } else {
-      // Fallback defaults
-      mongoUsername = 'nsuser';
-      mongoPassword = '';
-      mongoDatabase = req.databaseName || `ns_${tenantId.replace(/-/g, '_')}`;
-    }
-    
-    // Use shared helper to render Nightscout Secret
-    const nightscoutSecret = renderNightscoutSecret(
+    const appCredentialsSecret = renderAppCredentialsSecret(
       tenantId,
       namespace,
-      {
-        username: mongoUsername,
-        password: mongoPassword,
-        database: mongoDatabase
-      },
+      req.databaseName,
       existingSecret,  // null for first cycle, existing Secret to preserve
       req.parent.metadata.labels || {}
     );
     
-    res.children.push(nightscoutSecret);
-    req.nightscoutSecret = nightscoutSecret;
-    console.log(`  Added Nightscout Secret to children`);
+    res.children.push(appCredentialsSecret);
+    req.appCredentialsSecret = appCredentialsSecret;
+    console.log(`  Added app-credentials Secret to children`);
     
     return next();
   }
@@ -684,7 +657,7 @@ function createTenantCompositeSync(config) {
       spec, 
       req.authSecret, 
       req.keyfileSecret, 
-      req.nightscoutSecret, 
+      req.appCredentialsSecret, 
       config
     );
     res.children.push(replicaSetResource);
@@ -836,7 +809,7 @@ function createTenantCompositeSync(config) {
   // 3. Read mongo-auth Secret from spec reference (provisioner-owned)
   // 4. Set runtime-required annotation for Gen3/Gen4 compatibility
   // 5. Detect compute activation via ConfigMap presence
-  // 6. Ensure Nightscout Secret (conditional on compute)
+  // 6. Ensure app-credentials Secret (THE Nightscout app Secret, conditional on compute)
   // 6a. Plan userdata migration (Gen3 ConfigMap adoption, optional)
   // 7. Assert PVC exists from spec reference
   // 8. Render children (conditional compute layer)
@@ -847,7 +820,7 @@ function createTenantCompositeSync(config) {
     ensureMongoAuthSecret,
     setRuntimeRequiredAnnotation,
     detectComputeActivation,
-    ensureNightscoutSecret,
+    ensureAppCredentialsSecret,
     planUserDataMigration,
     assertPVCExists,
     renderChildren,

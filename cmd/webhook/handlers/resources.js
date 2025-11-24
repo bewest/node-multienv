@@ -927,8 +927,14 @@ function generateAppCredentials(tenantId, mongoHost, mongoPort, databaseName, us
 }
 
 /**
- * Render app-credentials Secret
+ * Render app-credentials Secret (THE Nightscout app Secret)
  * Shared between Gen4 storage-credentials decorator and Gen5 tenant composite
+ * 
+ * This is the canonical Nightscout application Secret containing:
+ * - MongoDB credentials (MONGO_USERNAME, MONGO_PASSWORD, MONGO_DATABASE, etc.)
+ * - Nightscout runtime configuration (API_SECRET, MONGO_CONNECTION, ENABLE, etc.)
+ * 
+ * Gen4 Pattern: Single Secret per tenant with all app credentials and runtime config
  * 
  * @param {string} tenantId - Tenant identifier
  * @param {string} namespace - Kubernetes namespace
@@ -946,7 +952,7 @@ function renderAppCredentialsSecret(tenantId, namespace, databaseName, existingS
   const standardAnnotations = {
     'ns.mdn.io/created-at': new Date().toISOString(),
     'ns.mdn.io/tenant': tenantId,
-    'ns.mdn.io/description': 'MongoDB credentials for Nightscout application pods',
+    'ns.mdn.io/description': 'Nightscout application credentials and runtime configuration',
     [ANNOTATIONS.PROTECTED_RESOURCE]: 'true'
   };
   
@@ -970,8 +976,12 @@ function renderAppCredentialsSecret(tenantId, namespace, databaseName, existingS
       namespace: namespace,
       labels: {
         ...mergedLabels,
-        'app.kubernetes.io/component': 'app-credentials',
+        'app.kubernetes.io/name': 'nightscout',
+        'app.kubernetes.io/component': 'application',
+        'app.kubernetes.io/part-of': 'nightscout-tenant',
+        'app.kubernetes.io/instance': tenantId,
         'app.kubernetes.io/managed-by': 'metacontroller',
+        'ns.mdn.io/tenant': tenantId,
         'ns.mdn.io/credential-type': 'application',
         [LABELS.RESOURCE_TYPE]: RESOURCE_TYPES.APP_CREDENTIALS_SECRET
       },
@@ -993,6 +1003,7 @@ function renderAppCredentialsSecret(tenantId, namespace, databaseName, existingS
     const mongoHost = `mongo-${databaseName}`;
     const mongoPort = '27017';
     
+    // Generate MongoDB credentials
     const appCredentials = generateAppCredentials(
       tenantId,
       mongoHost,
@@ -1001,103 +1012,34 @@ function renderAppCredentialsSecret(tenantId, namespace, databaseName, existingS
       username,
       password
     );
+    
+    // Generate Nightscout runtime configuration
+    const apiSecret = crypto.randomBytes(32).toString('hex');
+    const mongoConnection = `mongodb://${username}:${password}@localhost:27017/${databaseName}?authSource=${databaseName}`;
+    
+    // Combine MongoDB credentials and Nightscout runtime config
+    const completeCredentials = {
+      ...appCredentials,
+      // Nightscout application runtime configuration
+      MONGO_CONNECTION: mongoConnection,
+      API_SECRET: apiSecret,
+      INSECURE_USE_HTTP: 'true',
+      HOSTNAME: `${tenantId}.nightscout.svc.cluster.local`,
+      BASE_URL: `https://${tenantId}.nightscout.example.com`,
+      ENABLE: 'careportal basal dbsize rawbg iob cob bwp cage iage sage boluscalc pushover treatmentnotify mmconnect loop pump profile food openaps bage alexa override cors',
+      TIME_FORMAT: '24',
+      THEME: 'colors'
+    };
 
-    // Encode all credential fields to base64
+    // Encode all fields to base64
     const encodedData = {};
-    Object.keys(appCredentials).forEach(key => {
-      encodedData[key] = Buffer.from(appCredentials[key]).toString('base64');
+    Object.keys(completeCredentials).forEach(key => {
+      encodedData[key] = Buffer.from(completeCredentials[key]).toString('base64');
     });
     secret.data = encodedData;
   }
   
   return secret;
-}
-
-/**
- * Render Nightscout application Secret
- * Shared helper for Gen4 compute composite and Gen5 tenant composite
- * 
- * Creates Nightscout application Secret with:
- * - MONGO_CONNECTION: MongoDB connection URI (localhost for co-located pods)
- * - API_SECRET: Nightscout authentication secret (random hex)
- * - Nightscout environment configuration (ENABLE, TIME_FORMAT, THEME, etc.)
- * 
- * @param {string} tenantId - Tenant identifier
- * @param {string} namespace - Kubernetes namespace
- * @param {object} mongoCredentials - MongoDB credentials { username, password, database }
- * @param {object} existingSecret - Existing Nightscout Secret to preserve (null for first cycle)
- * @param {object} labels - Parent resource labels to merge
- * @returns {object} Secret manifest
- */
-function renderNightscoutSecret(tenantId, namespace, mongoCredentials, existingSecret, labels = {}) {
-  const crypto = require('crypto');
-  const secretName = `${tenantId}-nightscout`;
-  
-  // If secret already exists, preserve it
-  if (existingSecret) {
-    return {
-      apiVersion: 'v1',
-      kind: 'Secret',
-      type: existingSecret.type || 'Opaque',
-      metadata: {
-        name: secretName,
-        namespace: namespace,
-        labels: {
-          ...(existingSecret.metadata?.labels || {}),
-          'app.kubernetes.io/managed-by': 'metacontroller'
-        },
-        annotations: existingSecret.metadata?.annotations || {}
-      },
-      data: existingSecret.data,
-      stringData: existingSecret.stringData
-    };
-  }
-  
-  // First cycle - generate new Nightscout Secret
-  console.log(`  Generating new Nightscout Secret for tenant: ${tenantId}`);
-  
-  const { username, password, database } = mongoCredentials;
-  
-  // Build MongoDB connection string (localhost since co-located)
-  const mongoConnection = `mongodb://${username}:${password}@localhost:27017/${database}?authSource=${database}`;
-  
-  // Generate API_SECRET for Nightscout authentication
-  const apiSecret = crypto.randomBytes(32).toString('hex');
-  
-  return {
-    apiVersion: 'v1',
-    kind: 'Secret',
-    type: 'Opaque',
-    metadata: {
-      name: secretName,
-      namespace: namespace,
-      labels: {
-        ...labels,
-        'app.kubernetes.io/name': 'nightscout',
-        'app.kubernetes.io/component': 'application',
-        'app.kubernetes.io/part-of': 'nightscout-tenant',
-        'app.kubernetes.io/instance': tenantId,
-        'app.kubernetes.io/managed-by': 'metacontroller',
-        'ns.mdn.io/tenant': tenantId
-      },
-      annotations: {
-        'ns.mdn.io/created-at': new Date().toISOString()
-      }
-    },
-    stringData: {
-      MONGO_CONNECTION: mongoConnection,
-      API_SECRET: apiSecret,
-      // Additional Nightscout configuration
-      INSECURE_USE_HTTP: 'true', // Kubernetes handles TLS at ingress
-      HOSTNAME: `${tenantId}.nightscout.svc.cluster.local`,
-      BASE_URL: `https://${tenantId}.nightscout.example.com`, // Override via spec
-      // Enable features by default
-      ENABLE: 'careportal basal dbsize rawbg iob cob bwp cage iage sage boluscalc pushover treatmentnotify mmconnect loop pump profile food openaps bage alexa override cors',
-      // Time format
-      TIME_FORMAT: '24',
-      THEME: 'colors'
-    }
-  };
 }
 
 module.exports = {
@@ -1110,6 +1052,5 @@ module.exports = {
   generateUsername,
   generateDatabaseName,
   generateAppCredentials,
-  renderAppCredentialsSecret,
-  renderNightscoutSecret
+  renderAppCredentialsSecret
 };
