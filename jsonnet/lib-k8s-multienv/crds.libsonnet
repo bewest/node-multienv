@@ -623,9 +623,38 @@
                     },
                     selector: {
                       type: 'object',
-                      description: 'Label selector for child resources and ConfigMap matching',
-                      additionalProperties: {
-                        type: 'string',
+                      description: 'Label selector for resources managed by this StorageAccount',
+                      properties: {
+                        matchLabels: {
+                          type: 'object',
+                          additionalProperties: {
+                            type: 'string',
+                          },
+                          description: 'Map of label key-value pairs that must match',
+                        },
+                        matchExpressions: {
+                          type: 'array',
+                          description: 'List of label selector requirements',
+                          items: {
+                            type: 'object',
+                            required: ['key', 'operator'],
+                            properties: {
+                              key: {
+                                type: 'string',
+                              },
+                              operator: {
+                                type: 'string',
+                                enum: ['In', 'NotIn', 'Exists', 'DoesNotExist'],
+                              },
+                              values: {
+                                type: 'array',
+                                items: {
+                                  type: 'string',
+                                },
+                              },
+                            },
+                          },
+                        },
                       },
                     },
                     initialStorageType: {

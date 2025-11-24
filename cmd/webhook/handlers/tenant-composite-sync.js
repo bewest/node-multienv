@@ -423,13 +423,14 @@ function createTenantCompositeSync(config) {
     
     // Guard: Skip if authSecret is missing (Error state from ensureMongoAuthSecret)
     if (!req.authSecret) {
-      console.log(`  Auth secret missing - skipping app-credentials Secret (Error state)`);
+      console.log(`  ${tenantId} Auth secret missing - skipping app-credentials Secret (Error state)`);
       return next();
     }
     
     // Check if secret already exists
     const existingSecret = findResource(req.children['secrets.v1'], secretName, namespace);
-    
+
+    /*
     if (existingSecret) {
       console.log(`  Found existing app-credentials Secret`);
       const cleaned = cleanResource(existingSecret);
@@ -437,9 +438,10 @@ function createTenantCompositeSync(config) {
       req.appCredentialsSecret = cleaned;
       return next();
     }
-    
+    */
+
     // Generate new app-credentials Secret using shared helper
-    console.log(`  Generating new app-credentials Secret (Nightscout app Secret)`);
+    console.log(`  Ensuring app-credentials Secret`);
     
     const appCredentialsSecret = renderAppCredentialsSecret(
       tenantId,
@@ -448,11 +450,10 @@ function createTenantCompositeSync(config) {
       existingSecret,  // null for first cycle, existing Secret to preserve
       req.parent.metadata.labels || {}
     );
-    
+
     res.children.push(appCredentialsSecret);
     req.appCredentialsSecret = appCredentialsSecret;
-    console.log(`  Added app-credentials Secret to children`);
-    
+
     return next();
   }
   
