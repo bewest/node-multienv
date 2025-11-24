@@ -936,22 +936,21 @@ function generateAppCredentials(tenantId, mongoHost, mongoPort, databaseName, us
  * 
  * Gen4 Pattern: Single Secret per tenant with all app credentials and runtime config
  * 
- * @param {string} tenantId - Tenant identifier
+ * @param {string} resourceName - CR name (used for resource naming)
  * @param {string} namespace - Kubernetes namespace
  * @param {string} databaseName - MongoDB database name
  * @param {object} existingSecret - Existing Secret to preserve (null for first cycle)
- * @param {object} labels - Parent resource labels to merge
+ * @param {object} identityLabels - Identity labels from buildStandardLabels (includes ns.mdn.io/storage, ns.mdn.io/tenant)
  * @returns {object} Secret manifest
  */
-function renderAppCredentialsSecret(tenantId, namespace, databaseName, existingSecret, labels) {
-  const secretName = `${tenantId}-app-credentials`;
+function renderAppCredentialsSecret(resourceName, namespace, databaseName, existingSecret, identityLabels) {
+  const secretName = `${resourceName}-app-credentials`;
   const existingAnnotations = existingSecret?.metadata?.annotations || {};
   const existingLabels = existingSecret?.metadata?.labels || {};
 
   // Standard annotations that are always set
   const standardAnnotations = {
     'ns.mdn.io/created-at': new Date().toISOString(),
-    'ns.mdn.io/tenant': tenantId,
     'ns.mdn.io/description': 'Nightscout application credentials and runtime configuration',
     [ANNOTATIONS.PROTECTED_RESOURCE]: 'true'
   };
@@ -963,9 +962,13 @@ function renderAppCredentialsSecret(tenantId, namespace, databaseName, existingS
     ...existingAnnotations
   };
 
+  // Merge identity labels (from caller) with existing labels
+  // Identity labels take precedence for consistency
   const mergedLabels = {
-    ...labels,
-    ...existingLabels
+    ...existingLabels,
+    ...identityLabels,
+    'ns.mdn.io/credential-type': 'application',
+    [LABELS.RESOURCE_TYPE]: RESOURCE_TYPES.APP_CREDENTIALS_SECRET
   };
 
   const secret = {
@@ -974,17 +977,7 @@ function renderAppCredentialsSecret(tenantId, namespace, databaseName, existingS
     metadata: {
       name: secretName,
       namespace: namespace,
-      labels: {
-        ...mergedLabels,
-        'app.kubernetes.io/name': 'nightscout',
-        'app.kubernetes.io/component': 'application',
-        'app.kubernetes.io/part-of': 'nightscout-tenant',
-        'app.kubernetes.io/instance': tenantId,
-        'app.kubernetes.io/managed-by': 'metacontroller',
-        'ns.mdn.io/tenant': tenantId,
-        'ns.mdn.io/credential-type': 'application',
-        [LABELS.RESOURCE_TYPE]: RESOURCE_TYPES.APP_CREDENTIALS_SECRET
-      },
+      labels: mergedLabels,
       annotations: mergedAnnotations
     },
     type: 'Opaque'
@@ -996,8 +989,8 @@ function renderAppCredentialsSecret(tenantId, namespace, databaseName, existingS
     secret.type = existingSecret.type;
   } else {
     // First cycle - generate new credentials
-    console.log(`  Generating new app credentials for tenant: ${tenantId}`);
-    const username = generateUsername(tenantId);
+    console.log(`  Generating new app credentials for resource: ${resourceName}`);
+    const username = generateUsername(resourceName);
     const password = generateSecurePassword(16);
     
     const mongoHost = `mongo-${databaseName}`;
@@ -1005,7 +998,7 @@ function renderAppCredentialsSecret(tenantId, namespace, databaseName, existingS
     
     // Generate MongoDB credentials
     const appCredentials = generateAppCredentials(
-      tenantId,
+      resourceName,
       mongoHost,
       mongoPort,
       databaseName,
@@ -1024,8 +1017,8 @@ function renderAppCredentialsSecret(tenantId, namespace, databaseName, existingS
       MONGO_CONNECTION: mongoConnection,
       API_SECRET: apiSecret,
       INSECURE_USE_HTTP: 'true',
-      HOSTNAME: `${tenantId}.nightscout.svc.cluster.local`,
-      BASE_URL: `https://${tenantId}.nightscout.example.com`,
+      HOSTNAME: `${resourceName}.nightscout.svc.cluster.local`,
+      BASE_URL: `https://${resourceName}.nightscout.example.com`,
       ENABLE: 'careportal basal dbsize rawbg iob cob bwp cage iage sage boluscalc pushover treatmentnotify mmconnect loop pump profile food openaps bage alexa override cors',
       TIME_FORMAT: '24',
       THEME: 'colors'

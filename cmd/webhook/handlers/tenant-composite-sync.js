@@ -108,6 +108,15 @@ function createTenantCompositeSync(config) {
   
   /**
    * Stage 1: Initialize context from webhook request
+   * 
+   * Identity fields from spec:
+   *   - spec.storage (required): Storage account ID from provisioner facade
+   *   - spec.tenant (optional): Tenant ID set on site creation
+   * 
+   * Naming conventions:
+   *   - resourceName: CR name (used for child resource naming prefixes)
+   *   - storageId: spec.storage (used for storage grouping labels)
+   *   - tenantId: spec.tenant when set, else CR name (used for tenant identification labels)
    */
   function initializeContext(req, res, next) {
     const { parent, children, related } = req.body;
@@ -115,26 +124,80 @@ function createTenantCompositeSync(config) {
     req.parent = parent;
     req.children = children;
     req.related = related;
-    req.tenantId = parent.metadata.name;
-    req.namespace = parent.metadata.namespace;
     req.spec = parent.spec || {};
+    req.namespace = parent.metadata.namespace;
+    
+    // Resource naming (CR name, used for child resource prefixes)
+    req.resourceName = parent.metadata.name;
+    
+    // Identity fields from spec (set by provisioner facade)
+    req.storageId = req.spec.storage;
+    req.tenantId = req.spec.tenant || parent.metadata.name; // Fallback to CR name if tenant not yet set
+    req.tenantSet = !!req.spec.tenant; // Track if tenant ID was explicitly set
     
     // Initialize response
     res.children = [];
     res.status = { phase: 'Pending', conditions: [] };
     
-    console.log('Tenant composite sync for tenant:', req.tenantId);
+    console.log(`Tenant composite sync for resource: ${req.resourceName}`);
+    console.log(`  Storage ID: ${req.storageId}`);
+    console.log(`  Tenant ID: ${req.tenantId} (explicit: ${req.tenantSet})`);
+    
+    // Validate required spec.storage field
+    if (!req.storageId) {
+      console.error(`  ERROR: spec.storage is required but not provided`);
+      res.status.phase = 'Error';
+      res.status.conditions.push({
+        type: 'StorageIdentityValidated',
+        status: 'False',
+        reason: 'MissingStorageId',
+        message: 'spec.storage is required but not provided (must be set by provisioner facade)'
+      });
+      // Continue to sendResponse - early termination
+      res.send({ status: res.status, children: [] });
+      return; // Skip remaining middleware
+    }
+    
+    res.status.conditions.push({
+      type: 'StorageIdentityValidated',
+      status: 'True',
+      reason: 'StorageIdPresent',
+      message: `Storage account ID: ${req.storageId}`
+    });
     
     return next();
+  }
+  
+  /**
+   * Helper: Build standard labels for child resources
+   * Uses spec.storage and spec.tenant for identity labels
+   */
+  function buildStandardLabels(req, component, additionalLabels = {}) {
+    const labels = {
+      'app.kubernetes.io/name': 'nightscout',
+      'app.kubernetes.io/component': component,
+      'app.kubernetes.io/part-of': 'nightscout-tenant',
+      'app.kubernetes.io/instance': req.resourceName,
+      'app.kubernetes.io/managed-by': 'metacontroller',
+      'ns.mdn.io/storage': req.storageId,
+      ...additionalLabels
+    };
+    
+    // Only add tenant label if explicitly set
+    if (req.tenantSet) {
+      labels['ns.mdn.io/tenant'] = req.tenantId;
+    }
+    
+    return labels;
   }
   
   /**
    * Stage 2: Ensure MongoDB keyfile Secret exists
    */
   function ensureMongoKeyfile(req, res, next) {
-    const tenantId = req.tenantId;
+    const resourceName = req.resourceName;
     const namespace = req.namespace;
-    const keyfileSecretName = `${tenantId}-mongo-keyfile`;
+    const keyfileSecretName = `${resourceName}-mongo-keyfile`;
     
     // Check if keyfile Secret already exists (robust lookup with namespace)
     const existingKeyfile = findResource(req.children['secrets.v1'], keyfileSecretName, namespace) || 
@@ -149,7 +212,7 @@ function createTenantCompositeSync(config) {
     }
     
     // Generate new keyfile Secret
-    console.log(`  Generating keyfile Secret for ${tenantId}`);
+    console.log(`  Generating keyfile Secret for ${resourceName}`);
     const keyfileData = crypto.randomBytes(64).toString('base64');
     
     const keyfileSecret = {
@@ -159,14 +222,9 @@ function createTenantCompositeSync(config) {
       metadata: {
         name: keyfileSecretName,
         namespace: namespace,
-        labels: {
-          'app.kubernetes.io/name': 'mongodb-keyfile',
-          'app.kubernetes.io/component': 'database',
-          'app.kubernetes.io/part-of': 'nightscout-tenant',
-          'app.kubernetes.io/instance': tenantId,
-          'app.kubernetes.io/managed-by': 'metacontroller',
-          'ns.mdn.io/tenant': tenantId
-        },
+        labels: buildStandardLabels(req, 'database', {
+          'app.kubernetes.io/name': 'mongodb-keyfile'
+        }),
         annotations: {
           'ns.mdn.io/created-at': new Date().toISOString(),
           'ns.mdn.io/description': 'MongoDB replica set keyfile for member authentication'
@@ -189,14 +247,14 @@ function createTenantCompositeSync(config) {
    * Gen5: Provisioner owns mongo-auth Secret (not controller)
    */
   function ensureMongoAuthSecret(req, res, next) {
-    const tenantId = req.tenantId;
+    const resourceName = req.resourceName;
     const namespace = req.namespace;
     const spec = req.spec;
     
     // Resolve mongo-auth Secret from spec reference
     const mongoAuthSecretRef = spec.mongoAuthSecretRef;
     if (!mongoAuthSecretRef || !mongoAuthSecretRef.name) {
-      console.error(`  ERROR: spec.mongoAuthSecretRef.name not provided for ${tenantId}`);
+      console.error(`  ERROR: spec.mongoAuthSecretRef.name not provided for ${resourceName}`);
       res.status.phase = 'Error';
       res.status.conditions.push({
         type: 'MongoAuthSecretResolved',
@@ -300,12 +358,12 @@ function createTenantCompositeSync(config) {
    *   - Deleting ConfigMap via environs API stops tenant execution
    */
   function ensureConfigMap(req, res, next) {
-    const tenantId = req.tenantId;
+    const resourceName = req.resourceName;
     const namespace = req.namespace;
     const spec = req.spec;
     const configMapRef = spec.configMapRef;
     
-    console.log(`Stage 3b: Ensuring ConfigMap for ${tenantId}`);
+    console.log(`Stage 3b: Ensuring ConfigMap for ${resourceName}`);
     console.log(`  configMapRef: ${JSON.stringify(configMapRef)}`);
     
     // Preserve existing Error phase (don't override)
@@ -361,12 +419,11 @@ function createTenantCompositeSync(config) {
       // Adopt existing ConfigMap (preserves name/namespace, adds management labels)
       const adoptedConfigMap = cleanResource(existingConfigMap);
       
-      // Add management labels
+      // Add management and identity labels
       if (!adoptedConfigMap.metadata.labels) {
         adoptedConfigMap.metadata.labels = {};
       }
-      adoptedConfigMap.metadata.labels['app.kubernetes.io/managed-by'] = 'metacontroller';
-      adoptedConfigMap.metadata.labels['app.kubernetes.io/instance'] = tenantId;
+      Object.assign(adoptedConfigMap.metadata.labels, buildStandardLabels(req, 'userdata'));
       
       res.children.push(adoptedConfigMap);
       req.computeEnabled = true;
@@ -409,9 +466,9 @@ function createTenantCompositeSync(config) {
    * Gen5: Only renders when compute is activated (ConfigMap present)
    */
   function ensureAppCredentialsSecret(req, res, next) {
-    const tenantId = req.tenantId;
+    const resourceName = req.resourceName;
     const namespace = req.namespace;
-    const secretName = `${tenantId}-app-credentials`;
+    const secretName = `${resourceName}-app-credentials`;
     
     console.log(`Stage 3c: Ensuring app-credentials Secret ${secretName}`);
     
@@ -423,32 +480,25 @@ function createTenantCompositeSync(config) {
     
     // Guard: Skip if authSecret is missing (Error state from ensureMongoAuthSecret)
     if (!req.authSecret) {
-      console.log(`  ${tenantId} Auth secret missing - skipping app-credentials Secret (Error state)`);
+      console.log(`  ${resourceName} Auth secret missing - skipping app-credentials Secret (Error state)`);
       return next();
     }
     
     // Check if secret already exists
     const existingSecret = findResource(req.children['secrets.v1'], secretName, namespace);
 
-    /*
-    if (existingSecret) {
-      console.log(`  Found existing app-credentials Secret`);
-      const cleaned = cleanResource(existingSecret);
-      res.children.push(cleaned);
-      req.appCredentialsSecret = cleaned;
-      return next();
-    }
-    */
-
     // Generate new app-credentials Secret using shared helper
     console.log(`  Ensuring app-credentials Secret`);
     
+    // Build identity labels for the secret
+    const identityLabels = buildStandardLabels(req, 'application');
+    
     const appCredentialsSecret = renderAppCredentialsSecret(
-      tenantId,
+      resourceName,
       namespace,
       req.databaseName,
       existingSecret,  // null for first cycle, existing Secret to preserve
-      req.parent.metadata.labels || {}
+      identityLabels
     );
 
     res.children.push(appCredentialsSecret);
@@ -462,9 +512,9 @@ function createTenantCompositeSync(config) {
    * Uses durable parent status for replica set initialization state
    */
   function detectPhase(req, res, next) {
-    const tenantId = req.tenantId;
-    const pvcName = `data-${tenantId}-0`;
-    const initJobName = `${tenantId}-init-rs`;
+    const resourceName = req.resourceName;
+    const pvcName = `data-${resourceName}-0`;
+    const initJobName = `${resourceName}-init-rs`;
     
     // Helper: Find PVC in children or related (with namespace matching)
     function findPVC() {
@@ -584,10 +634,10 @@ function createTenantCompositeSync(config) {
    *   - ns.mdn.io/user-initialized: User creation complete
    */
   function renderChildren(req, res, next) {
-    const tenantId = req.tenantId;
+    const resourceName = req.resourceName;
     const spec = req.spec;
     
-    console.log(`Stage 5: Rendering children for ${tenantId}`);
+    console.log(`Stage 5: Rendering children for ${resourceName}`);
     console.log(`  Compute enabled: ${req.computeEnabled}`);
     console.log(`  PVC exists: ${req.pvcExists}`);
     console.log(`  Auth secret exists: ${!!req.authSecret}`);
@@ -683,18 +733,19 @@ function createTenantCompositeSync(config) {
     console.log(`  All prerequisites satisfied - rendering ReplicaSet`);
     
     const replicaSetResource = renderReplicaSet(
-      tenantId, 
+      resourceName, 
       req.namespace, 
       spec, 
       req.authSecret, 
       req.keyfileSecret, 
       req.appCredentialsSecret, 
-      config
+      config,
+      req  // Pass req for buildStandardLabels access
     );
     res.children.push(replicaSetResource);
     
     // Check if ReplicaSet is ready
-    const replicaSet = findResource(req.children['replicasets.v1.apps'], `${tenantId}-rs`, req.namespace);
+    const replicaSet = findResource(req.children['replicasets.v1.apps'], `${resourceName}-rs`, req.namespace);
     const replicaSetReady = replicaSet?.status?.readyReplicas > 0;
     
     console.log(`  ReplicaSet ready: ${replicaSetReady}`);
@@ -768,14 +819,14 @@ function createTenantCompositeSync(config) {
       return next();
     }
     
-    const tenantId = req.tenantId;
+    const resourceName = req.resourceName;
     const namespace = req.namespace;
     const configMap = req.computeConfigMap;
     
     // Non-migration case: Adopt ConfigMap as-is (normal operation)
     if (!req.migrationRequested) {
       console.log(`  Adopting ConfigMap as child (no migration)`);
-      const preservedConfigMap = renderPreservedConfigMap(configMap, tenantId, namespace);
+      const preservedConfigMap = renderPreservedConfigMap(configMap, resourceName, namespace);
       res.children.push(preservedConfigMap);
       return next();
     }
@@ -789,7 +840,7 @@ function createTenantCompositeSync(config) {
       console.log(`  Userdata migration already completed at ${userDataMigrationCompleted} - rendering clean ConfigMap`);
       
       // Render clean ConfigMap without data.mongo (child of composite)
-      const cleanConfigMap = renderCleanConfigMap(configMap, tenantId, namespace);
+      const cleanConfigMap = renderCleanConfigMap(configMap, resourceName, namespace);
       res.children.push(cleanConfigMap);
       return next();
     }
@@ -801,7 +852,7 @@ function createTenantCompositeSync(config) {
       console.log(`  Storage migration not yet completed - preserving Gen3 ConfigMap as-is`);
       
       // Preserve ConfigMap without modifications until storage migration completes (child of composite)
-      const preservedConfigMap = renderPreservedConfigMap(configMap, tenantId, namespace);
+      const preservedConfigMap = renderPreservedConfigMap(configMap, resourceName, namespace);
       res.children.push(preservedConfigMap);
       return next();
     }
@@ -817,7 +868,7 @@ function createTenantCompositeSync(config) {
       // Archive mongo URI to ConfigMap annotation (child of composite)
       const migratedConfigMap = renderMigratedConfigMap(
         configMap,
-        tenantId,
+        resourceName,
         namespace,
         mongoUri
       );
@@ -827,7 +878,7 @@ function createTenantCompositeSync(config) {
       console.log(`  WARNING: No data.mongo field found in Gen3 ConfigMap - marking migration complete anyway`);
       
       // No mongo URI to archive, just mark complete (child of composite)
-      const cleanConfigMap = renderCleanConfigMap(configMap, tenantId, namespace);
+      const cleanConfigMap = renderCleanConfigMap(configMap, resourceName, namespace);
       res.children.push(cleanConfigMap);
     }
     
