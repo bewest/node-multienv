@@ -224,10 +224,10 @@ function createTenantCompositeSync(config) {
     req.authSecret = existingAuth;
     req.databaseName = Buffer.from(existingAuth.data?.MONGO_INITDB_DATABASE || '', 'base64').toString('utf-8') ||
                       Buffer.from(existingAuth.data?.database || '', 'base64').toString('utf-8');
-    req.mongoUsername = Buffer.from(existingAuth.data?.username || '', 'base64').toString('utf-8');
-    req.mongoPassword = Buffer.from(existingAuth.data?.password || '', 'base64').toString('utf-8');
+    // req.mongoUsername = Buffer.from(existingAuth.data?.username || '', 'base64').toString('utf-8');
+    // req.mongoPassword = Buffer.from(existingAuth.data?.password || '', 'base64').toString('utf-8');
     
-    console.log(`  Hydrated: database=${req.databaseName}, username=${req.mongoUsername}`);
+    console.log(`  Hydrated: database=${req.databaseName}`);
     
     // DO NOT add to res.children (provisioner owns it, not Metacontroller)
     
@@ -247,7 +247,9 @@ function createTenantCompositeSync(config) {
    */
   function setRuntimeRequiredAnnotation(req, res, next) {
     const spec = req.spec;
-    const initialStorageType = spec.initialStorageType || 'shared';
+    const initialStorageType = spec?.initialStorageType;
+    const currentValue = req.secret.metadata.annotations?.['ns.mdn.io/runtime-required'];
+    req.credentialsRequested = req.storageType == 'dedicated' || req.migrationRequested;
     
     // Stamp annotation on parent CR for Gen3/Gen4 decorator compatibility
     if (!res.annotations) {
@@ -385,10 +387,25 @@ function createTenantCompositeSync(config) {
     }
     
     // Generate new Nightscout secret
-    console.log(`  Generating Nightscout Secret for ${tenantId}`);
+    console.log(`  ${tenantId} Dedicated storage mode - managing app credentials`);
+    if (!req.credentialsRequested) {
+      console.log(`  Shared storage mode - skipping credential creation`);
+      req.credentials = null;
+      return next();
+    }
     
     // Extract MongoDB credentials from auth secret
     // Handle both stringData (newly created) and data (existing, base64-encoded)
+    const secret = renderAppCredentialsSecret(
+      req.tenantId,
+      req.namespace,
+      req.databaseName,
+      req.existingSecret,
+      req.computeInstance.metadata.labels
+    );
+
+    res.attachments.push(secret);
+
     let mongoUsername, mongoPassword, mongoDatabase;
     
     if (req.authSecret.stringData) {
@@ -773,572 +790,81 @@ function createTenantCompositeSync(config) {
   ];
 }
 
-/**
- * Render StatefulSet for initialization phase
- * Co-located MongoDB + Nightscout containers
- */
-function renderStatefulSet(tenantId, namespace, spec, authSecret, keyfileSecret, nightscoutSecret, config) {
-  const mongoVersion = spec.mongodbVersion || '7.0';
-  const mongoImage = spec.mongodbImage || `mongo:${mongoVersion}`;
-  const nightscoutImage = spec.nightscoutImage || 'nightscout/cgm-remote-monitor:latest';
-  
-  const mongoResources = spec.mongoResources || {};
-  const nsResources = spec.nightscoutResources || {};
-  
-  const storageSize = spec.storageSize || '10Gi';
-  const storageClass = spec.storageClass || config.storage?.defaultStorageClass;
-  
-  const authSecretName = authSecret.metadata.name;
-  const keyfileSecretName = keyfileSecret.metadata.name;
-  const nightscoutSecretName = nightscoutSecret.metadata.name;
-  
-  return {
-    apiVersion: 'apps/v1',
-    kind: 'StatefulSet',
-    metadata: {
-      name: tenantId,
-      namespace: namespace,
-      labels: {
-        'app.kubernetes.io/name': 'nightscout-tenant',
-        'app.kubernetes.io/component': 'application',
-        'app.kubernetes.io/part-of': 'nightscout-tenant',
-        'app.kubernetes.io/instance': tenantId,
-        'app.kubernetes.io/managed-by': 'metacontroller',
-        'ns.mdn.io/tenant': tenantId
-      }
-    },
-    spec: {
-      serviceName: tenantId,
-      replicas: 1,
-      persistentVolumeClaimRetentionPolicy: {
-        whenDeleted: 'Retain',
-        whenScaled: 'Retain'
-      },
-      selector: {
-        matchLabels: {
-          'app.kubernetes.io/instance': tenantId
-        }
-      },
-      template: {
-        metadata: {
-          labels: {
-            'app.kubernetes.io/name': 'nightscout-tenant',
-            'app.kubernetes.io/component': 'application',
-            'app.kubernetes.io/part-of': 'nightscout-tenant',
-            'app.kubernetes.io/instance': tenantId,
-            'ns.mdn.io/tenant': tenantId
-          }
-        },
-        spec: {
-          initContainers: [
-            {
-              name: 'prepare-keyfile',
-              image: config.images?.utility || 'busybox:latest',
-              command: ['sh', '-c', 'cp /keyfile-secret/keyfile /keyfile-prep/keyfile && chmod 400 /keyfile-prep/keyfile && chown 999:999 /keyfile-prep/keyfile'],
-              volumeMounts: [
-                {
-                  name: 'keyfile-secret',
-                  mountPath: '/keyfile-secret',
-                  readOnly: true
-                },
-                {
-                  name: 'keyfile-prep',
-                  mountPath: '/keyfile-prep'
-                }
-              ]
-            }
-          ],
-          containers: [
-            {
-              name: 'mongodb',
-              image: mongoImage,
-              ports: [
-                {
-                  name: 'mongodb',
-                  containerPort: 27017
-                }
-              ],
-              env: [
-                {
-                  name: 'MONGO_INITDB_ROOT_USERNAME',
-                  valueFrom: {
-                    secretKeyRef: {
-                      name: authSecretName,
-                      key: 'MONGO_INITDB_ROOT_USERNAME'
-                    }
-                  }
-                },
-                {
-                  name: 'MONGO_INITDB_ROOT_PASSWORD',
-                  valueFrom: {
-                    secretKeyRef: {
-                      name: authSecretName,
-                      key: 'MONGO_INITDB_ROOT_PASSWORD'
-                    }
-                  }
-                },
-                {
-                  name: 'MONGO_INITDB_DATABASE',
-                  valueFrom: {
-                    secretKeyRef: {
-                      name: authSecretName,
-                      key: 'MONGO_INITDB_DATABASE'
-                    }
-                  }
-                }
-              ],
-              args: [
-                '--bind_ip_all',
-                '--replSet', 'rs0',
-                '--keyFile', '/keyfile/keyfile'
-              ],
-              volumeMounts: [
-                {
-                  name: 'data',
-                  mountPath: '/data/db'
-                },
-                {
-                  name: 'keyfile-prep',
-                  mountPath: '/keyfile',
-                  readOnly: true
-                }
-              ],
-              resources: {
-                requests: mongoResources.requests || {
-                  cpu: '100m',
-                  memory: '256Mi'
-                },
-                limits: mongoResources.limits || {
-                  cpu: '500m',
-                  memory: '512Mi'
-                }
-              }
-            },
-            {
-              name: 'nightscout',
-              image: nightscoutImage,
-              ports: [
-                {
-                  name: 'http',
-                  containerPort: 1337
-                }
-              ],
-              envFrom: [
-                {
-                  secretRef: {
-                    name: nightscoutSecretName
-                  }
-                }
-              ],
-              env: spec.env || [],
-              resources: {
-                requests: nsResources.requests || {
-                  cpu: '100m',
-                  memory: '256Mi'
-                },
-                limits: nsResources.limits || {
-                  cpu: '1000m',
-                  memory: '1Gi'
-                }
-              }
-            }
-          ],
-          volumes: [
-            {
-              name: 'keyfile-secret',
-              secret: {
-                secretName: keyfileSecretName,
-                defaultMode: 0o400
-              }
-            },
-            {
-              name: 'keyfile-prep',
-              emptyDir: {}
-            }
-          ]
-        }
-      },
-      volumeClaimTemplates: [
-        {
-          metadata: {
-            name: 'data',
-            labels: {
-              'app.kubernetes.io/name': 'mongodb',
-              'app.kubernetes.io/component': 'database',
-              'app.kubernetes.io/part-of': 'nightscout-tenant',
-              'app.kubernetes.io/instance': tenantId,
-              'ns.mdn.io/tenant': tenantId
-            },
-            annotations: {
-              'ns.mdn.io/backup-policy': spec.backup?.policy || 'snapshot',
-              'ns.mdn.io/created-at': new Date().toISOString()
-            }
-          },
-          spec: {
-            accessModes: ['ReadWriteOnce'],
-            storageClassName: storageClass,
-            resources: {
-              requests: {
-                storage: storageSize
-              }
-            }
-          }
-        }
-      ]
-    }
-  };
-}
 
-/**
- * Render direct Pod for steady state
- * Mounts existing PVC created by StatefulSet
- */
-function renderPod(tenantId, namespace, spec, pvcName, authSecret, keyfileSecret, nightscoutSecret, config) {
-  const mongoVersion = spec.mongodbVersion || '7.0';
-  const mongoImage = spec.mongodbImage || `mongo:${mongoVersion}`;
-  const nightscoutImage = spec.nightscoutImage || 'nightscout/cgm-remote-monitor:latest';
+function renderAppCredentialsSecret(tenantId, namespace, databaseName, existingSecret, labels) {
+      
+  const secretName = `${tenantId}-app-credentials`;
+  var existingAnnotations = existingSecret?.metadata?.annotations || { };
+  var existingLabels = existingSecret?.metadata?.labels || { };
+
+  // Standard annotations that are always set
+  const standardAnnotations = {
+    'ns.mdn.io/created-at': new Date().toISOString(),
+    'ns.mdn.io/tenant': tenantId,
+    'ns.mdn.io/description': 'MongoDB credentials for Nightscout application pods',
+    [ANNOTATIONS.PROTECTED_RESOURCE]: 'true'
+  };
   
-  const mongoResources = spec.mongoResources || {};
-  const nsResources = spec.nightscoutResources || {};
-  
-  const authSecretName = authSecret.metadata.name;
-  const keyfileSecretName = keyfileSecret.metadata.name;
-  const nightscoutSecretName = nightscoutSecret.metadata.name;
-  
-  return {
+  // Merge existing annotations (lifecycle tracking) with standard annotations
+  // Existing annotations take precedence to preserve user-initialized state
+  const mergedAnnotations = {
+    ...standardAnnotations,
+    ...existingAnnotations
+  };
+
+  const mergedLabels = {
+    ...labels,
+    ...existingLabels
+  };
+
+  var secret = {
     apiVersion: 'v1',
-    kind: 'Pod',
+    kind: 'Secret',
     metadata: {
-      name: `${tenantId}-0`,
+      name: secretName,
       namespace: namespace,
       labels: {
-        'app.kubernetes.io/name': 'nightscout-tenant',
-        'app.kubernetes.io/component': 'application',
-        'app.kubernetes.io/part-of': 'nightscout-tenant',
-        'app.kubernetes.io/instance': tenantId,
+        ...mergedLabels,
+        'app.kubernetes.io/component': 'app-credentials',
         'app.kubernetes.io/managed-by': 'metacontroller',
-        'ns.mdn.io/tenant': tenantId
-      }
-    },
-    spec: {
-      initContainers: [
-        {
-          name: 'prepare-keyfile',
-          image: config.images?.utility || 'busybox:latest',
-          command: ['sh', '-c', 'cp /keyfile-secret/keyfile /keyfile-prep/keyfile && chmod 400 /keyfile-prep/keyfile && chown 999:999 /keyfile-prep/keyfile'],
-          volumeMounts: [
-            {
-              name: 'keyfile-secret',
-              mountPath: '/keyfile-secret',
-              readOnly: true
-            },
-            {
-              name: 'keyfile-prep',
-              mountPath: '/keyfile-prep'
-            }
-          ]
-        }
-      ],
-      containers: [
-        {
-          name: 'mongodb',
-          image: mongoImage,
-          ports: [
-            {
-              name: 'mongodb',
-              containerPort: 27017
-            }
-          ],
-          env: [
-            {
-              name: 'MONGO_INITDB_ROOT_USERNAME',
-              valueFrom: {
-                secretKeyRef: {
-                  name: authSecretName,
-                  key: 'MONGO_INITDB_ROOT_USERNAME'
-                }
-              }
-            },
-            {
-              name: 'MONGO_INITDB_ROOT_PASSWORD',
-              valueFrom: {
-                secretKeyRef: {
-                  name: authSecretName,
-                  key: 'MONGO_INITDB_ROOT_PASSWORD'
-                }
-              }
-            }
-          ],
-          args: [
-            '--bind_ip_all',
-            '--replSet', 'rs0',
-            '--keyFile', '/keyfile/keyfile'
-          ],
-          volumeMounts: [
-            {
-              name: 'data',
-              mountPath: '/data/db'
-            },
-            {
-              name: 'keyfile-prep',
-              mountPath: '/keyfile',
-              readOnly: true
-            }
-          ],
-          resources: {
-            requests: mongoResources.requests || {
-              cpu: '100m',
-              memory: '256Mi'
-            },
-            limits: mongoResources.limits || {
-              cpu: '500m',
-              memory: '512Mi'
-            }
-          }
-        },
-        {
-          name: 'nightscout',
-          image: nightscoutImage,
-          ports: [
-            {
-              name: 'http',
-              containerPort: 1337
-            }
-          ],
-          envFrom: [
-            {
-              secretRef: {
-                name: nightscoutSecretName
-              }
-            }
-          ],
-          env: spec.env || [],
-          resources: {
-            requests: nsResources.requests || {
-              cpu: '100m',
-              memory: '256Mi'
-            },
-            limits: nsResources.limits || {
-              cpu: '1000m',
-              memory: '1Gi'
-            }
-          }
-        }
-      ],
-      volumes: [
-        {
-          name: 'data',
-          persistentVolumeClaim: {
-            claimName: pvcName
-          }
-        },
-        {
-          name: 'keyfile-secret',
-          secret: {
-            secretName: keyfileSecretName,
-            defaultMode: 0o400
-          }
-        },
-        {
-          name: 'keyfile-prep',
-          emptyDir: {}
-        }
-      ]
-    }
-  };
-}
-
-/**
- * Render ReplicaSet for compute layer (Gen5)
- * Co-located MongoDB + Nightscout containers, references provisioner-created PVC
- */
-function renderReplicaSet(tenantId, namespace, spec, authSecret, keyfileSecret, nightscoutSecret, config) {
-  const mongoVersion = spec.mongodbVersion || '7.0';
-  const mongoImage = spec.mongodbImage || `mongo:${mongoVersion}`;
-  const nightscoutImage = spec.nightscoutImage || 'nightscout/cgm-remote-monitor:latest';
-  
-  const mongoResources = spec.mongoResources || {};
-  const nsResources = spec.nightscoutResources || {};
-  const pvcName = spec.pvcName;
-  
-  const authSecretName = authSecret.metadata.name;
-  const keyfileSecretName = keyfileSecret.metadata.name;
-  const nightscoutSecretName = nightscoutSecret.metadata.name;
-  
-  // Build selector labels from spec.selector or use defaults
-  const selectorLabels = spec.selector && Object.keys(spec.selector).length > 0
-    ? spec.selector
-    : { 'app.kubernetes.io/instance': tenantId };
-  
-  return {
-    apiVersion: 'apps/v1',
-    kind: 'ReplicaSet',
-    metadata: {
-      name: `${tenantId}-rs`,
-      namespace: namespace,
-      labels: {
-        'app.kubernetes.io/name': 'nightscout-tenant',
-        'app.kubernetes.io/component': 'application',
-        'app.kubernetes.io/part-of': 'nightscout-tenant',
-        'app.kubernetes.io/instance': tenantId,
-        'app.kubernetes.io/managed-by': 'metacontroller',
-        'ns.mdn.io/tenant': tenantId,
-        ...selectorLabels
-      }
-    },
-    spec: {
-      replicas: 1,
-      selector: {
-        matchLabels: selectorLabels
+        'ns.mdn.io/decorator': 'storage-credentials',
+        'ns.mdn.io/credential-type': 'application',
+        [LABELS.RESOURCE_TYPE]: RESOURCE_TYPES.APP_CREDENTIALS_SECRET
       },
-      template: {
-        metadata: {
-          labels: {
-            'app.kubernetes.io/name': 'nightscout-tenant',
-            'app.kubernetes.io/component': 'application',
-            'app.kubernetes.io/part-of': 'nightscout-tenant',
-            'app.kubernetes.io/instance': tenantId,
-            'ns.mdn.io/tenant': tenantId,
-            ...selectorLabels
-          }
-        },
-        spec: {
-          initContainers: [
-            {
-              name: 'prepare-keyfile',
-              image: config.images?.utility || 'busybox:latest',
-              command: ['sh', '-c', 'cp /keyfile-secret/keyfile /keyfile-prep/keyfile && chmod 400 /keyfile-prep/keyfile && chown 999:999 /keyfile-prep/keyfile'],
-              volumeMounts: [
-                {
-                  name: 'keyfile-secret',
-                  mountPath: '/keyfile-secret',
-                  readOnly: true
-                },
-                {
-                  name: 'keyfile-prep',
-                  mountPath: '/keyfile-prep'
-                }
-              ]
-            }
-          ],
-          containers: [
-            {
-              name: 'mongodb',
-              image: mongoImage,
-              ports: [
-                {
-                  name: 'mongodb',
-                  containerPort: 27017
-                }
-              ],
-              env: [
-                {
-                  name: 'MONGO_INITDB_ROOT_USERNAME',
-                  valueFrom: {
-                    secretKeyRef: {
-                      name: authSecretName,
-                      key: 'MONGO_INITDB_ROOT_USERNAME'
-                    }
-                  }
-                },
-                {
-                  name: 'MONGO_INITDB_ROOT_PASSWORD',
-                  valueFrom: {
-                    secretKeyRef: {
-                      name: authSecretName,
-                      key: 'MONGO_INITDB_ROOT_PASSWORD'
-                    }
-                  }
-                },
-                {
-                  name: 'MONGO_INITDB_DATABASE',
-                  valueFrom: {
-                    secretKeyRef: {
-                      name: authSecretName,
-                      key: 'MONGO_INITDB_DATABASE'
-                    }
-                  }
-                }
-              ],
-              args: [
-                '--bind_ip_all',
-                '--replSet', 'rs0',
-                '--keyFile', '/keyfile/keyfile'
-              ],
-              volumeMounts: [
-                {
-                  name: 'data',
-                  mountPath: '/data/db'
-                },
-                {
-                  name: 'keyfile-prep',
-                  mountPath: '/keyfile',
-                  readOnly: true
-                }
-              ],
-              resources: {
-                requests: mongoResources.requests || {
-                  cpu: '100m',
-                  memory: '256Mi'
-                },
-                limits: mongoResources.limits || {
-                  cpu: '500m',
-                  memory: '512Mi'
-                }
-              }
-            },
-            {
-              name: 'nightscout',
-              image: nightscoutImage,
-              ports: [
-                {
-                  name: 'http',
-                  containerPort: 1337
-                }
-              ],
-              envFrom: [
-                {
-                  secretRef: {
-                    name: nightscoutSecretName
-                  }
-                }
-              ],
-              env: spec.env || [],
-              resources: {
-                requests: nsResources.requests || {
-                  cpu: '100m',
-                  memory: '256Mi'
-                },
-                limits: nsResources.limits || {
-                  cpu: '1000m',
-                  memory: '1Gi'
-                }
-              }
-            }
-          ],
-          volumes: [
-            {
-              name: 'data',
-              persistentVolumeClaim: {
-                claimName: pvcName
-              }
-            },
-            {
-              name: 'keyfile-secret',
-              secret: {
-                secretName: keyfileSecretName,
-                defaultMode: 0o400
-              }
-            },
-            {
-              name: 'keyfile-prep',
-              emptyDir: {}
-            }
-          ]
-        }
-      }
-    }
+      annotations: mergedAnnotations
+    },
+    type: 'Opaque',
+
   };
+
+  if (existingSecret) {
+    secret.data = existingSecret.data;
+    secret.type = existingSecret.type;
+  } else {
+    console.log(`  FIRST CYCLE - GENERATING NEW APP CREDENTIALS`);
+    const username = generateUsername(tenantId);
+    const password = generateSecurePassword(16);
+    
+    const mongoHost = `mongo-${databaseName}`;
+    const mongoPort = '27017';
+    
+    const appCredentials = generateAppCredentials(
+      tenantId,
+      mongoHost,
+      mongoPort,
+      databaseName,
+      username,
+      password
+    );
+
+    // Encode all credential fields to base64
+    var encodedData = {};
+    Object.keys(appCredentials).forEach(key => {
+      encodedData[key] = Buffer.from(appCredentials[key]).toString('base64');
+    });
+    secret.data = encodedData;
+  }
+  return secret;
 }
 
 module.exports = createTenantCompositeSync;
