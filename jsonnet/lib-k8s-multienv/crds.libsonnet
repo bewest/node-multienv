@@ -610,7 +610,7 @@
               properties: {
                 spec: {
                   type: 'object',
-                  required: ['pvcName', 'mongoAuthSecretRef', 'selector', 'initialStorageType', 'mongodbVersion'],
+                  required: ['pvcName', 'mongoAuthSecretRef', 'initialStorageType', 'mongodbVersion'],
                   properties: {
                     // Provisioner-managed resources (created externally)
                     pvcName: {
@@ -621,39 +621,17 @@
                       type: 'string',
                       description: 'Name of the Secret containing MongoDB authentication credentials',
                     },
-                    selector: {
+                    configMapRef: {
                       type: 'object',
-                      description: 'Label selector for resources managed by this StorageAccount',
+                      description: 'Optional reference to provisioner-managed ConfigMap for tenant userdata. ConfigMap presence enables compute layer (ReplicaSet renders). Missing/deleted ConfigMap = storage-only mode (no pods). Deleting ConfigMap via environs API stops tenant execution.',
                       properties: {
-                        matchLabels: {
-                          type: 'object',
-                          additionalProperties: {
-                            type: 'string',
-                          },
-                          description: 'Map of label key-value pairs that must match',
+                        name: {
+                          type: 'string',
+                          description: 'Name of ConfigMap (for migration/adoption)',
                         },
-                        matchExpressions: {
-                          type: 'array',
-                          description: 'List of label selector requirements',
-                          items: {
-                            type: 'object',
-                            required: ['key', 'operator'],
-                            properties: {
-                              key: {
-                                type: 'string',
-                              },
-                              operator: {
-                                type: 'string',
-                                enum: ['In', 'NotIn', 'Exists', 'DoesNotExist'],
-                              },
-                              values: {
-                                type: 'array',
-                                items: {
-                                  type: 'string',
-                                },
-                              },
-                            },
-                          },
+                        namespace: {
+                          type: 'string',
+                          description: 'Namespace of ConfigMap (default to CR namespace)',
                         },
                       },
                     },
