@@ -11,15 +11,17 @@
  *   - NightscoutTenant CR (minimal spec with refs)
  * 
  * Phase 2 (ConfigMap activates compute):
- *   Pattern A (Explicit Reference): spec.configMapRef provided
- *     - Provisioner creates ConfigMap for migration/adoption
- *     - Controller adopts existing ConfigMap (preserves name/namespace)
- *   Pattern B (Default Creation): No spec.configMapRef
- *     - Controller creates default ConfigMap with tenantId as name
- *     - Uses Nightscout runtime defaults (DISPLAY_UNITS, CUSTOM_TITLE, etc.)
+ *   - Provisioner creates ConfigMap and sets spec.configMapRef
+ *   - Controller adopts existing ConfigMap (preserves name/namespace)
+ *   - ConfigMap presence enables compute (ReplicaSet rendered)
+ *   - No ConfigMap OR deleted ConfigMap = storage-only mode (no pods)
  * 
- * Children (Storage + Compute - Always Rendered):
- *   - ConfigMap (adopted from provisioner OR created with defaults)
+ * Children (Storage Only - No ConfigMap):
+ *   - MongoDB Keyfile Secret
+ *   - Init Replica Set Job (if needed)
+ * 
+ * Children (Storage + Compute - ConfigMap Present):
+ *   - ConfigMap (adopted from provisioner with preserved identity)
  *   - ReplicaSet (replicas: 1, co-located MongoDB + Nightscout)
  *   - MongoDB Keyfile Secret
  *   - App-Credentials Secret (THE Nightscout app Secret with MongoDB credentials + runtime config)
@@ -28,7 +30,7 @@
  * Related (not owned):
  *   - PVC (created by provisioner, referenced in spec)
  *   - mongo-auth Secret (created by provisioner, referenced in spec)
- *   - ConfigMap (optional - provisioner-managed for migration, referenced in spec.configMapRef)
+ *   - ConfigMap (created by provisioner, referenced in spec.configMapRef, enables compute)
  */
 
 const crypto = require('crypto');
@@ -37,8 +39,7 @@ const {
   generateSecurePassword, 
   generateUsername,
   generateAppCredentials,
-  renderAppCredentialsSecret,
-  renderDefaultConfigMap
+  renderAppCredentialsSecret
 } = require('./resources');
 
 function createTenantCompositeSync(config) {
@@ -287,16 +288,16 @@ function createTenantCompositeSync(config) {
   }
   
   /**
-   * Stage 3b: Ensure ConfigMap exists (adopt from provisioner OR create with defaults)
+   * Stage 3b: Ensure ConfigMap exists (adopt from provisioner if referenced)
    * Gen5: ConfigMap activates compute layer
    * 
-   * Pattern 1 (Explicit Reference): spec.configMapRef provided
-   *   - Provisioner creates ConfigMap for migration/adoption
+   * spec.configMapRef provided:
    *   - Controller adopts existing ConfigMap (preserves name/namespace)
+   *   - ConfigMap presence enables compute (ReplicaSet rendered)
    * 
-   * Pattern 2 (Default Creation): No spec.configMapRef
-   *   - Controller creates default ConfigMap with tenantId as name
-   *   - Uses Nightscout runtime defaults (DISPLAY_UNITS, CUSTOM_TITLE, etc.)
+   * No spec.configMapRef OR ConfigMap deleted:
+   *   - Storage-only mode (no compute, no pods)
+   *   - Deleting ConfigMap via environs API stops tenant execution
    */
   function ensureConfigMap(req, res, next) {
     const tenantId = req.tenantId;
@@ -307,125 +308,96 @@ function createTenantCompositeSync(config) {
     console.log(`Stage 3b: Ensuring ConfigMap for ${tenantId}`);
     console.log(`  configMapRef: ${JSON.stringify(configMapRef)}`);
     
-    // Pattern 1: Explicit configMapRef - adopt provisioner-managed ConfigMap
-    if (configMapRef && configMapRef.name) {
-      const configMapName = configMapRef.name;
-      const configMapNamespace = configMapRef.namespace || namespace;
-      
-      console.log(`  Looking for referenced ConfigMap: ${configMapNamespace}/${configMapName}`);
-      
-      // Look for referenced ConfigMap in related resources
-      const existingConfigMap = findResource(
-        req.related['configmaps.v1'],
-        configMapName,
-        configMapNamespace
-      );
-      
-      if (existingConfigMap) {
-        console.log(`  Found existing ConfigMap - adopting for compute activation`);
-        
-        // Adopt existing ConfigMap (preserves name/namespace, adds management labels)
-        const adoptedConfigMap = cleanResource(existingConfigMap);
-        
-        // Add management labels
-        if (!adoptedConfigMap.metadata.labels) {
-          adoptedConfigMap.metadata.labels = {};
-        }
-        adoptedConfigMap.metadata.labels['app.kubernetes.io/managed-by'] = 'metacontroller';
-        adoptedConfigMap.metadata.labels['app.kubernetes.io/instance'] = tenantId;
-        
-        res.children.push(adoptedConfigMap);
-        req.computeEnabled = true;
-        req.computeConfigMap = adoptedConfigMap;
-        
-        res.status.conditions.push({
-          type: 'ComputeActivated',
-          status: 'True',
-          reason: 'ConfigMapAdopted',
-          message: `ConfigMap ${configMapNamespace}/${configMapName} adopted (compute enabled)`
-        });
-        
-        return next();
-      }
-      
-      // Referenced ConfigMap not found - error state
-      console.log(`  ERROR: ConfigMap ${configMapNamespace}/${configMapName} not found`);
+    // Preserve existing Error phase (don't override)
+    const currentPhase = res.status.phase;
+    const inErrorState = currentPhase === 'Error';
+    
+    // No configMapRef means storage-only mode (no compute activation)
+    if (!configMapRef || !configMapRef.name) {
+      console.log(`  No configMapRef - storage-only mode (no compute)`);
       req.computeEnabled = false;
       req.computeConfigMap = null;
-      res.status.phase = 'Error';
+      
+      // Only set phase if not already in Error state
+      if (!inErrorState) {
+        res.status.phase = 'Provisioned';
+      }
       
       res.status.conditions.push({
         type: 'ComputeActivated',
         status: 'False',
-        reason: 'ConfigMapNotFound',
-        message: `Referenced ConfigMap ${configMapNamespace}/${configMapName} not found`
+        reason: 'NoConfigMapRef',
+        message: 'No spec.configMapRef configured (storage-only mode)'
       });
-      
       return next();
     }
     
-    // Pattern 2: No configMapRef - create default ConfigMap with tenantId as name
-    console.log(`  No configMapRef - creating default ConfigMap`);
-    const defaultConfigMapName = tenantId;
+    // Explicit configMapRef - adopt provisioner-managed ConfigMap
+    const configMapName = configMapRef.name;
+    const configMapNamespace = configMapRef.namespace || namespace;
     
-    // Check if default ConfigMap already exists in children (owned)
-    let existingDefaultConfigMap = findResource(
+    console.log(`  Looking for referenced ConfigMap: ${configMapNamespace}/${configMapName}`);
+    
+    // Look for referenced ConfigMap in children (owned) or related (actual cluster state)
+    // After first reconcile, adopted ConfigMap moves from related to children
+    let existingConfigMap = findResource(
       req.children['configmaps.v1'],
-      defaultConfigMapName,
-      namespace
+      configMapName,
+      configMapNamespace
     );
     
-    // Also check related resources (actual cluster state for first reconcile)
-    if (!existingDefaultConfigMap) {
-      existingDefaultConfigMap = findResource(
+    // If not in children, check related resources (first reconcile)
+    if (!existingConfigMap) {
+      existingConfigMap = findResource(
         req.related['configmaps.v1'],
-        defaultConfigMapName,
-        namespace
+        configMapName,
+        configMapNamespace
       );
     }
     
-    if (existingDefaultConfigMap) {
-      console.log(`  Found existing default ConfigMap - adopting`);
-      const cleaned = cleanResource(existingDefaultConfigMap);
+    if (existingConfigMap) {
+      console.log(`  Found existing ConfigMap - adopting for compute activation`);
       
-      // Ensure management labels are present
-      if (!cleaned.metadata.labels) {
-        cleaned.metadata.labels = {};
+      // Adopt existing ConfigMap (preserves name/namespace, adds management labels)
+      const adoptedConfigMap = cleanResource(existingConfigMap);
+      
+      // Add management labels
+      if (!adoptedConfigMap.metadata.labels) {
+        adoptedConfigMap.metadata.labels = {};
       }
-      cleaned.metadata.labels['app.kubernetes.io/managed-by'] = 'metacontroller';
-      cleaned.metadata.labels['app.kubernetes.io/instance'] = tenantId;
+      adoptedConfigMap.metadata.labels['app.kubernetes.io/managed-by'] = 'metacontroller';
+      adoptedConfigMap.metadata.labels['app.kubernetes.io/instance'] = tenantId;
       
-      res.children.push(cleaned);
+      res.children.push(adoptedConfigMap);
       req.computeEnabled = true;
-      req.computeConfigMap = cleaned;
+      req.computeConfigMap = adoptedConfigMap;
       
       res.status.conditions.push({
         type: 'ComputeActivated',
         status: 'True',
-        reason: 'ConfigMapExists',
-        message: `Default ConfigMap ${defaultConfigMapName} exists (compute enabled)`
+        reason: 'ConfigMapAdopted',
+        message: `ConfigMap ${configMapNamespace}/${configMapName} adopted (compute enabled)`
       });
       
       return next();
     }
     
-    // Create new default ConfigMap with Nightscout runtime defaults
-    console.log(`  Creating new default ConfigMap with runtime defaults`);
-    const defaultConfigMap = renderDefaultConfigMap(
-      tenantId,
-      namespace,
-      req.parent.metadata.labels || {}
-    );
+    // ConfigMap referenced but not found - storage-only mode (compute disabled)
+    // This happens when ConfigMap deleted via environs API to stop tenant
+    console.log(`  ConfigMap ${configMapNamespace}/${configMapName} not found - storage-only mode`);
+    req.computeEnabled = false;
+    req.computeConfigMap = null;
     
-    res.children.push(defaultConfigMap);
-    req.computeEnabled = true;
-    req.computeConfigMap = defaultConfigMap;
+    // Only set phase if not already in Error state
+    if (!inErrorState) {
+      res.status.phase = 'Provisioned';
+    }
     
     res.status.conditions.push({
       type: 'ComputeActivated',
-      status: 'True',
-      reason: 'ConfigMapCreated',
-      message: `Default ConfigMap ${defaultConfigMapName} created (compute enabled)`
+      status: 'False',
+      reason: 'ConfigMapNotFound',
+      message: `ConfigMap ${configMapNamespace}/${configMapName} not found (storage-only mode)`
     });
     
     return next();

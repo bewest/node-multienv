@@ -1042,53 +1042,6 @@ function renderAppCredentialsSecret(tenantId, namespace, databaseName, existingS
   return secret;
 }
 
-/**
- * Render default ConfigMap with Nightscout runtime defaults
- * 
- * ConfigMap contains tenant userdata (UI preferences, feature flags, etc.)
- * Does NOT contain credentials (those live in app-credentials Secret)
- * 
- * Gen5 Pattern: Provisioner provides ConfigMap for migration/adoption
- * OR controller creates this default ConfigMap with sensible defaults
- * 
- * @param {string} tenantId - Tenant identifier
- * @param {string} namespace - Namespace to create ConfigMap in
- * @param {object} labels - Labels to apply to ConfigMap
- * @returns {object} ConfigMap manifest
- */
-function renderDefaultConfigMap(tenantId, namespace, labels = {}) {
-  return {
-    apiVersion: 'v1',
-    kind: 'ConfigMap',
-    metadata: {
-      name: tenantId,
-      namespace: namespace,
-      labels: {
-        'app.kubernetes.io/name': 'nightscout',
-        'app.kubernetes.io/component': 'userdata',
-        'app.kubernetes.io/part-of': 'nightscout-tenant',
-        'app.kubernetes.io/instance': tenantId,
-        'app.kubernetes.io/managed-by': 'metacontroller',
-        ...labels
-      },
-      annotations: {
-        'nightscout.io/created-by': 'tenant-composite-controller',
-        'nightscout.io/created-at': new Date().toISOString()
-      }
-    },
-    data: {
-      // Nightscout UI/feature defaults (userdata, not credentials)
-      // Users can customize these via ConfigMap edits
-      DISPLAY_UNITS: 'mg/dl',
-      CUSTOM_TITLE: 'Nightscout',
-      SHOW_RAWBG: 'always',
-      SHOW_PLUGINS: 'careportal basal dbsize rawbg iob cob bwp cage iage sage boluscalc',
-      LANGUAGE: 'en',
-      SCALE_Y: 'log'
-    }
-  };
-}
-
 module.exports = {
   renderMongoDB,
   renderNightscout,
@@ -1099,6 +1052,5 @@ module.exports = {
   generateUsername,
   generateDatabaseName,
   generateAppCredentials,
-  renderAppCredentialsSecret,
-  renderDefaultConfigMap
+  renderAppCredentialsSecret
 };
