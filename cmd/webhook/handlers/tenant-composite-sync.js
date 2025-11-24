@@ -323,8 +323,8 @@ function createTenantCompositeSync(config) {
     // Check migration annotation on parent CR
     req.migrationRequested = req.parent.metadata?.annotations?.['nightscout.io/migrate-to-dedicated'] === 'true';
     
-    // Read runtime-required from mongo-auth Secret (set by provisioner or decorator)
-    const runtimeRequired = req.authSecret?.metadata?.annotations?.['ns.mdn.io/runtime-required'];
+    // Read runtime-required from self (set by provisioner or decorator)
+    const runtimeRequired = req.parent?.metadata?.annotations?.['ns.mdn.io/runtime-required'];
     req.storageType = runtimeRequired || initialStorageType;
     
     // Standardized credential detection (matches Gen4 storage-credentials decorator)
@@ -338,7 +338,14 @@ function createTenantCompositeSync(config) {
     if (!res.annotations) {
       res.annotations = {};
     }
-    res.annotations['ns.mdn.io/runtime-required'] = initialStorageType;
+    // Only set if not already set.
+    if (!runtimeRequired) {
+      res.annotations['ns.mdn.io/runtime-required'] = initialStorageType;
+    }
+    // 
+    if (!req.credentialsRequested) {
+      res.annotations['ns.mdn.io/runtime-required'] = 'dedicated';
+    }
     
     console.log(`  Set runtime-required annotation: ${initialStorageType}`);
     
