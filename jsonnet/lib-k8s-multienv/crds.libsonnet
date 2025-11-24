@@ -610,7 +610,7 @@
               properties: {
                 spec: {
                   type: 'object',
-                  required: ['pvcName', 'mongoAuthSecretRef', 'initialStorageType', 'mongodbVersion'],
+                  required: ['pvcName', 'mongoAuthSecretRef', 'selector', 'initialStorageType', 'mongodbVersion'],
                   properties: {
                     // Provisioner-managed resources (created externally)
                     pvcName: {
@@ -620,6 +620,42 @@
                     mongoAuthSecretRef: {
                       type: 'string',
                       description: 'Name of the Secret containing MongoDB authentication credentials',
+                    },
+                    selector: {
+                      type: 'object',
+                      description: 'Label selector for Metacontroller child resource matching. Required for generateSelectors: false pattern (controller coordination, offline migration, versioned controllers).',
+                      properties: {
+                        matchLabels: {
+                          type: 'object',
+                          additionalProperties: {
+                            type: 'string',
+                          },
+                          description: 'Map of label key-value pairs that must match',
+                        },
+                        matchExpressions: {
+                          type: 'array',
+                          description: 'List of label selector requirements',
+                          items: {
+                            type: 'object',
+                            required: ['key', 'operator'],
+                            properties: {
+                              key: {
+                                type: 'string',
+                              },
+                              operator: {
+                                type: 'string',
+                                enum: ['In', 'NotIn', 'Exists', 'DoesNotExist'],
+                              },
+                              values: {
+                                type: 'array',
+                                items: {
+                                  type: 'string',
+                                },
+                              },
+                            },
+                          },
+                        },
+                      },
                     },
                     configMapRef: {
                       type: 'object',
