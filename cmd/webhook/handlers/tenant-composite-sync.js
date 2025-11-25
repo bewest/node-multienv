@@ -743,7 +743,7 @@ function createTenantCompositeSync(config) {
     res.children.push(pod);
     
     // Check existing Pod status for phase determination
-    const existingPod = findResource(req.children['pods.v1'], `${resourceName}-pod`, req.namespace);
+    const existingPod = findResource(req.children['Pod.v1'], `${resourceName}-pod`, req.namespace);
     const podReady = existingPod?.status?.conditions?.find(c => c.type === 'Ready' && c.status === 'True');
     const mongoReady = existingPod?.status?.containerStatuses?.find(c => c.name === 'mongodb' && c.ready);
     
@@ -788,7 +788,7 @@ function createTenantCompositeSync(config) {
       });
     } else {
       // Starting up - MongoDB container initializing
-      res.status.phase = 'Starting';
+      res.status.phase = 'Pending';
       res.status.conditions.push({
         type: 'Ready',
         status: 'False',

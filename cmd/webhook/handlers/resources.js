@@ -1338,6 +1338,135 @@ function renderTenantPod(resourceName, namespace, spec, authSecret, keyfileSecre
   return pod;
 }
 
+/**
+ * Render create-user Job to create MongoDB user with NS app credentials
+ */
+function renderCreateUserJob(adminRefName, secretName, tenantId, namespace, storageAccount, mongoHostname, config) {
+  // const namespace = secret.metadata.namespace;
+  // const secretName = secret.metadata.name;
+  const jobName = `${storageAccount}-${tenantId}-create-user`;
+  const forceCreate = true;
+  const utilityImagePullSecret = config.imagePullSecrets;
+  
+  return {
+    apiVersion: 'batch/v1',
+    kind: 'Job',
+    metadata: {
+      name: jobName,
+      namespace: namespace,
+      labels: {
+        'storage.nightscout.org/account': storageAccount,
+        'nightscout.io/tenant': tenantId,
+        'app.kubernetes.io/component': 'user-initialization',
+        'ns.mdn.io/composite': 'storage-create-user'
+      },
+      annotations: {
+
+      }
+    },
+    spec: {
+      ttlSecondsAfterFinished: config.jobs.ttlSecondsAfterFinished,
+      backoffLimit: config.jobs.backoffLimit,
+      template: {
+        metadata: {
+          labels: {
+            'storage.nightscout.org/account': storageAccount,
+            'nightscout.io/tenant': tenantId,
+            'app.kubernetes.io/component': 'user-initialization'
+          }
+        },
+        spec: {
+          imagePullSecrets: config.jobs.imagePullSecrets,
+          restartPolicy: 'OnFailure',
+          containers: [{
+            name: 'create-user',
+            image: config.images.nsUtility,
+            imagePullPolicy: config.images.nsUtilityPullPolicy,
+            command: config.commands.createUser, // ['/app/multienvctl/entrypoints/create-mongodb-user.sh'],
+            env: [
+              { name: 'MONGO_PORT', value: '27017' },
+              { name: 'FORCE_USER_CREATE', value: forceCreate ? 'true' : 'false' },
+              {
+                name: 'MONGO_PORT',
+                value: '27017'
+              },
+              {
+                name: 'MONGO_RS_NAME',
+                value: 'rs0'
+              },
+              {
+                name: 'NSUSER_USERNAME',
+                valueFrom: {
+                  secretKeyRef: {
+                    name: secretName,
+                    key: 'MONGO_USERNAME'
+                  }
+                }
+              },
+              {
+                name: 'NSUSER_PASSWORD',
+                valueFrom: {
+                  secretKeyRef: {
+                    name: secretName,
+                    key: 'MONGO_PASSWORD'
+                  }
+                }
+              },
+              {
+                name: 'MONGO_ADMIN_USERNAME',
+                valueFrom: {
+                  secretKeyRef: {
+                    name: adminRefName,
+                    key: 'MONGO_INITDB_ROOT_USERNAME'
+                  }
+                }
+              },
+              {
+                name: 'MONGO_ADMIN_PASSWORD',
+                valueFrom: {
+                  secretKeyRef: {
+                    name: adminRefName,
+                    key: 'MONGO_INITDB_ROOT_PASSWORD'
+                  }
+                }
+              },
+              {
+                name: 'NSUSER_DATABASE',
+                valueFrom: {
+                  secretKeyRef: {
+                    name: adminRefName,
+                    key: 'MONGO_INITDB_DATABASE'
+                  }
+                }
+              },
+              {
+                name: 'MONGO_HOST',
+                // value: 'mongo-$(NSUSER_DATABASE)',
+                value: mongoHostname,
+              },
+              {
+                name: 'MONGO_ADMIN_URI',
+                value: 'mongodb://$(MONGO_ADMIN_USERNAME):$(MONGO_ADMIN_PASSWORD)@$(MONGO_HOST):27017/?authSource=admin'
+              },
+              { name: 'STORAGE_ACCOUNT', value: storageAccount }
+            ],
+            resources: {
+              requests: {
+                cpu: config.resources.utility.cpuRequest,
+                memory: config.resources.utility.memRequest
+              },
+              limits: {
+                cpu: config.resources.utility.cpuLimit,
+                memory: config.resources.utility.memLimit
+              }
+            }
+          }]
+        }
+      }
+    }
+  };
+}
+
 module.exports = {
   renderMongoDB,
   renderNightscout,
@@ -1349,5 +1478,6 @@ module.exports = {
   generateDatabaseName,
   generateAppCredentials,
   renderAppCredentialsSecret,
+  renderCreateUserJob,
   renderTenantPod
 };

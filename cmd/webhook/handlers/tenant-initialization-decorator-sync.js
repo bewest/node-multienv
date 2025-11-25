@@ -41,6 +41,9 @@
  */
 
 const crypto = require('crypto');
+const { 
+  renderCreateUserJob,
+} = require('./resources');
 
 function createTenantInitializationDecoratorSync(config) {
   
@@ -148,6 +151,7 @@ function createTenantInitializationDecoratorSync(config) {
   function initialize(req, res, next) {
     const { object: tenant, related } = req.body;
     
+    console.log("DECORATING INCOMING", JSON.stringify(req.body, null, 2));
     req.tenant = tenant;
     req.related = related || {};
     req.namespace = tenant.metadata.namespace;
@@ -430,6 +434,18 @@ function createTenantInitializationDecoratorSync(config) {
     console.log(`  Rendering create-user Job${existingJob ? ' (preserving existing)' : ' (new)'} → Pod IP: ${req.podIP}`);
     
     const identityLabels = buildIdentityLabels(req);
+    var mongoHostname = req.podIP;
+    const createUserJob = renderCreateUserJob(
+      req.mongoAuthSecret.metadata.name,
+      `${req.resourceName}-app-credentials`,
+      req.tenantId,
+      req.namespace,
+      req.storageId,
+      mongoHostname,
+      config
+    );
+
+    /*
     const createUserJob = renderCreateUserJob(
       req.resourceName,
       req.namespace,
@@ -440,6 +456,7 @@ function createTenantInitializationDecoratorSync(config) {
       config,
       existingJob  // Pass existing for preservation
     );
+    */
     
     res.attachments.push(createUserJob);
     
@@ -585,140 +602,6 @@ function createTenantInitializationDecoratorSync(config) {
     };
   }
   
-  /**
-   * Render create-user Job
-   * 
-   * If existing Job provided, cleans and returns it (preserves attachment)
-   * If no existing Job, creates fresh resource with Pod IP connectivity
-   * 
-   * @param resourceName - CR name, used for Job naming prefix
-   * @param namespace - Target namespace
-   * @param databaseName - MongoDB database name
-   * @param authSecret - mongo-auth Secret for credentials
-   * @param podIP - Pod IP address for MongoDB connectivity (Jobs run in separate Pods)
-   * @param identityLabels - Pre-built identity labels (ns.mdn.io/storage, ns.mdn.io/tenant)
-   * @param config - Controller configuration
-   * @param existing - Optional existing Job to preserve (cleans runtime metadata)
-   */
-  function renderCreateUserJob(resourceName, namespace, databaseName, authSecret, podIP, identityLabels, cfg, existing) {
-    // If existing Job provided, clean and return it to preserve attachment
-    if (existing) {
-      return cleanForAttachment(existing);
-    }
-    
-    // Create fresh Job with Pod IP connectivity
-    const authSecretName = authSecret.metadata.name;
-    const mongoHost = podIP;  // Connect via Pod IP (Jobs run in separate Pods)
-    
-    return {
-      apiVersion: 'batch/v1',
-      kind: 'Job',
-      metadata: {
-        name: `${resourceName}-create-user`,
-        namespace: namespace,
-        labels: {
-          'app.kubernetes.io/name': 'mongodb-user',
-          'app.kubernetes.io/component': 'user-initialization',
-          'app.kubernetes.io/part-of': 'nightscout-tenant',
-          'app.kubernetes.io/instance': resourceName,
-          'app.kubernetes.io/managed-by': 'metacontroller',
-          'ns.mdn.io/decorator': 'tenant-initialization',
-          ...identityLabels
-        }
-      },
-      spec: {
-        ttlSecondsAfterFinished: 86400, // 24 hours
-        backoffLimit: 3,
-        template: {
-          metadata: {
-            labels: {
-              'app.kubernetes.io/name': 'mongodb-user',
-              'app.kubernetes.io/component': 'user-initialization',
-              ...identityLabels
-            }
-          },
-          spec: {
-            restartPolicy: 'OnFailure',
-            containers: [
-              {
-                name: 'create-user',
-                image: cfg.images?.nsUtility || 'nightscout/ns-utility:latest',
-                command: ['/bin/bash', '-c'],
-                args: ['/scripts/create-mongodb-user.sh'],
-                env: [
-                  {
-                    name: 'MONGO_INITDB_ROOT_USERNAME',
-                    valueFrom: {
-                      secretKeyRef: {
-                        name: authSecretName,
-                        key: 'MONGO_INITDB_ROOT_USERNAME'
-                      }
-                    }
-                  },
-                  {
-                    name: 'MONGO_INITDB_ROOT_PASSWORD',
-                    valueFrom: {
-                      secretKeyRef: {
-                        name: authSecretName,
-                        key: 'MONGO_INITDB_ROOT_PASSWORD'
-                      }
-                    }
-                  },
-                  {
-                    name: 'MONGO_INITDB_DATABASE',
-                    value: databaseName
-                  },
-                  {
-                    name: 'APP_USERNAME',
-                    valueFrom: {
-                      secretKeyRef: {
-                        name: authSecretName,
-                        key: 'username'
-                      }
-                    }
-                  },
-                  {
-                    name: 'APP_PASSWORD',
-                    valueFrom: {
-                      secretKeyRef: {
-                        name: authSecretName,
-                        key: 'password'
-                      }
-                    }
-                  },
-                  {
-                    name: 'APP_DATABASE',
-                    valueFrom: {
-                      secretKeyRef: {
-                        name: authSecretName,
-                        key: 'database'
-                      }
-                    }
-                  },
-                  {
-                    name: 'MONGO_HOST',
-                    value: mongoHost
-                  },
-                  {
-                    name: 'MONGO_PORT',
-                    value: '27017'
-                  },
-                  {
-                    name: 'MONGO_RS_NAME',
-                    value: 'rs0'
-                  },
-                  {
-                    name: 'FORCE_USER_CREATE',
-                    value: 'true'
-                  }
-                ]
-              }
-            ]
-          }
-        }
-      }
-    };
-  }
   
   // Pipeline - stages execute in order
   // 1. initialize: Extract identity fields, validate spec.storage
