@@ -693,6 +693,7 @@ function createTenantCompositeSync(config) {
     
     // Read initialization annotations from parent (set by decorator)
     const annotations = req.parent.metadata?.annotations || {};
+    const replicaSetRequired = annotations['ns.mdn.io/replica-set-required'];
     const replicaSetInitialized = annotations['ns.mdn.io/replica-set-initialized'];
     const userInitialized = annotations['ns.mdn.io/user-initialized'];
     
@@ -700,7 +701,7 @@ function createTenantCompositeSync(config) {
     console.log(`  User initialized: ${userInitialized || 'no'}`);
     
     // Compute enabled but initialization not complete (decorator Jobs still running)
-    if (!replicaSetInitialized || !userInitialized) {
+    if ((replicaSetRequired && !replicaSetInitialized) || !userInitialized) {
       console.log(`  Waiting for initialization Jobs (managed by decorator)`);
       
       res.status.phase = 'Initializing';
@@ -738,8 +739,11 @@ function createTenantCompositeSync(config) {
     
     // Prerequisites satisfied and initialization complete - render ReplicaSet
     console.log(`  All prerequisites satisfied - rendering ReplicaSet`);
+    // Check if ReplicaSet is ready
+    const existingReplicaSet = findResource(req.children['ReplicaSet.v1.apps'], `${resourceName}-rs`, req.namespace);
+    const replicaSetReady = replicaSet?.status?.readyReplicas > 0;
     
-    const replicaSetResource = renderReplicaSet(
+    const replicaSet = renderReplicaSet(
       resourceName, 
       req.namespace, 
       spec, 
@@ -747,13 +751,11 @@ function createTenantCompositeSync(config) {
       req.keyfileSecret, 
       req.appCredentialsSecret, 
       config,
-      req  // Pass req for buildStandardLabels access
+      existingReplicaSet // enable echoing/pass-thru of existing resource
+
     );
-    res.children.push(replicaSetResource);
+    res.children.push(replicaSet);
     
-    // Check if ReplicaSet is ready
-    const replicaSet = findResource(req.children['replicasets.v1.apps'], `${resourceName}-rs`, req.namespace);
-    const replicaSetReady = replicaSet?.status?.readyReplicas > 0;
     
     console.log(`  ReplicaSet ready: ${replicaSetReady}`);
     

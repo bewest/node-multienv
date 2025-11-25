@@ -264,6 +264,7 @@ function createTenantInitializationDecoratorSync(config) {
     
     // skip replicaset stuff for now
     const replicaSetRequired = req.tenant.metadata?.annotation?.['ns.mdn.io/replica-set-required'] == 'true';
+    req.replicaSetRequired = replicaSetRequired;
     if (!replicaSetRequired) {
       return next();
     }
@@ -320,7 +321,7 @@ function createTenantInitializationDecoratorSync(config) {
    */
   function planCreateUserJob(req, res, next) {
     // Skip if replica set not initialized
-    if (!req.replicaSetInitialized) {
+    if (req.replicaSetRequired && !req.replicaSetInitialized) {
       console.log('  Replica set not initialized - skipping create-user Job');
       return next();
     }
