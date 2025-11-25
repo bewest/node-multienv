@@ -75,6 +75,7 @@ The platform supports Gen4 and Gen5 architectures, both offering a Kubernetes-na
 - **Gen5 Pod-Based Architecture**: Uses direct Pod management instead of ReplicaSets to minimize control plane load. Metacontroller watches children immediately (not waiting for resync), so Pod recovery is effectively immediate. Pods render via composite, Jobs attach via decorator.
 - **Two-Phase Container Gating**: Tenant Pod initially renders with MongoDB container only. After initialization Jobs complete and set `ns.mdn.io/user-initialized` annotation, composite re-renders Pod with both MongoDB and Nightscout containers, ensuring MongoDB is fully initialized.
 - **Pod IP Connectivity for Jobs**: Initialization Jobs run in separate Pods and connect to MongoDB via Pod IP (extracted from status.podIP). Decorator gates on Pod readiness before rendering Jobs.
+- **Empty Array Normalization**: Optional array fields (like `imagePullSecrets`) are conditionally included only when non-empty. Kubernetes normalizes empty arrays differently than the webhook renders them, causing Metacontroller to detect drift and trigger RollingRecreate on every sync. Using spread operator pattern `...(arr.length > 0 ? { field: arr } : {})` ensures idempotent desired state.
 
 ## External Dependencies
 - **Strimzi Kafka Operator**: Manages Kafka clusters and KafkaConnect.
