@@ -33,43 +33,35 @@ function createTenantCompositeCustomize(config) {
         apiVersion: 'v1',
         resource: 'configmaps',
         namespace: configMapNamespace,
-        nameSelector: {
-          matchNames: [configMapRef.name]
-        }
+        names: [configMapRef.name]
       });
       
       console.log(`  Will fetch ConfigMap by name: ${configMapNamespace}/${configMapRef.name}`);
     }
-    // Strategy 2: Fetch ConfigMaps by selector.matchLabels (fallback)
-    else if (selector.matchLabels && Object.keys(selector.matchLabels).length > 0) {
-      related.push({
-        apiVersion: 'v1',
-        resource: 'configmaps',
-        namespace: parent.metadata.namespace,
-        labelSelector: {
-          matchLabels: selector.matchLabels
-        }
-      });
-      
-      console.log(`  Will fetch ConfigMaps with labels: ${JSON.stringify(selector.matchLabels)}`);
-    } else {
-      console.log(`  No configMapRef or selector - storage-only mode`);
-    }
-    
+
     // Also fetch PVCs by selector for storage layer discovery
-    if (selector.matchLabels && Object.keys(selector.matchLabels).length > 0) {
+    if (spec.pvcName) {
       related.push({
         apiVersion: 'v1',
         resource: 'persistentvolumeclaims',
-        namespace: parent.metadata.namespace,
-        labelSelector: {
-          matchLabels: selector.matchLabels
-        }
+        names: [spec.pvcName]
       });
-      
-      console.log(`  Will fetch PVCs with labels: ${JSON.stringify(selector.matchLabels)}`);
+
+    }
+
+    if (spec.mongoAuthSecretRef) {
+      related.push({
+        apiVersion: 'v1',
+        resource: 'secret',
+        names: [spec.mongoAuthSecretRef]
+      });
+
     }
     
+    
+    
+    
+    console.log("TENANT RELATED", related);
     // Send response
     res.send({
       relatedResources: related

@@ -411,7 +411,7 @@
       name='tenant-composite',
       syncUrl=webhookServiceUrl + '/composite/tenant/sync',
       customizeUrl=webhookServiceUrl + '/composite/tenant/customize',
-      generateSelector=false,
+      generateSelector=true,
       parentResource={
         apiVersion: crdGroup + '/' + crdVersion,
         resource: 'nightscouttenants',
@@ -462,13 +462,13 @@
     initializationResyncSeconds=30,
     userdataResyncSeconds=30,
   ):: {
-    storage: $.storageComposite(
+    storage:: $.storageComposite(
       webhookServiceUrl=webhookServiceUrl,
       crdGroup=crdGroup,
       crdVersion=crdVersion,
       resyncPeriodSeconds=storageResyncSeconds,
     ),
-    compute: $.computeComposite(
+    compute:: $.computeComposite(
       webhookServiceUrl=webhookServiceUrl,
       crdGroup=crdGroup,
       crdVersion=crdVersion,
@@ -484,19 +484,19 @@
       webhookUrl=webhookServiceUrl + '/decorator/sync',
       resyncPeriodSeconds=pvcResyncSeconds,
     ),
-    storageCredentials: $.storageCredentialsDecorator(
+    storageCredentials:: $.storageCredentialsDecorator(
       webhookServiceUrl=webhookServiceUrl,
       crdGroup=crdGroup,
       crdVersion=crdVersion,
       resyncPeriodSeconds=credentialsResyncSeconds,
     ),
-    storageInitialization: $.storageInitializationDecorator(
+    storageInitialization:: $.storageInitializationDecorator(
       webhookServiceUrl=webhookServiceUrl,
       crdGroup=crdGroup,
       crdVersion=crdVersion,
       resyncPeriodSeconds=initializationResyncSeconds,
     ),
-    instanceUserdata: $.instanceUserdataDecorator(
+    instanceUserdata:: $.instanceUserdataDecorator(
       webhookServiceUrl=webhookServiceUrl,
       crdGroup=crdGroup,
       crdVersion=crdVersion,

@@ -173,13 +173,13 @@ function createTenantInitializationDecoratorSync(config) {
   function discoverMongoAuthSecret(req, res, next) {
     const mongoAuthSecretRef = req.spec.mongoAuthSecretRef;
     
-    if (!mongoAuthSecretRef || !mongoAuthSecretRef.name) {
+    if (!mongoAuthSecretRef) {
       console.log('  No mongoAuthSecretRef in spec');
       req.mongoAuthSecret = null;
       return next();
     }
     
-    const authSecretName = mongoAuthSecretRef.name;
+    const authSecretName = mongoAuthSecretRef;
     const secrets = req.related['Secret.v1'] || {};
     
     const authSecret = findResource(secrets, s => 

@@ -870,7 +870,7 @@
                     phase: {
                       type: 'string',
                       description: 'Lifecycle phase',
-                      enum: ['Pending', 'Initializing', 'Ready', 'Failed'],
+                      enum: ['Pending', 'Initializing', 'Ready', 'Failed', 'Error'],
                     },
                     conditions: {
                       type: 'array',

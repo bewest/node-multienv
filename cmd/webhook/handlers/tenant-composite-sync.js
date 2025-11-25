@@ -253,20 +253,20 @@ function createTenantCompositeSync(config) {
     
     // Resolve mongo-auth Secret from spec reference
     const mongoAuthSecretRef = spec.mongoAuthSecretRef;
-    if (!mongoAuthSecretRef || !mongoAuthSecretRef.name) {
-      console.error(`  ERROR: spec.mongoAuthSecretRef.name not provided for ${resourceName}`);
+    if (!mongoAuthSecretRef) {
+      console.error(`  ERROR: spec.mongoAuthSecretRef not provided for ${resourceName}`);
       res.status.phase = 'Error';
       res.status.conditions.push({
         type: 'MongoAuthSecretResolved',
         status: 'False',
         reason: 'MissingReference',
-        message: 'spec.mongoAuthSecretRef.name is required but not provided'
+        message: 'spec.mongoAuthSecretRef is required but not provided'
       });
       req.authSecret = null;
       return next();
     }
     
-    const authSecretName = mongoAuthSecretRef.name;
+    const authSecretName = mongoAuthSecretRef;
     console.log(`  Looking up mongo-auth Secret: ${authSecretName}`);
     
     // Find Secret in related resources (provisioner-owned, not a child)
@@ -371,7 +371,7 @@ function createTenantCompositeSync(config) {
     const configMapRef = spec.configMapRef;
     
     console.log(`Stage 3b: Ensuring ConfigMap for ${resourceName}`);
-    console.log(`  configMapRef: ${JSON.stringify(configMapRef)}`);
+    console.log(`  configMapRef: ${configMapRef}`);
     
     // Preserve existing Error phase (don't override)
     const currentPhase = res.status.phase;
@@ -384,9 +384,8 @@ function createTenantCompositeSync(config) {
       req.computeConfigMap = null;
       
       // Only set phase if not already in Error state
-      if (!inErrorState) {
-        res.status.phase = 'Provisioned';
-      }
+      if (!inErrorState) { }
+      res.status.phase = 'Pending';
       
       res.status.conditions.push({
         type: 'ComputeActivated',
