@@ -35,11 +35,14 @@ function createTenantInitializationDecoratorCustomize(config) {
     const relatedResources = [];
     
     // ConfigMap for compute activation detection (via spec.configMapRef)
+    // Metacontroller requires nameSelector.matchNames for name-based discovery
     if (configMapRef?.name) {
       relatedResources.push({
         apiVersion: 'v1',
         resource: 'configmaps',
-        names: [configMapRef.name],
+        nameSelector: {
+          matchNames: [configMapRef.name]
+        },
         namespace: configMapRef.namespace || namespace
       });
       console.log(`  ConfigMap ref: ${configMapRef.name}`);

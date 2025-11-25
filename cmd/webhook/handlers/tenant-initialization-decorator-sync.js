@@ -242,11 +242,18 @@ function createTenantInitializationDecoratorSync(config) {
         console.log('  Init Job succeeded - marking replica set initialized');
         res.annotations['ns.mdn.io/replica-set-initialized'] = new Date().toISOString();
         req.replicaSetInitialized = true;
+        // Keep the completed Job in attachments (for TTL cleanup)
+        res.attachments.push(initJob);
         return next();
       }
       
       console.log(`  Init Job exists but not yet succeeded (active: ${jobStatus.active || 0}, failed: ${jobStatus.failed || 0})`);
+      // CRITICAL: Must return existing Job in attachments to preserve it
+      // If we don't include it, Metacontroller will delete it
+      res.attachments.push(initJob);
       req.replicaSetInitialized = false;
+      // Request requeue to check Job status again
+      res.resyncAfterSeconds = 15;
       return next();
     }
     
@@ -307,10 +314,17 @@ function createTenantInitializationDecoratorSync(config) {
       if (succeeded) {
         console.log('  Create-user Job succeeded - marking user initialized');
         res.annotations['ns.mdn.io/user-initialized'] = new Date().toISOString();
+        // Keep the completed Job in attachments (for TTL cleanup)
+        res.attachments.push(createUserJob);
         return next();
       }
       
       console.log(`  Create-user Job exists but not yet succeeded (active: ${jobStatus.active || 0}, failed: ${jobStatus.failed || 0})`);
+      // CRITICAL: Must return existing Job in attachments to preserve it
+      // If we don't include it, Metacontroller will delete it
+      res.attachments.push(createUserJob);
+      // Request requeue to check Job status again
+      res.resyncAfterSeconds = 15;
       return next();
     }
     
