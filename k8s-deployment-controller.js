@@ -704,6 +704,7 @@ function configure (opts) {
   const instanceRoutes = createInstanceRoutes(opts.kc, selected_namespace);
   const storageAccountRoutes = createStorageAccountRoutes(opts.kc, selected_namespace, opts);
   const computeInstanceRoutes = createComputeInstanceRoutes(opts.kc, selected_namespace);
+  const nightscoutTenantRoutes = createNightscoutTenantRoutes(opts.kc, selected_namespace, opts);
 
   // Deployment routes
   // server.get('/deployments/:name', deploymentRoutes.fetchDeployment, format_result);
@@ -1019,8 +1020,17 @@ function configure (opts) {
   server.del('/accounts/:account/sites/:name', computeInstanceRoutes.deleteComputeInstance);
 
 
-  // Gen 5
-
+  // Gen 5 NightscoutTenant CRD endpoints (unified tenant resource)
+  // Two-phase provisioning: storage first, then compute activation
+  server.post('/tenants', nightscoutTenantRoutes.createOrUpdateAccount);
+  server.post('/tenants/:account', nightscoutTenantRoutes.createOrUpdateAccount);
+  server.get('/tenants/:account', nightscoutTenantRoutes.getTenant);
+  server.get('/tenants', nightscoutTenantRoutes.listTenants);
+  server.del('/tenants/:account', nightscoutTenantRoutes.deleteTenant);
+  
+  // Gen 5 Site provisioning (compute activation via ConfigMap)
+  server.post('/tenants/:account/sites/:site', nightscoutTenantRoutes.createOrUpdateSite);
+  server.del('/tenants/:account/sites/:site', nightscoutTenantRoutes.deleteSite);
 
   // Old instances endpoints (nightscout.k8s/v1alpha1 - deprecated)
   server.get('/instances/:name', instanceRoutes.fetchInstance, format_result);
