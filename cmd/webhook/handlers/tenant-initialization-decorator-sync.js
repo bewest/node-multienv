@@ -24,6 +24,11 @@
  * Response Format:
  *   - Job attachments: [ init-replica-set Job, create-user Job ]
  *   - Annotations: { ns.mdn.io/replica-set-initialized, ns.mdn.io/user-initialized }
+ * 
+ * Render Pattern:
+ *   - Render functions accept optional existing Job to clean/preserve
+ *   - If existing Job provided, strip runtime metadata and return (preserves attachment)
+ *   - If no existing Job, create fresh resource
  */
 
 const crypto = require('crypto');
@@ -77,6 +82,15 @@ function createTenantInitializationDecoratorSync(config) {
   }
   
   /**
+   * Helper: Check if Job has succeeded
+   */
+  function jobSucceeded(job) {
+    if (!job) return false;
+    const status = job.status || {};
+    return (status.succeeded || 0) > 0;
+  }
+  
+  /**
    * Helper: Build identity labels for child resources
    * - ns.mdn.io/storage: Always included (from spec.storage)
    * - ns.mdn.io/tenant: Only included when spec.tenant is explicitly set
@@ -91,6 +105,32 @@ function createTenantInitializationDecoratorSync(config) {
     }
     
     return labels;
+  }
+  
+  /**
+   * Helper: Clean existing resource for re-attachment
+   * Strips runtime metadata (status, resourceVersion, uid, etc.) that shouldn't be in desired state
+   */
+  function cleanForAttachment(resource) {
+    if (!resource) return null;
+    
+    // Deep clone to avoid mutating original
+    const cleaned = JSON.parse(JSON.stringify(resource));
+    
+    // Remove runtime-only fields from metadata
+    if (cleaned.metadata) {
+      delete cleaned.metadata.resourceVersion;
+      delete cleaned.metadata.uid;
+      delete cleaned.metadata.creationTimestamp;
+      delete cleaned.metadata.generation;
+      delete cleaned.metadata.managedFields;
+      delete cleaned.metadata.selfLink;
+    }
+    
+    // Remove status (runtime-only)
+    delete cleaned.status;
+    
+    return cleaned;
   }
   
   /**
@@ -203,22 +243,15 @@ function createTenantInitializationDecoratorSync(config) {
   }
   
   /**
-   * Stage 4: Render init-replica-set Job and track completion
-   * Only if: compute activated, not already initialized, auth secret exists
+   * Stage 4: Plan init-replica-set Job
+   * Gates on annotation - only renders if not already initialized
+   * Render function handles both new and existing Job cases
    */
-  function renderInitReplicaSetJob(req, res, next) {
+  function planInitReplicaSetJob(req, res, next) {
     // Skip if compute not activated
     if (!req.computeActivated) {
       console.log('  Compute not activated - skipping init Job');
       req.replicaSetInitialized = false;
-      return next();
-    }
-    
-    // Check if already initialized (annotation on tenant)
-    const replicaSetInitialized = req.tenant.metadata?.annotations?.['ns.mdn.io/replica-set-initialized'];
-    if (replicaSetInitialized) {
-      console.log(`  Replica set already initialized at ${replicaSetInitialized}`);
-      req.replicaSetInitialized = true;
       return next();
     }
     
@@ -229,70 +262,60 @@ function createTenantInitializationDecoratorSync(config) {
       return next();
     }
     
-    // Check if init Job already exists and succeeded
-    // Use resourceName for Job naming (DNS-safe, stable)
-    const initJobName = `${req.resourceName}-init-rs`;
-    const initJob = findJobByName(req.related, initJobName, req.namespace);
-    
-    if (initJob) {
-      const jobStatus = initJob.status || {};
-      const succeeded = (jobStatus.succeeded || 0) > 0;
-      
-      if (succeeded) {
-        console.log('  Init Job succeeded - marking replica set initialized');
-        res.annotations['ns.mdn.io/replica-set-initialized'] = new Date().toISOString();
-        req.replicaSetInitialized = true;
-        // Keep the completed Job in attachments (for TTL cleanup)
-        res.attachments.push(initJob);
-        return next();
-      }
-      
-      console.log(`  Init Job exists but not yet succeeded (active: ${jobStatus.active || 0}, failed: ${jobStatus.failed || 0})`);
-      // CRITICAL: Must return existing Job in attachments to preserve it
-      // If we don't include it, Metacontroller will delete it
-      res.attachments.push(initJob);
-      req.replicaSetInitialized = false;
-      // Request requeue to check Job status again
-      res.resyncAfterSeconds = 15;
+    // Check if already initialized (annotation on tenant)
+    const replicaSetInitialized = req.tenant.metadata?.annotations?.['ns.mdn.io/replica-set-initialized'];
+    if (replicaSetInitialized) {
+      console.log(`  Replica set already initialized at ${replicaSetInitialized} - skipping Job`);
+      req.replicaSetInitialized = true;
       return next();
     }
     
-    // No Job exists yet - render it as attachment
-    console.log('  Rendering init-replica-set Job');
+    // Find existing Job (if any)
+    const initJobName = `${req.resourceName}-init-rs`;
+    const existingJob = findJobByName(req.related, initJobName, req.namespace);
+    
+    // Check if existing Job succeeded - set annotation
+    if (existingJob && jobSucceeded(existingJob)) {
+      console.log('  Init Job succeeded - marking replica set initialized');
+      res.annotations['ns.mdn.io/replica-set-initialized'] = new Date().toISOString();
+      req.replicaSetInitialized = true;
+      // Keep completed Job in attachments for TTL cleanup
+      res.attachments.push(cleanForAttachment(existingJob));
+      return next();
+    }
+    
+    // Not initialized - render Job (handles both new and existing cases)
+    console.log(`  Rendering init-replica-set Job${existingJob ? ' (preserving existing)' : ' (new)'}`);
+    
     const identityLabels = buildIdentityLabels(req);
-    const initJobResource = renderInitReplicaSetJob_(
+    const initJob = renderInitReplicaSetJob(
       req.resourceName,
       req.namespace,
       req.databaseName,
       req.mongoAuthSecret,
       identityLabels,
-      config
+      config,
+      existingJob  // Pass existing for preservation
     );
     
-    res.attachments.push(initJobResource);
+    res.attachments.push(initJob);
     req.replicaSetInitialized = false;
     
-    // Request explicit requeue to ensure decorator re-runs when Job completes
+    // Request requeue to check Job status
     res.resyncAfterSeconds = 15;
     
     return next();
   }
   
   /**
-   * Stage 5: Render create-user Job and track completion
-   * Only if: replica set initialized, user not yet initialized, auth secret exists
+   * Stage 5: Plan create-user Job
+   * Gates on annotation - only renders if not already initialized
+   * Render function handles both new and existing Job cases
    */
-  function renderCreateUserJob(req, res, next) {
+  function planCreateUserJob(req, res, next) {
     // Skip if replica set not initialized
     if (!req.replicaSetInitialized) {
       console.log('  Replica set not initialized - skipping create-user Job');
-      return next();
-    }
-    
-    // Check if user already initialized (annotation on tenant)
-    const userInitialized = req.tenant.metadata?.annotations?.['ns.mdn.io/user-initialized'];
-    if (userInitialized) {
-      console.log(`  User already initialized at ${userInitialized}`);
       return next();
     }
     
@@ -302,47 +325,43 @@ function createTenantInitializationDecoratorSync(config) {
       return next();
     }
     
-    // Check if create-user Job already exists and succeeded
-    // Use resourceName for Job naming (DNS-safe, stable)
-    const createUserJobName = `${req.resourceName}-create-user`;
-    const createUserJob = findJobByName(req.related, createUserJobName, req.namespace);
-    
-    if (createUserJob) {
-      const jobStatus = createUserJob.status || {};
-      const succeeded = (jobStatus.succeeded || 0) > 0;
-      
-      if (succeeded) {
-        console.log('  Create-user Job succeeded - marking user initialized');
-        res.annotations['ns.mdn.io/user-initialized'] = new Date().toISOString();
-        // Keep the completed Job in attachments (for TTL cleanup)
-        res.attachments.push(createUserJob);
-        return next();
-      }
-      
-      console.log(`  Create-user Job exists but not yet succeeded (active: ${jobStatus.active || 0}, failed: ${jobStatus.failed || 0})`);
-      // CRITICAL: Must return existing Job in attachments to preserve it
-      // If we don't include it, Metacontroller will delete it
-      res.attachments.push(createUserJob);
-      // Request requeue to check Job status again
-      res.resyncAfterSeconds = 15;
+    // Check if user already initialized (annotation on tenant)
+    const userInitialized = req.tenant.metadata?.annotations?.['ns.mdn.io/user-initialized'];
+    if (userInitialized) {
+      console.log(`  User already initialized at ${userInitialized} - skipping Job`);
       return next();
     }
     
-    // No Job exists yet - render it as attachment
-    console.log('  Rendering create-user Job');
+    // Find existing Job (if any)
+    const createUserJobName = `${req.resourceName}-create-user`;
+    const existingJob = findJobByName(req.related, createUserJobName, req.namespace);
+    
+    // Check if existing Job succeeded - set annotation
+    if (existingJob && jobSucceeded(existingJob)) {
+      console.log('  Create-user Job succeeded - marking user initialized');
+      res.annotations['ns.mdn.io/user-initialized'] = new Date().toISOString();
+      // Keep completed Job in attachments for TTL cleanup
+      res.attachments.push(cleanForAttachment(existingJob));
+      return next();
+    }
+    
+    // Not initialized - render Job (handles both new and existing cases)
+    console.log(`  Rendering create-user Job${existingJob ? ' (preserving existing)' : ' (new)'}`);
+    
     const identityLabels = buildIdentityLabels(req);
-    const createUserJobResource = renderCreateUserJob_(
+    const createUserJob = renderCreateUserJob(
       req.resourceName,
       req.namespace,
       req.databaseName,
       req.mongoAuthSecret,
       identityLabels,
-      config
+      config,
+      existingJob  // Pass existing for preservation
     );
     
-    res.attachments.push(createUserJobResource);
+    res.attachments.push(createUserJob);
     
-    // Request explicit requeue to ensure decorator re-runs when Job completes
+    // Request requeue to check Job status
     res.resyncAfterSeconds = 15;
     
     return next();
@@ -380,234 +399,252 @@ function createTenantInitializationDecoratorSync(config) {
     return next();
   }
   
+  /**
+   * Render init-replica-set Job
+   * 
+   * If existing Job provided, cleans and returns it (preserves attachment)
+   * If no existing Job, creates fresh resource
+   * 
+   * @param resourceName - CR name, used for Job naming prefix
+   * @param namespace - Target namespace
+   * @param databaseName - MongoDB database name
+   * @param authSecret - mongo-auth Secret for credentials
+   * @param identityLabels - Pre-built identity labels (ns.mdn.io/storage, ns.mdn.io/tenant)
+   * @param config - Controller configuration
+   * @param existing - Optional existing Job to preserve (cleans runtime metadata)
+   */
+  function renderInitReplicaSetJob(resourceName, namespace, databaseName, authSecret, identityLabels, cfg, existing) {
+    // If existing Job provided, clean and return it to preserve attachment
+    if (existing) {
+      return cleanForAttachment(existing);
+    }
+    
+    // Create fresh Job
+    const authSecretName = authSecret.metadata.name;
+    const mongoHost = 'localhost:27017';  // Pod-local MongoDB
+    
+    return {
+      apiVersion: 'batch/v1',
+      kind: 'Job',
+      metadata: {
+        name: `${resourceName}-init-rs`,
+        namespace: namespace,
+        labels: {
+          'app.kubernetes.io/name': 'mongodb-init',
+          'app.kubernetes.io/component': 'database',
+          'app.kubernetes.io/part-of': 'nightscout-tenant',
+          'app.kubernetes.io/instance': resourceName,
+          'app.kubernetes.io/managed-by': 'metacontroller',
+          'ns.mdn.io/decorator': 'tenant-initialization',
+          ...identityLabels
+        }
+      },
+      spec: {
+        ttlSecondsAfterFinished: 86400, // 24 hours
+        backoffLimit: 3,
+        template: {
+          metadata: {
+            labels: {
+              'app.kubernetes.io/name': 'mongodb-init',
+              'app.kubernetes.io/component': 'database',
+              ...identityLabels
+            }
+          },
+          spec: {
+            restartPolicy: 'OnFailure',
+            containers: [
+              {
+                name: 'init-replica-set',
+                image: cfg.images?.nsUtility || 'nightscout/ns-utility:latest',
+                command: ['/bin/bash', '-c'],
+                args: ['/scripts/init-replica-set.sh'],
+                env: [
+                  {
+                    name: 'MONGO_INITDB_ROOT_USERNAME',
+                    valueFrom: {
+                      secretKeyRef: {
+                        name: authSecretName,
+                        key: 'MONGO_INITDB_ROOT_USERNAME'
+                      }
+                    }
+                  },
+                  {
+                    name: 'MONGO_INITDB_ROOT_PASSWORD',
+                    valueFrom: {
+                      secretKeyRef: {
+                        name: authSecretName,
+                        key: 'MONGO_INITDB_ROOT_PASSWORD'
+                      }
+                    }
+                  },
+                  {
+                    name: 'MONGO_INITDB_DATABASE',
+                    value: databaseName
+                  },
+                  {
+                    name: 'MONGO_HOST',
+                    value: mongoHost
+                  },
+                  {
+                    name: 'REPLICA_SET_NAME',
+                    value: 'rs0'
+                  },
+                  {
+                    name: 'POD_NAME',
+                    value: `${resourceName}-rs-`  // ReplicaSet pod name prefix
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      }
+    };
+  }
+  
+  /**
+   * Render create-user Job
+   * 
+   * If existing Job provided, cleans and returns it (preserves attachment)
+   * If no existing Job, creates fresh resource
+   * 
+   * @param resourceName - CR name, used for Job naming prefix
+   * @param namespace - Target namespace
+   * @param databaseName - MongoDB database name
+   * @param authSecret - mongo-auth Secret for credentials
+   * @param identityLabels - Pre-built identity labels (ns.mdn.io/storage, ns.mdn.io/tenant)
+   * @param config - Controller configuration
+   * @param existing - Optional existing Job to preserve (cleans runtime metadata)
+   */
+  function renderCreateUserJob(resourceName, namespace, databaseName, authSecret, identityLabels, cfg, existing) {
+    // If existing Job provided, clean and return it to preserve attachment
+    if (existing) {
+      return cleanForAttachment(existing);
+    }
+    
+    // Create fresh Job
+    const authSecretName = authSecret.metadata.name;
+    const mongoHost = 'localhost:27017';  // Pod-local MongoDB
+    
+    return {
+      apiVersion: 'batch/v1',
+      kind: 'Job',
+      metadata: {
+        name: `${resourceName}-create-user`,
+        namespace: namespace,
+        labels: {
+          'app.kubernetes.io/name': 'mongodb-user',
+          'app.kubernetes.io/component': 'user-initialization',
+          'app.kubernetes.io/part-of': 'nightscout-tenant',
+          'app.kubernetes.io/instance': resourceName,
+          'app.kubernetes.io/managed-by': 'metacontroller',
+          'ns.mdn.io/decorator': 'tenant-initialization',
+          ...identityLabels
+        }
+      },
+      spec: {
+        ttlSecondsAfterFinished: 86400, // 24 hours
+        backoffLimit: 3,
+        template: {
+          metadata: {
+            labels: {
+              'app.kubernetes.io/name': 'mongodb-user',
+              'app.kubernetes.io/component': 'user-initialization',
+              ...identityLabels
+            }
+          },
+          spec: {
+            restartPolicy: 'OnFailure',
+            containers: [
+              {
+                name: 'create-user',
+                image: cfg.images?.nsUtility || 'nightscout/ns-utility:latest',
+                command: ['/bin/bash', '-c'],
+                args: ['/scripts/create-mongodb-user.sh'],
+                env: [
+                  {
+                    name: 'MONGO_INITDB_ROOT_USERNAME',
+                    valueFrom: {
+                      secretKeyRef: {
+                        name: authSecretName,
+                        key: 'MONGO_INITDB_ROOT_USERNAME'
+                      }
+                    }
+                  },
+                  {
+                    name: 'MONGO_INITDB_ROOT_PASSWORD',
+                    valueFrom: {
+                      secretKeyRef: {
+                        name: authSecretName,
+                        key: 'MONGO_INITDB_ROOT_PASSWORD'
+                      }
+                    }
+                  },
+                  {
+                    name: 'MONGO_INITDB_DATABASE',
+                    value: databaseName
+                  },
+                  {
+                    name: 'APP_USERNAME',
+                    valueFrom: {
+                      secretKeyRef: {
+                        name: authSecretName,
+                        key: 'username'
+                      }
+                    }
+                  },
+                  {
+                    name: 'APP_PASSWORD',
+                    valueFrom: {
+                      secretKeyRef: {
+                        name: authSecretName,
+                        key: 'password'
+                      }
+                    }
+                  },
+                  {
+                    name: 'APP_DATABASE',
+                    valueFrom: {
+                      secretKeyRef: {
+                        name: authSecretName,
+                        key: 'database'
+                      }
+                    }
+                  },
+                  {
+                    name: 'MONGO_HOST',
+                    value: mongoHost
+                  },
+                  {
+                    name: 'MONGO_PORT',
+                    value: '27017'
+                  },
+                  {
+                    name: 'MONGO_RS_NAME',
+                    value: 'rs0'
+                  },
+                  {
+                    name: 'FORCE_USER_CREATE',
+                    value: 'true'
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      }
+    };
+  }
+  
   // Pipeline
   return [
     initialize,
     discoverConfigMap,
     discoverMongoAuthSecret,
-    renderInitReplicaSetJob,
-    renderCreateUserJob,
+    planInitReplicaSetJob,
+    planCreateUserJob,
     formatResponse
   ];
-}
-
-/**
- * Render init-replica-set Job (Gen5)
- * Uses ns-utility container with bundled scripts
- * 
- * @param resourceName - CR name, used for Job naming prefix
- * @param namespace - Target namespace
- * @param databaseName - MongoDB database name
- * @param authSecret - mongo-auth Secret for credentials
- * @param identityLabels - Pre-built identity labels (ns.mdn.io/storage, ns.mdn.io/tenant)
- * @param config - Controller configuration
- */
-function renderInitReplicaSetJob_(resourceName, namespace, databaseName, authSecret, identityLabels, config) {
-  const authSecretName = authSecret.metadata.name;
-  const mongoHost = 'localhost:27017';  // Pod-local MongoDB
-  
-  return {
-    apiVersion: 'batch/v1',
-    kind: 'Job',
-    metadata: {
-      name: `${resourceName}-init-rs`,
-      namespace: namespace,
-      labels: {
-        'app.kubernetes.io/name': 'mongodb-init',
-        'app.kubernetes.io/component': 'database',
-        'app.kubernetes.io/part-of': 'nightscout-tenant',
-        'app.kubernetes.io/instance': resourceName,
-        'app.kubernetes.io/managed-by': 'metacontroller',
-        'ns.mdn.io/decorator': 'tenant-initialization',
-        ...identityLabels
-      }
-    },
-    spec: {
-      ttlSecondsAfterFinished: 86400, // 24 hours
-      backoffLimit: 3,
-      template: {
-        metadata: {
-          labels: {
-            'app.kubernetes.io/name': 'mongodb-init',
-            'app.kubernetes.io/component': 'database',
-            ...identityLabels
-          }
-        },
-        spec: {
-          restartPolicy: 'OnFailure',
-          containers: [
-            {
-              name: 'init-replica-set',
-              image: config.images?.nsUtility || 'nightscout/ns-utility:latest',
-              command: ['/bin/bash', '-c'],
-              args: ['/scripts/init-replica-set.sh'],
-              env: [
-                {
-                  name: 'MONGO_INITDB_ROOT_USERNAME',
-                  valueFrom: {
-                    secretKeyRef: {
-                      name: authSecretName,
-                      key: 'MONGO_INITDB_ROOT_USERNAME'
-                    }
-                  }
-                },
-                {
-                  name: 'MONGO_INITDB_ROOT_PASSWORD',
-                  valueFrom: {
-                    secretKeyRef: {
-                      name: authSecretName,
-                      key: 'MONGO_INITDB_ROOT_PASSWORD'
-                    }
-                  }
-                },
-                {
-                  name: 'MONGO_INITDB_DATABASE',
-                  value: databaseName
-                },
-                {
-                  name: 'MONGO_HOST',
-                  value: mongoHost
-                },
-                {
-                  name: 'REPLICA_SET_NAME',
-                  value: 'rs0'
-                },
-                {
-                  name: 'POD_NAME',
-                  value: `${resourceName}-rs-`  // ReplicaSet pod name prefix
-                }
-              ]
-            }
-          ]
-        }
-      }
-    }
-  };
-}
-
-/**
- * Render create-user Job (Gen5)
- * Uses ns-utility container with create-mongodb-user.sh script
- * 
- * @param resourceName - CR name, used for Job naming prefix
- * @param namespace - Target namespace
- * @param databaseName - MongoDB database name
- * @param authSecret - mongo-auth Secret for credentials
- * @param identityLabels - Pre-built identity labels (ns.mdn.io/storage, ns.mdn.io/tenant)
- * @param config - Controller configuration
- */
-function renderCreateUserJob_(resourceName, namespace, databaseName, authSecret, identityLabels, config) {
-  const authSecretName = authSecret.metadata.name;
-  const mongoHost = 'localhost:27017';  // Pod-local MongoDB
-  
-  return {
-    apiVersion: 'batch/v1',
-    kind: 'Job',
-    metadata: {
-      name: `${resourceName}-create-user`,
-      namespace: namespace,
-      labels: {
-        'app.kubernetes.io/name': 'mongodb-user',
-        'app.kubernetes.io/component': 'user-initialization',
-        'app.kubernetes.io/part-of': 'nightscout-tenant',
-        'app.kubernetes.io/instance': resourceName,
-        'app.kubernetes.io/managed-by': 'metacontroller',
-        'ns.mdn.io/decorator': 'tenant-initialization',
-        ...identityLabels
-      }
-    },
-    spec: {
-      ttlSecondsAfterFinished: 86400, // 24 hours
-      backoffLimit: 3,
-      template: {
-        metadata: {
-          labels: {
-            'app.kubernetes.io/name': 'mongodb-user',
-            'app.kubernetes.io/component': 'user-initialization',
-            ...identityLabels
-          }
-        },
-        spec: {
-          restartPolicy: 'OnFailure',
-          containers: [
-            {
-              name: 'create-user',
-              image: config.images?.nsUtility || 'nightscout/ns-utility:latest',
-              command: ['/bin/bash', '-c'],
-              args: ['/scripts/create-mongodb-user.sh'],
-              env: [
-                {
-                  name: 'MONGO_INITDB_ROOT_USERNAME',
-                  valueFrom: {
-                    secretKeyRef: {
-                      name: authSecretName,
-                      key: 'MONGO_INITDB_ROOT_USERNAME'
-                    }
-                  }
-                },
-                {
-                  name: 'MONGO_INITDB_ROOT_PASSWORD',
-                  valueFrom: {
-                    secretKeyRef: {
-                      name: authSecretName,
-                      key: 'MONGO_INITDB_ROOT_PASSWORD'
-                    }
-                  }
-                },
-                {
-                  name: 'MONGO_INITDB_DATABASE',
-                  value: databaseName
-                },
-                {
-                  name: 'APP_USERNAME',
-                  valueFrom: {
-                    secretKeyRef: {
-                      name: authSecretName,
-                      key: 'username'
-                    }
-                  }
-                },
-                {
-                  name: 'APP_PASSWORD',
-                  valueFrom: {
-                    secretKeyRef: {
-                      name: authSecretName,
-                      key: 'password'
-                    }
-                  }
-                },
-                {
-                  name: 'APP_DATABASE',
-                  valueFrom: {
-                    secretKeyRef: {
-                      name: authSecretName,
-                      key: 'database'
-                    }
-                  }
-                },
-                {
-                  name: 'MONGO_HOST',
-                  value: mongoHost
-                },
-                {
-                  name: 'MONGO_PORT',
-                  value: '27017'
-                },
-                {
-                  name: 'MONGO_RS_NAME',
-                  value: 'rs0'
-                },
-                {
-                  name: 'FORCE_USER_CREATE',
-                  value: 'true'
-                }
-              ]
-            }
-          ]
-        }
-      }
-    }
-  };
 }
 
 module.exports = { createTenantInitializationDecoratorSync };
