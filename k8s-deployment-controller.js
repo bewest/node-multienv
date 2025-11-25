@@ -694,6 +694,7 @@ function configure (opts) {
   const createInstanceRoutes = require('./lib/routes/instances');
   const createStorageAccountRoutes = require('./lib/routes/storage-accounts');
   const createComputeInstanceRoutes = require('./lib/routes/compute-instances');
+  const createNightscoutTenantRoutes = require('./lib/routes/nightscout-tenant');
 
   const storageDecorator = require('./lib/webhook/storage-decorator-handler.js')(opts);
   const metacontrollerRoutes = createMetacontrollerRoutes(opts);
@@ -1016,6 +1017,10 @@ function configure (opts) {
   server.get('/accounts/:account/sites/:name', computeInstanceRoutes.getComputeInstance, format_result);
   server.get('/accounts/:account/sites', computeInstanceRoutes.listComputeInstances, format_result);
   server.del('/accounts/:account/sites/:name', computeInstanceRoutes.deleteComputeInstance);
+
+
+  // Gen 5
+
 
   // Old instances endpoints (nightscout.k8s/v1alpha1 - deprecated)
   server.get('/instances/:name', instanceRoutes.fetchInstance, format_result);
