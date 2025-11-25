@@ -266,6 +266,13 @@
         resources: ['secrets'],
         verbs: ['get', 'list', 'watch', 'create', 'update', 'patch', 'delete'],
       },
+      // PVC
+      {
+        apiGroups: [''],
+        resources: ['persistentvolumeclaims'],
+        verbs: ['get', 'list', 'watch', 'create', 'update', 'patch'],
+        // verbs: ['get', 'list', 'watch', 'create', 'update', 'patch', 'delete'],
+      },
       {
         apiGroups: ['apps'],
         resources: ['deployments'],
@@ -286,7 +293,7 @@
       // Nightscout CRDs (Gen 4): full CRUD for provisioner API
       {
         apiGroups: ['nightscout.io'],
-        resources: ['storageaccounts', 'computeinstances'],
+        resources: ['storageaccounts', 'computeinstances', 'nightscouttenants'],
         verbs: ['get', 'list', 'watch', 'create', 'update', 'patch', 'delete'],
       },
       // Read-only for status queries

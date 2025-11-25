@@ -423,15 +423,16 @@
         // Steady state: ReplicaSet with co-located containers (no interstitial StatefulSet)
         { apiVersion: 'apps/v1', resource: 'replicasets',
           updateStrategy: {
-            method: 'InPlace'
+            method: 'RollingRecreate'
           }
         },
         // Secrets for MongoDB keyfile and Nightscout config
         { apiVersion: 'v1', resource: 'secrets' },
         // ConfigMaps for tenant settings (adopted from provisioner via spec.configMapRef)
-        { apiVersion: 'v1', resource: 'configmaps' },
+        // { apiVersion: 'v1', resource: 'configmaps' },
         // Note: Jobs managed by tenant-initialization-decorator (not this composite)
       ],
+      /*
       relatedResources=[
         // PVCs created by provisioner (not owned, discovered via customize hook)
         {
@@ -444,6 +445,7 @@
           resource: 'configmaps',
         },
       ],
+      */
       resyncPeriodSeconds=resyncPeriodSeconds,
     ),
 
