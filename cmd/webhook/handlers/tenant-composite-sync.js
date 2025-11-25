@@ -729,21 +729,36 @@ function createTenantCompositeSync(config) {
     
     console.log(`  Rendering Pod with userInitialized=${userInitializedBool}`);
     
-    const pod = renderTenantPod(
-      resourceName,
-      req.namespace,
-      spec,
-      req.authSecret,
-      req.keyfileSecret,
-      req.appCredentialsSecret,
-      userInitializedBool,
-      identityLabels,
-      config
-    );
-    res.children.push(pod);
-    
-    // Check existing Pod status for phase determination
+    // Check existing Pod first - preserve it if it matches our desired state
+    // This prevents Metacontroller from detecting drift on server-added labels (e.g., controller-uid)
     const existingPod = findResource(req.children['Pod.v1'], `${resourceName}-pod`, req.namespace);
+    const existingContainerCount = existingPod?.spec?.containers?.length || 0;
+    const desiredContainerCount = userInitializedBool ? 2 : 1; // MongoDB-only (1) vs MongoDB+Nightscout (2)
+    
+    console.log(`  Existing Pod containers: ${existingContainerCount}, desired: ${desiredContainerCount}`);
+    
+    if (existingPod && existingContainerCount === desiredContainerCount) {
+      // Preserve existing Pod - it already matches our desired state
+      // Clean server-managed fields but preserve labels (including controller-uid)
+      console.log(`  Preserving existing Pod (container count matches)`);
+      const preservedPod = cleanResource(existingPod);
+      res.children.push(preservedPod);
+    } else {
+      // Render fresh Pod - either no Pod exists or container count changed
+      console.log(`  Rendering fresh Pod (${existingPod ? 'container count changed' : 'no existing Pod'})`);
+      const pod = renderTenantPod(
+        resourceName,
+        req.namespace,
+        spec,
+        req.authSecret,
+        req.keyfileSecret,
+        req.appCredentialsSecret,
+        userInitializedBool,
+        identityLabels,
+        config
+      );
+      res.children.push(pod);
+    }
     const podReady = existingPod?.status?.conditions?.find(c => c.type === 'Ready' && c.status === 'True');
     const mongoReady = existingPod?.status?.containerStatuses?.find(c => c.name === 'mongodb' && c.ready);
     
