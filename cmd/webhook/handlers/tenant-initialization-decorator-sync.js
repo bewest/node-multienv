@@ -435,7 +435,7 @@ function createTenantInitializationDecoratorSync(config) {
     
     const identityLabels = buildIdentityLabels(req);
     var mongoHostname = req.podIP;
-    const createUserJob = renderCreateUserJob(
+    var createUserJob = renderCreateUserJob(
       req.mongoAuthSecret.metadata.name,
       `${req.resourceName}-app-credentials`,
       req.tenantId,
@@ -444,6 +444,9 @@ function createTenantInitializationDecoratorSync(config) {
       mongoHostname,
       config
     );
+    if (existingJob) {
+      createUserJob = cleanForAttachment(existing);
+    }
 
     /*
     const createUserJob = renderCreateUserJob(

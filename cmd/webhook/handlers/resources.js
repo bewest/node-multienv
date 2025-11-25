@@ -1108,8 +1108,9 @@ function renderTenantPod(resourceName, namespace, spec, authSecret, keyfileSecre
     imagePullPolicy: mongoImagePullPolicy,
     args: [
       '--config', '/config/mongod.conf',
-      '--replSet', 'rs0',
-      '--bind_ip', '0.0.0.0'  // Bind to all interfaces for external Job access
+      // '--replSet', 'rs0',
+      // '--bind_ip', '0.0.0.0'  // Bind to all interfaces for external Job access
+      '--bind_ip', '127.0.0.1,$(POD_IP)'
     ],
     ports: [
       {

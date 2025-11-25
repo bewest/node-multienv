@@ -426,6 +426,11 @@
             method: 'RollingRecreate'
           }
         },
+        { apiVersion: 'v1', resource: 'pods',
+          updateStrategy: {
+            method: 'RollingRecreate'
+          }
+        },
         // Secrets for MongoDB keyfile and Nightscout config
         { apiVersion: 'v1', resource: 'secrets' },
         // ConfigMaps for tenant settings (adopted from provisioner via spec.configMapRef)
