@@ -3,18 +3,6 @@
 ## Overview
 This project delivers a production-grade, multi-tenant Nightscout platform on Kubernetes, designed for scalability and isolation. It leverages Custom Resource Definitions (CRDs) and Metacontroller to provide a declarative API for managing tenant provisioning. The platform integrates MongoDB, Change Data Capture (CDC) via Strimzi Kafka, and automated backup solutions. All tenants are hosted within a dedicated `hosted-tenants` namespace. Key capabilities include declarative resource management, automated database migration, and robust status reporting. The project aims to provide a robust, scalable, and easily manageable Nightscout hosting solution capable of supporting Nightscout traffic across various tenant configurations for an unlimited number of tenants.
 
-## Recent Changes
-- **2025-11-25**: Refactored tenant-initialization-decorator to use cleaner pattern from storage-credentials-decorator. Render functions now accept optional `existing` parameter - if provided, cleans runtime metadata and returns (preserves attachment); if not, creates fresh resource. Added `cleanForAttachment()` helper to strip resourceVersion/uid/status. Renamed stage functions to `planInitReplicaSetJob`/`planCreateUserJob`. Pattern: gate on annotation → find existing → check succeeded → render (with existing for preservation).
-- **2025-11-25**: Fixed Job reconciliation loop in tenant-initialization-decorator. Decorators must return existing attachments to preserve them - previously Jobs were being deleted and recreated each sync because they weren't included in the response. Now pushes existing Jobs to `res.attachments` whether running or completed. Also fixed customize hook to use `nameSelector.matchNames` for ConfigMap discovery.
-- **2025-11-25**: Fixed tenant-composite-customize.js to properly support spec.configMapRef pattern. Changed from incorrect `names` field to Metacontroller's `nameSelector: { matchNames: [...] }` for name-based ConfigMap discovery. Added fallback to `spec.selector.matchLabels` for label-based discovery. Added PVC discovery via selector.matchLabels for storage layer resources.
-- **2025-11-25**: Implemented Gen5 NightscoutTenant provisioner routes in lib/routes/nightscout-tenant.js. Two-phase provisioning API: POST /tenants/:account creates PVC+mongo-auth Secret+CR with spec.storage; POST /tenants/:account/sites/:tenant creates ConfigMap and updates CR with spec.tenant and spec.configMapRef to activate compute. Added ensureStorageAccountId handler to auto-generate storage IDs when not provided. CRUD handlers for GET/LIST/DELETE operations. Integrated routes into k8s-deployment-controller.js.
-- **2025-11-24**: Updated Metacontroller definitions in jsonnet: Added tenantInitializationDecorator to controllers() output; fixed Job ownership by removing Jobs from tenantComposite childResources (now managed exclusively by decorator as attachments); updated tenantComposite relatedResources to include ConfigMaps for spec.configMapRef adoption; updated decorator labelSelector to use ns.mdn.io/storage. Updated tenant-initialization-decorator handlers to use new identity pattern with resourceName for naming and buildIdentityLabels() for consistent labeling.
-- **2025-11-24**: Implemented identity field separation pattern: CR name (`resourceName`) drives all child resource naming (PVCs, Jobs, Secrets, ReplicaSets) for DNS-safe stability, while `spec.storage` and `spec.tenant` fields drive identity labels (`ns.mdn.io/storage`, `ns.mdn.io/tenant`). Added early validation for required `spec.storage` field with clear error conditions. Created `buildStandardLabels()` helper to centralize identity label generation. Pattern ensures resource naming remains stable even when `spec.tenant` differs from CR name.
-- **2025-11-24**: Added `spec.storage` (required) and `spec.tenant` (optional) identity fields to NightscoutTenant CRD for provisioner facade integration. Storage set on first POST `/accounts/:storageAccountId` (CR creation), tenant set on second POST `/accounts/:storageAccountId/sites/:tenantId` (site creation enables /environs/ API). Added Storage/Tenant printer columns to kubectl output.
-- **2025-11-24**: Finalized dual-field design for Gen5 NightscoutTenant CRD: `spec.selector` (required) for Metacontroller's generateSelectors: false pattern (controller coordination, offline migration, versioned controllers) + `spec.configMapRef` (optional) for explicit ConfigMap reference controlling compute activation. Both fields serve distinct purposes - selector for Metacontroller child matching, configMapRef for compute enablement. Updated jsonnet CRD with full LabelSelector schema (matchLabels + matchExpressions).
-- **2025-11-24**: Migrated from spec.selector-based ConfigMap discovery to explicit spec.configMapRef pattern for Gen5 NightscoutTenant CR. Replaced detectComputeActivation with ensureConfigMap supporting provisioner-managed ConfigMaps (adoption with preserved name/namespace). ConfigMap presence controls compute activation - when ConfigMap exists, ReplicaSet renders; when missing or deleted, storage-only mode (no pods). Deleting ConfigMap via environs API stops tenant execution. Pattern simplifies provisioner integration with explicit reference instead of label selectors. Architect-validated as production-ready.
-- **2025-11-24**: Unified Nightscout Secret architecture - aligned Gen5 with Gen4 by consolidating app-credentials Secret to contain BOTH MongoDB credentials AND Nightscout runtime configuration (API_SECRET, MONGO_CONNECTION, ENABLE, TIME_FORMAT, etc.). Eliminated redundant `{tenantId}-nightscout` Secret, reducing API object count by one Secret per tenant (~2,000-3,000 fewer objects at scale). Updated renderAppCredentialsSecret to generate complete credentials in single Secret. Renamed ensureNightscoutSecret to ensureAppCredentialsSecret in tenant-composite. Pattern matches proven Gen4 storage-credentials-decorator behavior. Architect-validated as production-ready.
-
 ## User Preferences
 - Prefer Node.js/JavaScript for webhook implementation
 - Use Restify as standard web server framework
@@ -44,9 +32,9 @@ The platform utilizes Metacontroller with both Gen4 (Composite and Decorator) an
 - **Storage-Initialization DecoratorController**: Manages durable state on mongo-auth Secrets and tracks replica set initialization.
 - **PVC-Backup DecoratorController**: Enforces backup policies for MongoDB PVCs.
 
-**Gen5 Controllers (Decorator-Driven Architecture):**
-- **Tenant CompositeController**: Renders infrastructure based on annotation state, managing ReplicaSets.
-- **Tenant-Initialization DecoratorController**: Orchestrates jobs for NightscoutTenant CRs, including replica set and user initialization, updating parent CR annotations on completion.
+**Gen5 Controllers (Pod-Based Decorator-Driven Architecture):**
+- **Tenant CompositeController**: Renders tenant Pods directly for minimal control plane load. Pod contains MongoDB initially; adds Nightscout after user initialization. ConfigMap presence via `spec.configMapRef` controls compute activation.
+- **Tenant-Initialization DecoratorController**: Orchestrates MongoDB initialization Jobs, connecting via Pod IP. Gates on Pod readiness, sets `ns.mdn.io/user-initialized` annotation on completion.
 
 ### Key Technologies
 - **Orchestration**: Kubernetes, Metacontroller.
@@ -67,7 +55,7 @@ The platform utilizes Metacontroller with both Gen4 (Composite and Decorator) an
 - **Two-Interface Design**: Separate administration and resolver interfaces.
 
 ### System Design Choices
-The platform supports Gen4 (CRD-based two-composite) and Gen5 (unified NightscoutTenant CRD with two-phase provisioning) architectures, both offering a Kubernetes-native API.
+The platform supports Gen4 and Gen5 architectures, both offering a Kubernetes-native API.
 - **Status Reporting**: CRD status includes phase, conditions, connectionSecret, and endpoints.
 - **Provisioner API Facade**: A REST API (`POST /accounts/`) for external systems to create CRDs and mongo-auth Secrets.
 - **Decorator-Based Blast Radius Protection**: `mongo-auth` Secrets persist on CRD deletion for fast recovery.
@@ -84,6 +72,9 @@ The platform supports Gen4 (CRD-based two-composite) and Gen5 (unified Nightscou
 - **Migration Job Completion Tracking**: Hybrid approach using annotations and live Job status.
 - **URI-Based Migration**: Migration Jobs use symmetric MongoDB URI format for source and target.
 - **Two-Phase Migration Architecture**: Gen3→Gen4 migration uses sequential phases for data and userdata.
+- **Gen5 Pod-Based Architecture**: Uses direct Pod management instead of ReplicaSets to minimize control plane load. Metacontroller watches children immediately (not waiting for resync), so Pod recovery is effectively immediate. Pods render via composite, Jobs attach via decorator.
+- **Two-Phase Container Gating**: Tenant Pod initially renders with MongoDB container only. After initialization Jobs complete and set `ns.mdn.io/user-initialized` annotation, composite re-renders Pod with both MongoDB and Nightscout containers, ensuring MongoDB is fully initialized.
+- **Pod IP Connectivity for Jobs**: Initialization Jobs run in separate Pods and connect to MongoDB via Pod IP (extracted from status.podIP). Decorator gates on Pod readiness before rendering Jobs.
 
 ## External Dependencies
 - **Strimzi Kafka Operator**: Manages Kafka clusters and KafkaConnect.

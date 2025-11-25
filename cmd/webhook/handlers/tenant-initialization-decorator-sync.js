@@ -2,6 +2,7 @@
  * Tenant Initialization Decorator - Sync Hook (Gen 5)
  * 
  * Orchestrates MongoDB initialization Jobs for NightscoutTenant CRs
+ * Jobs connect to MongoDB via Pod IP (not localhost or Service)
  * 
  * Identity Field Pattern:
  * - resourceName (CR name): Used for Job naming prefixes (DNS-safe)
@@ -10,16 +11,24 @@
  * 
  * Target: NightscoutTenant CRD
  * Related Resources:
+ *   - Pod (to extract status.podIP for Job connectivity)
  *   - ConfigMap (to detect compute activation via spec.configMapRef)
  *   - Jobs (init-replica-set, create-user) for tracking completion
  *   - mongo-auth Secret (for Job credential injection)
  * 
+ * Pod IP Connectivity Pattern:
+ *   - Decorator discovers Pod via ns.mdn.io/storage label selector
+ *   - Extracts status.podIP from Pod for Jobs to connect to MongoDB
+ *   - Jobs use Pod IP instead of localhost (Jobs run in separate Pods)
+ *   - This enables initialization Jobs to run before Nightscout container starts
+ * 
  * Responsibilities:
- *   1. Detect compute activation (ConfigMap presence)
- *   2. Render init-replica-set Job when compute activated and not yet initialized
- *   3. Track init Job completion → Set ns.mdn.io/replica-set-initialized annotation
- *   4. Render create-user Job when replica initialized and user not yet created
- *   5. Track user Job completion → Set ns.mdn.io/user-initialized annotation
+ *   1. Discover Pod and extract podIP for Job connectivity
+ *   2. Detect compute activation (ConfigMap presence)
+ *   3. Render init-replica-set Job when compute activated and not yet initialized
+ *   4. Track init Job completion → Set ns.mdn.io/replica-set-initialized annotation
+ *   5. Render create-user Job when replica initialized and user not yet created
+ *   6. Track user Job completion → Set ns.mdn.io/user-initialized annotation
  * 
  * Response Format:
  *   - Job attachments: [ init-replica-set Job, create-user Job ]
@@ -28,7 +37,7 @@
  * Render Pattern:
  *   - Render functions accept optional existing Job to clean/preserve
  *   - If existing Job provided, strip runtime metadata and return (preserves attachment)
- *   - If no existing Job, create fresh resource
+ *   - If no existing Job, create fresh resource with Pod IP connectivity
  */
 
 const crypto = require('crypto');
@@ -173,7 +182,44 @@ function createTenantInitializationDecoratorSync(config) {
   }
   
   /**
-   * Stage 2: Discover ConfigMap (compute activation signal)
+   * Stage 2: Discover Pod and extract podIP for Job connectivity
+   * The Pod is managed by the composite controller, we just discover it
+   */
+  function discoverPod(req, res, next) {
+    // Look for Pod by storage label
+    const pods = req.related['Pod.v1'] || {};
+    
+    const tenantPod = findResource(pods, p => 
+      p.metadata?.labels?.['ns.mdn.io/storage'] === req.storageId &&
+      p.metadata?.labels?.['app.kubernetes.io/component'] === 'tenant-pod'
+    );
+    
+    if (tenantPod) {
+      const podIP = tenantPod.status?.podIP;
+      const podPhase = tenantPod.status?.phase;
+      const mongoReady = tenantPod.status?.containerStatuses?.find(c => 
+        c.name === 'mongodb' && c.ready
+      );
+      
+      console.log(`  Pod found: ${tenantPod.metadata.name}`);
+      console.log(`    Phase: ${podPhase}, IP: ${podIP || '(pending)'}`);
+      console.log(`    MongoDB container ready: ${!!mongoReady}`);
+      
+      req.tenantPod = tenantPod;
+      req.podIP = podIP;
+      req.podReady = podPhase === 'Running' && !!mongoReady;
+    } else {
+      console.log('  No tenant Pod found in related resources');
+      req.tenantPod = null;
+      req.podIP = null;
+      req.podReady = false;
+    }
+    
+    return next();
+  }
+  
+  /**
+   * Stage 3: Discover ConfigMap (compute activation signal)
    * Sets req.computeActivated flag based on ConfigMap presence via spec.configMapRef
    */
   function discoverConfigMap(req, res, next) {
@@ -208,7 +254,7 @@ function createTenantInitializationDecoratorSync(config) {
   }
   
   /**
-   * Stage 3: Discover mongo-auth Secret (for Job credentials)
+   * Stage 4: Discover mongo-auth Secret (for Job credentials)
    */
   function discoverMongoAuthSecret(req, res, next) {
     const mongoAuthSecretRef = req.spec.mongoAuthSecretRef;
@@ -243,8 +289,9 @@ function createTenantInitializationDecoratorSync(config) {
   }
   
   /**
-   * Stage 4: Plan init-replica-set Job
+   * Stage 5: Plan init-replica-set Job
    * Gates on annotation - only renders if not already initialized
+   * Requires Pod IP for MongoDB connectivity
    * Render function handles both new and existing Job cases
    */
   function planInitReplicaSetJob(req, res, next) {
@@ -262,10 +309,21 @@ function createTenantInitializationDecoratorSync(config) {
       return next();
     }
     
-    // skip replicaset stuff for now
-    const replicaSetRequired = req.tenant.metadata?.annotation?.['ns.mdn.io/replica-set-required'] == 'true';
+    // Skip if Pod not ready or no IP yet
+    if (!req.podReady || !req.podIP) {
+      console.log(`  Pod not ready or no IP (ready: ${req.podReady}, IP: ${req.podIP}) - waiting`);
+      req.replicaSetInitialized = false;
+      // Request requeue to check Pod status
+      res.resyncAfterSeconds = 10;
+      return next();
+    }
+    
+    // Skip replica set init unless explicitly required (single-node doesn't need RS init)
+    const replicaSetRequired = req.tenant.metadata?.annotations?.['ns.mdn.io/replica-set-required'] === 'true';
     req.replicaSetRequired = replicaSetRequired;
     if (!replicaSetRequired) {
+      console.log('  Replica set init not required - skipping');
+      req.replicaSetInitialized = true; // Treat as initialized for user Job gating
       return next();
     }
 
@@ -291,8 +349,8 @@ function createTenantInitializationDecoratorSync(config) {
       return next();
     }
     
-    // Not initialized - render Job (handles both new and existing cases)
-    console.log(`  Rendering init-replica-set Job${existingJob ? ' (preserving existing)' : ' (new)'}`);
+    // Not initialized - render Job with Pod IP connectivity
+    console.log(`  Rendering init-replica-set Job${existingJob ? ' (preserving existing)' : ' (new)'} → Pod IP: ${req.podIP}`);
     
     const identityLabels = buildIdentityLabels(req);
     const initJob = renderInitReplicaSetJob(
@@ -300,6 +358,7 @@ function createTenantInitializationDecoratorSync(config) {
       req.namespace,
       req.databaseName,
       req.mongoAuthSecret,
+      req.podIP,  // Pod IP for MongoDB connectivity
       identityLabels,
       config,
       existingJob  // Pass existing for preservation
@@ -315,20 +374,35 @@ function createTenantInitializationDecoratorSync(config) {
   }
   
   /**
-   * Stage 5: Plan create-user Job
+   * Stage 6: Plan create-user Job
    * Gates on annotation - only renders if not already initialized
+   * Requires Pod IP for MongoDB connectivity
    * Render function handles both new and existing Job cases
    */
   function planCreateUserJob(req, res, next) {
-    // Skip if replica set not initialized
+    // Skip if replica set not initialized (when required)
     if (req.replicaSetRequired && !req.replicaSetInitialized) {
       console.log('  Replica set not initialized - skipping create-user Job');
+      return next();
+    }
+    
+    // Skip if compute not activated
+    if (!req.computeActivated) {
+      console.log('  Compute not activated - skipping create-user Job');
       return next();
     }
     
     // Skip if auth secret missing
     if (!req.mongoAuthSecret) {
       console.log('  mongo-auth Secret missing - cannot render create-user Job');
+      return next();
+    }
+    
+    // Skip if Pod not ready or no IP yet
+    if (!req.podReady || !req.podIP) {
+      console.log(`  Pod not ready or no IP (ready: ${req.podReady}, IP: ${req.podIP}) - waiting`);
+      // Request requeue to check Pod status
+      res.resyncAfterSeconds = 10;
       return next();
     }
     
@@ -352,8 +426,8 @@ function createTenantInitializationDecoratorSync(config) {
       return next();
     }
     
-    // Not initialized - render Job (handles both new and existing cases)
-    console.log(`  Rendering create-user Job${existingJob ? ' (preserving existing)' : ' (new)'}`);
+    // Not initialized - render Job with Pod IP connectivity
+    console.log(`  Rendering create-user Job${existingJob ? ' (preserving existing)' : ' (new)'} → Pod IP: ${req.podIP}`);
     
     const identityLabels = buildIdentityLabels(req);
     const createUserJob = renderCreateUserJob(
@@ -361,6 +435,7 @@ function createTenantInitializationDecoratorSync(config) {
       req.namespace,
       req.databaseName,
       req.mongoAuthSecret,
+      req.podIP,  // Pod IP for MongoDB connectivity
       identityLabels,
       config,
       existingJob  // Pass existing for preservation
@@ -375,7 +450,7 @@ function createTenantInitializationDecoratorSync(config) {
   }
   
   /**
-   * Stage 6: Format response
+   * Stage 7: Format response
    */
   function formatResponse(req, res, next) {
     const hasAttachments = res.attachments.length > 0;
@@ -410,25 +485,26 @@ function createTenantInitializationDecoratorSync(config) {
    * Render init-replica-set Job
    * 
    * If existing Job provided, cleans and returns it (preserves attachment)
-   * If no existing Job, creates fresh resource
+   * If no existing Job, creates fresh resource with Pod IP connectivity
    * 
    * @param resourceName - CR name, used for Job naming prefix
    * @param namespace - Target namespace
    * @param databaseName - MongoDB database name
    * @param authSecret - mongo-auth Secret for credentials
+   * @param podIP - Pod IP address for MongoDB connectivity (Jobs run in separate Pods)
    * @param identityLabels - Pre-built identity labels (ns.mdn.io/storage, ns.mdn.io/tenant)
    * @param config - Controller configuration
    * @param existing - Optional existing Job to preserve (cleans runtime metadata)
    */
-  function renderInitReplicaSetJob(resourceName, namespace, databaseName, authSecret, identityLabels, cfg, existing) {
+  function renderInitReplicaSetJob(resourceName, namespace, databaseName, authSecret, podIP, identityLabels, cfg, existing) {
     // If existing Job provided, clean and return it to preserve attachment
     if (existing) {
       return cleanForAttachment(existing);
     }
     
-    // Create fresh Job
+    // Create fresh Job with Pod IP connectivity
     const authSecretName = authSecret.metadata.name;
-    const mongoHost = 'localhost:27017';  // Pod-local MongoDB
+    const mongoHost = `${podIP}:27017`;  // Connect via Pod IP (Jobs run in separate Pods)
     
     return {
       apiVersion: 'batch/v1',
@@ -498,7 +574,7 @@ function createTenantInitializationDecoratorSync(config) {
                   },
                   {
                     name: 'POD_NAME',
-                    value: `${resourceName}-rs-`  // ReplicaSet pod name prefix
+                    value: resourceName  // Used for replica set member naming
                   }
                 ]
               }
@@ -513,25 +589,26 @@ function createTenantInitializationDecoratorSync(config) {
    * Render create-user Job
    * 
    * If existing Job provided, cleans and returns it (preserves attachment)
-   * If no existing Job, creates fresh resource
+   * If no existing Job, creates fresh resource with Pod IP connectivity
    * 
    * @param resourceName - CR name, used for Job naming prefix
    * @param namespace - Target namespace
    * @param databaseName - MongoDB database name
    * @param authSecret - mongo-auth Secret for credentials
+   * @param podIP - Pod IP address for MongoDB connectivity (Jobs run in separate Pods)
    * @param identityLabels - Pre-built identity labels (ns.mdn.io/storage, ns.mdn.io/tenant)
    * @param config - Controller configuration
    * @param existing - Optional existing Job to preserve (cleans runtime metadata)
    */
-  function renderCreateUserJob(resourceName, namespace, databaseName, authSecret, identityLabels, cfg, existing) {
+  function renderCreateUserJob(resourceName, namespace, databaseName, authSecret, podIP, identityLabels, cfg, existing) {
     // If existing Job provided, clean and return it to preserve attachment
     if (existing) {
       return cleanForAttachment(existing);
     }
     
-    // Create fresh Job
+    // Create fresh Job with Pod IP connectivity
     const authSecretName = authSecret.metadata.name;
-    const mongoHost = 'localhost:27017';  // Pod-local MongoDB
+    const mongoHost = podIP;  // Connect via Pod IP (Jobs run in separate Pods)
     
     return {
       apiVersion: 'batch/v1',
@@ -643,9 +720,17 @@ function createTenantInitializationDecoratorSync(config) {
     };
   }
   
-  // Pipeline
+  // Pipeline - stages execute in order
+  // 1. initialize: Extract identity fields, validate spec.storage
+  // 2. discoverPod: Find tenant Pod and extract podIP for Job connectivity
+  // 3. discoverConfigMap: Check for compute activation via configMapRef
+  // 4. discoverMongoAuthSecret: Find mongo-auth Secret for Job credentials
+  // 5. planInitReplicaSetJob: Render init-rs Job if needed (requires Pod ready)
+  // 6. planCreateUserJob: Render create-user Job if needed (requires Pod ready)
+  // 7. formatResponse: Build final webhook response
   return [
     initialize,
+    discoverPod,
     discoverConfigMap,
     discoverMongoAuthSecret,
     planInitReplicaSetJob,

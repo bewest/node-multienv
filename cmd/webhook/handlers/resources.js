@@ -1038,6 +1038,306 @@ function renderAppCredentialsSecret(resourceName, namespace, databaseName, exist
   return secret;
 }
 
+/**
+ * Render Tenant Pod (Gen5 Architecture)
+ * 
+ * Co-located MongoDB + Nightscout containers in a single Pod
+ * Two-phase container gating:
+ *   Phase 1: MongoDB container only (userInitialized = false)
+ *   Phase 2: MongoDB + Nightscout containers (userInitialized = true)
+ * 
+ * This enables initialization Jobs to run against MongoDB before Nightscout starts
+ * 
+ * @param {string} resourceName - CR name (used for Pod naming)
+ * @param {string} namespace - Kubernetes namespace
+ * @param {object} spec - NightscoutTenant spec
+ * @param {object} authSecret - mongo-auth Secret for root credentials
+ * @param {object} keyfileSecret - MongoDB keyfile Secret
+ * @param {object} appCredentialsSecret - App credentials Secret for Nightscout
+ * @param {boolean} userInitialized - Whether user credentials have been created
+ * @param {object} identityLabels - Identity labels (ns.mdn.io/storage, ns.mdn.io/tenant)
+ * @param {object} config - Webhook configuration
+ * @returns {object} Pod manifest
+ */
+function renderTenantPod(resourceName, namespace, spec, authSecret, keyfileSecret, appCredentialsSecret, userInitialized, identityLabels, config) {
+  const podName = `${resourceName}-pod`;
+  const pvcName = spec.pvcName || `${resourceName}-data`;
+  
+  // Extract auth secret name
+  const authSecretName = authSecret?.metadata?.name || `${resourceName}-mongo-auth`;
+  const keyfileSecretName = keyfileSecret?.metadata?.name || `${resourceName}-mongo-keyfile`;
+  const appCredentialsSecretName = appCredentialsSecret?.metadata?.name || `${resourceName}-app-credentials`;
+  
+  // MongoDB configuration from config
+  const mongoImage = config.images?.mongodb || 'mongo:6.0';
+  const mongoImagePullPolicy = config.imagePullPolicies?.mongodb || 'IfNotPresent';
+  const mongoCpuRequest = config.resources?.mongodb?.requests?.cpu || '100m';
+  const mongoCpuLimit = config.resources?.mongodb?.limits?.cpu || '500m';
+  const mongoMemRequest = config.resources?.mongodb?.requests?.memory || '256Mi';
+  const mongoMemLimit = config.resources?.mongodb?.limits?.memory || '512Mi';
+  
+  // Nightscout configuration from config
+  const nsImage = config.images?.nightscout || 'nightscout/cgm-remote-monitor:latest';
+  const nsImagePullPolicy = config.imagePullPolicies?.nightscout || 'IfNotPresent';
+  const nsCpuRequest = config.resources?.nightscout?.requests?.cpu || '50m';
+  const nsCpuLimit = config.resources?.nightscout?.limits?.cpu || '200m';
+  const nsMemRequest = config.resources?.nightscout?.requests?.memory || '128Mi';
+  const nsMemLimit = config.resources?.nightscout?.limits?.memory || '256Mi';
+  
+  // Utility image for init container
+  const utilityImage = config.images?.nsUtility || 'nightscout/ns-utility:latest';
+  const utilityImagePullPolicy = config.imagePullPolicies?.nsUtility || 'IfNotPresent';
+  
+  // Standard labels for the Pod
+  const standardLabels = {
+    'app.kubernetes.io/name': 'nightscout-tenant',
+    'app.kubernetes.io/component': 'tenant-pod',
+    'app.kubernetes.io/part-of': 'nightscout-tenant',
+    'app.kubernetes.io/instance': resourceName,
+    'app.kubernetes.io/managed-by': 'metacontroller',
+    ...identityLabels
+  };
+  
+  // Build containers array based on initialization state
+  const containers = [];
+  
+  // MongoDB container (always present)
+  const mongoContainer = {
+    name: 'mongodb',
+    image: mongoImage,
+    imagePullPolicy: mongoImagePullPolicy,
+    args: [
+      '--config', '/config/mongod.conf',
+      '--replSet', 'rs0',
+      '--bind_ip', '0.0.0.0'  // Bind to all interfaces for external Job access
+    ],
+    ports: [
+      {
+        containerPort: 27017,
+        name: 'mongodb'
+      }
+    ],
+    env: [
+      {
+        name: 'POD_IP',
+        valueFrom: {
+          fieldRef: {
+            fieldPath: 'status.podIP'
+          }
+        }
+      },
+      {
+        name: 'MONGO_INITDB_ROOT_USERNAME',
+        valueFrom: {
+          secretKeyRef: {
+            name: authSecretName,
+            key: 'MONGO_INITDB_ROOT_USERNAME'
+          }
+        }
+      },
+      {
+        name: 'MONGO_INITDB_ROOT_PASSWORD',
+        valueFrom: {
+          secretKeyRef: {
+            name: authSecretName,
+            key: 'MONGO_INITDB_ROOT_PASSWORD'
+          }
+        }
+      },
+      {
+        name: 'MONGO_INITDB_DATABASE',
+        valueFrom: {
+          secretKeyRef: {
+            name: authSecretName,
+            key: 'MONGO_INITDB_DATABASE'
+          }
+        }
+      }
+    ],
+    volumeMounts: [
+      {
+        name: 'data',
+        mountPath: '/data/db'
+      },
+      {
+        name: 'mongod-config',
+        mountPath: '/config',
+        readOnly: true
+      },
+      {
+        name: 'keyfile-prep',
+        mountPath: '/data/configdb'
+      }
+    ],
+    readinessProbe: {
+      tcpSocket: {
+        port: 27017
+      },
+      initialDelaySeconds: 10,
+      periodSeconds: 10,
+      timeoutSeconds: 5,
+      failureThreshold: 3
+    },
+    startupProbe: {
+      tcpSocket: {
+        port: 27017
+      },
+      initialDelaySeconds: 5,
+      periodSeconds: 5,
+      timeoutSeconds: 5,
+      failureThreshold: 30
+    },
+    resources: {
+      requests: {
+        cpu: mongoCpuRequest,
+        memory: mongoMemRequest
+      },
+      limits: {
+        cpu: mongoCpuLimit,
+        memory: mongoMemLimit
+      }
+    }
+  };
+  containers.push(mongoContainer);
+  
+  // Nightscout container (only when user initialized)
+  if (userInitialized) {
+    const nightscoutContainer = {
+      name: 'nightscout',
+      image: nsImage,
+      imagePullPolicy: nsImagePullPolicy,
+      ports: [
+        {
+          containerPort: 1337,
+          name: 'http'
+        }
+      ],
+      envFrom: [
+        {
+          secretRef: {
+            name: appCredentialsSecretName
+          }
+        }
+      ],
+      env: [
+        {
+          name: 'MONGO_CONNECTION',
+          value: 'mongodb://$(MONGO_USERNAME):$(MONGO_PASSWORD)@localhost:27017/$(MONGO_DATABASE)?authSource=$(MONGO_DATABASE)'
+        }
+      ],
+      readinessProbe: {
+        httpGet: {
+          path: '/api/v1/status.json',
+          port: 1337
+        },
+        initialDelaySeconds: 10,
+        periodSeconds: 10,
+        timeoutSeconds: 5,
+        failureThreshold: 3
+      },
+      resources: {
+        requests: {
+          cpu: nsCpuRequest,
+          memory: nsMemRequest
+        },
+        limits: {
+          cpu: nsCpuLimit,
+          memory: nsMemLimit
+        }
+      }
+    };
+    containers.push(nightscoutContainer);
+  }
+  
+  // Init container to prepare keyfile
+  const initContainers = [
+    {
+      name: 'prepare-keyfile',
+      image: utilityImage,
+      imagePullPolicy: utilityImagePullPolicy,
+      command: ['/bin/sh', '-c'],
+      args: [
+        'cp /keyfile-secret/keyfile /keyfile-prep/keyfile && chmod 400 /keyfile-prep/keyfile && chown 999:999 /keyfile-prep/keyfile'
+      ],
+      volumeMounts: [
+        {
+          name: 'keyfile-secret',
+          mountPath: '/keyfile-secret',
+          readOnly: true
+        },
+        {
+          name: 'keyfile-prep',
+          mountPath: '/keyfile-prep'
+        }
+      ],
+      resources: {
+        requests: {
+          cpu: '10m',
+          memory: '16Mi'
+        },
+        limits: {
+          cpu: '50m',
+          memory: '32Mi'
+        }
+      }
+    }
+  ];
+  
+  // Volumes
+  const volumes = [
+    {
+      name: 'data',
+      persistentVolumeClaim: {
+        claimName: pvcName
+      }
+    },
+    {
+      name: 'mongod-config',
+      configMap: {
+        name: 'mongod-config'
+      }
+    },
+    {
+      name: 'keyfile-secret',
+      secret: {
+        secretName: keyfileSecretName,
+        defaultMode: 0o400
+      }
+    },
+    {
+      name: 'keyfile-prep',
+      emptyDir: {}
+    }
+  ];
+  
+  // Pod manifest
+  const pod = {
+    apiVersion: 'v1',
+    kind: 'Pod',
+    metadata: {
+      name: podName,
+      namespace: namespace,
+      labels: standardLabels,
+      annotations: {
+        'ns.mdn.io/user-initialized': userInitialized ? 'true' : 'false',
+        'ns.mdn.io/container-count': String(containers.length)
+      }
+    },
+    spec: {
+      imagePullSecrets: config.multienv?.imagePullSecrets || [],
+      initContainers: initContainers,
+      containers: containers,
+      volumes: volumes,
+      restartPolicy: 'Always',
+      terminationGracePeriodSeconds: 30
+    }
+  };
+  
+  console.log(`  Rendered Pod ${podName} with ${containers.length} containers (userInitialized: ${userInitialized})`);
+  
+  return pod;
+}
+
 module.exports = {
   renderMongoDB,
   renderNightscout,
@@ -1048,5 +1348,6 @@ module.exports = {
   generateUsername,
   generateDatabaseName,
   generateAppCredentials,
-  renderAppCredentialsSecret
+  renderAppCredentialsSecret,
+  renderTenantPod
 };

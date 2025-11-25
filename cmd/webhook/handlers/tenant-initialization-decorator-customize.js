@@ -8,6 +8,12 @@
  * - resourceName (CR name): Used for Job naming prefixes
  * - spec.storage: Required, used for ns.mdn.io/storage label lookups
  * - spec.tenant: Optional, used for ns.mdn.io/tenant label when set
+ * 
+ * Key Related Resources:
+ * - Pod: Discovered by ns.mdn.io/storage label to extract status.podIP for Job connectivity
+ * - Jobs: Tracked for completion status (init-replica-set, create-user)
+ * - ConfigMap: Compute activation signal via spec.configMapRef
+ * - mongo-auth Secret: Root credentials for Job authentication
  */
 
 function createTenantInitializationDecoratorCustomize(config) {
@@ -33,6 +39,20 @@ function createTenantInitializationDecoratorCustomize(config) {
     
     // Define related resources to fetch
     const relatedResources = [];
+    
+    // Pod - lookup by storage label to extract podIP for Job connectivity
+    // This is the tenant Pod managed by the composite controller
+    relatedResources.push({
+      apiVersion: 'v1',
+      resource: 'pods',
+      labelSelector: {
+        matchLabels: {
+          'ns.mdn.io/storage': storageId,
+          'app.kubernetes.io/component': 'tenant-pod'
+        }
+      }
+    });
+    console.log(`  Requesting Pod by ns.mdn.io/storage=${storageId}`);
     
     // ConfigMap for compute activation detection (via spec.configMapRef)
     // Metacontroller requires nameSelector.matchNames for name-based discovery
@@ -74,16 +94,31 @@ function createTenantInitializationDecoratorCustomize(config) {
     });
     
     // mongo-auth Secret - lookup by storage label (always present)
-    relatedResources.push({
-      apiVersion: 'v1',
-      resource: 'secrets',
-      labelSelector: {
-        matchLabels: {
-          'ns.mdn.io/storage': storageId,
-          'ns.mdn.io/composite': 'mongodb-auth'
+    // Now using name selector since we know the secret name pattern
+    const mongoAuthSecretRef = tenant.spec?.mongoAuthSecretRef;
+    if (mongoAuthSecretRef) {
+      relatedResources.push({
+        apiVersion: 'v1',
+        resource: 'secrets',
+        nameSelector: {
+          matchNames: [mongoAuthSecretRef]
+        },
+        namespace: namespace
+      });
+      console.log(`  mongo-auth Secret ref: ${mongoAuthSecretRef}`);
+    } else {
+      // Fallback to label-based discovery
+      relatedResources.push({
+        apiVersion: 'v1',
+        resource: 'secrets',
+        labelSelector: {
+          matchLabels: {
+            'ns.mdn.io/storage': storageId,
+            'ns.mdn.io/composite': 'mongodb-auth'
+          }
         }
-      }
-    });
+      });
+    }
     
     console.log(`  Requesting ${relatedResources.length} related resource types`);
     

@@ -2,10 +2,11 @@
  * Tenant Composite Controller (Gen 5 Architecture)
  * 
  * Two-phase provisioning model with ConfigMap-based compute activation
+ * and two-phase Pod container gating for safe initialization
  * 
  * Parent: NightscoutTenant CRD (nightscout.io/v1alpha1)
  * 
- * Phase 1 (Provisioner creates):
+ * Phase 1 (Provisioner creates storage resources):
  *   - PVC (referenced by spec.pvcName)
  *   - mongo-auth Secret (referenced by spec.mongoAuthSecretRef)
  *   - NightscoutTenant CR (minimal spec with refs)
@@ -13,24 +14,37 @@
  * Phase 2 (ConfigMap activates compute):
  *   - Provisioner creates ConfigMap and sets spec.configMapRef
  *   - Controller adopts existing ConfigMap (preserves name/namespace)
- *   - ConfigMap presence enables compute (ReplicaSet rendered)
+ *   - ConfigMap presence enables compute (Pod rendered)
  *   - No ConfigMap OR deleted ConfigMap = storage-only mode (no pods)
+ * 
+ * Two-Phase Pod Container Gating:
+ *   Phase 2a: Pod with MongoDB-only container (ns.mdn.io/user-initialized absent)
+ *     - Allows initialization Jobs to connect via Pod IP
+ *     - Decorator orchestrates init-replica-set and create-user Jobs
+ *   Phase 2b: Pod with MongoDB + Nightscout containers (ns.mdn.io/user-initialized set)
+ *     - Full tenant with application layer
+ *     - Nightscout connects to MongoDB via localhost
  * 
  * Children (Storage Only - No ConfigMap):
  *   - MongoDB Keyfile Secret
- *   - Init Replica Set Job (if needed)
  * 
  * Children (Storage + Compute - ConfigMap Present):
  *   - ConfigMap (adopted from provisioner with preserved identity)
- *   - ReplicaSet (replicas: 1, co-located MongoDB + Nightscout)
+ *   - Pod (co-located MongoDB + Nightscout, gated by initialization)
  *   - MongoDB Keyfile Secret
  *   - App-Credentials Secret (THE Nightscout app Secret with MongoDB credentials + runtime config)
- *   - Init Replica Set Job (if needed)
  * 
  * Related (not owned):
  *   - PVC (created by provisioner, referenced in spec)
  *   - mongo-auth Secret (created by provisioner, referenced in spec)
  *   - ConfigMap (created by provisioner, referenced in spec.configMapRef, enables compute)
+ * 
+ * Decorator Interaction:
+ *   - tenant-initialization-decorator discovers Pod via related resources
+ *   - Decorator extracts Pod IP from status.podIP for Job connectivity
+ *   - Jobs use Pod IP to connect to MongoDB (not localhost or Service)
+ *   - Decorator sets annotations on CR when Jobs succeed
+ *   - Composite reads annotations to gate Nightscout container inclusion
  */
 
 const crypto = require('crypto');
@@ -39,7 +53,8 @@ const {
   generateSecurePassword, 
   generateUsername,
   generateAppCredentials,
-  renderAppCredentialsSecret
+  renderAppCredentialsSecret,
+  renderTenantPod
 } = require('./resources');
 
 function createTenantCompositeSync(config) {
@@ -693,110 +708,127 @@ function createTenantCompositeSync(config) {
     
     // Read initialization annotations from parent (set by decorator)
     const annotations = req.parent.metadata?.annotations || {};
-    const replicaSetRequired = annotations['ns.mdn.io/replica-set-required'];
     const replicaSetInitialized = annotations['ns.mdn.io/replica-set-initialized'];
     const userInitialized = annotations['ns.mdn.io/user-initialized'];
     
     console.log(`  Replica set initialized: ${replicaSetInitialized || 'no'}`);
     console.log(`  User initialized: ${userInitialized || 'no'}`);
     
-    // Compute enabled but initialization not complete (decorator Jobs still running)
-    if ((replicaSetRequired && !replicaSetInitialized) || !userInitialized) {
-      console.log(`  Waiting for initialization Jobs (managed by decorator)`);
-      
-      res.status.phase = 'Initializing';
-      res.status.conditions.push({
-        type: 'Ready',
-        status: 'False',
-        reason: 'WaitingForInitialization',
-        message: `Waiting for: ${!replicaSetInitialized ? 'replica set init ' : ''}${!userInitialized ? 'user creation' : ''}`
-      });
-      
-      if (replicaSetInitialized) {
-        res.status.conditions.push({
-          type: 'ReplicaSetInitialized',
-          status: 'True',
-          reason: 'InitJobSucceeded',
-          message: `MongoDB replica set initialized at ${replicaSetInitialized}`
-        });
-      }
-      
-      if (userInitialized) {
-        res.status.conditions.push({
-          type: 'UserInitialized',
-          status: 'True',
-          reason: 'CreateUserJobSucceeded',
-          message: `MongoDB user created at ${userInitialized}`
-        });
-      }
-      
-      res.status.databaseName = req.databaseName;
-      res.status.connectionSecret = req.authSecret?.metadata?.name;
-      res.status.observedGeneration = req.parent.metadata.generation;
-      
-      return next();
+    // Build identity labels for Pod
+    const identityLabels = {
+      'ns.mdn.io/storage': req.storageId
+    };
+    if (req.tenantSet) {
+      identityLabels['ns.mdn.io/tenant'] = req.tenantId;
     }
     
-    // Prerequisites satisfied and initialization complete - render ReplicaSet
-    console.log(`  All prerequisites satisfied - rendering ReplicaSet`);
-    // Check if ReplicaSet is ready
-    const existingReplicaSet = findResource(req.children['ReplicaSet.v1.apps'], `${resourceName}-rs`, req.namespace);
-    const replicaSetReady = replicaSet?.status?.readyReplicas > 0;
+    // Two-phase Pod rendering:
+    // Phase 1: MongoDB-only Pod (userInitialized = false) - allows Jobs to run
+    // Phase 2: MongoDB + Nightscout Pod (userInitialized = true) - full tenant
+    const userInitializedBool = !!userInitialized;
     
-    const replicaSet = renderReplicaSet(
-      resourceName, 
-      req.namespace, 
-      spec, 
-      req.authSecret, 
-      req.keyfileSecret, 
-      req.appCredentialsSecret, 
-      config,
-      existingReplicaSet // enable echoing/pass-thru of existing resource
-
+    console.log(`  Rendering Pod with userInitialized=${userInitializedBool}`);
+    
+    const pod = renderTenantPod(
+      resourceName,
+      req.namespace,
+      spec,
+      req.authSecret,
+      req.keyfileSecret,
+      req.appCredentialsSecret,
+      userInitializedBool,
+      identityLabels,
+      config
     );
-    res.children.push(replicaSet);
+    res.children.push(pod);
     
+    // Check existing Pod status for phase determination
+    const existingPod = findResource(req.children['pods.v1'], `${resourceName}-pod`, req.namespace);
+    const podReady = existingPod?.status?.conditions?.find(c => c.type === 'Ready' && c.status === 'True');
+    const mongoReady = existingPod?.status?.containerStatuses?.find(c => c.name === 'mongodb' && c.ready);
     
-    console.log(`  ReplicaSet ready: ${replicaSetReady}`);
+    console.log(`  Pod exists: ${!!existingPod}, Pod ready: ${!!podReady}, MongoDB ready: ${!!mongoReady}`);
     
-    // Set phase and conditions based on ReplicaSet readiness
-    if (replicaSetReady) {
+    // Determine phase based on initialization and Pod state
+    if (userInitializedBool && podReady) {
+      // Fully initialized with all containers running
       res.status.phase = 'Running';
       res.status.conditions.push({
         type: 'Ready',
         status: 'True',
-        reason: 'ReplicaSetReady',
-        message: 'Tenant is running with compute layer active'
+        reason: 'PodReady',
+        message: 'Tenant Pod is running with MongoDB and Nightscout containers'
       });
-    } else {
+    } else if (userInitializedBool && !podReady) {
+      // User initialized, waiting for Pod to restart with Nightscout container
+      res.status.phase = 'Upgrading';
+      res.status.conditions.push({
+        type: 'Ready',
+        status: 'False',
+        reason: 'WaitingForPodRestart',
+        message: 'User credentials created, waiting for Pod to restart with Nightscout container'
+      });
+    } else if (mongoReady && !replicaSetInitialized) {
+      // MongoDB running, waiting for replica set init Job
       res.status.phase = 'Initializing';
       res.status.conditions.push({
         type: 'Ready',
         status: 'False',
-        reason: 'WaitingForPods',
-        message: 'ReplicaSet created, waiting for pod to be ready'
+        reason: 'WaitingForReplicaSetInit',
+        message: 'MongoDB running, waiting for replica set initialization Job'
+      });
+    } else if (replicaSetInitialized && !userInitialized) {
+      // Replica set ready, waiting for user creation Job
+      res.status.phase = 'Initializing';
+      res.status.conditions.push({
+        type: 'Ready',
+        status: 'False',
+        reason: 'WaitingForUserCreation',
+        message: 'Replica set initialized, waiting for user creation Job'
+      });
+    } else {
+      // Starting up - MongoDB container initializing
+      res.status.phase = 'Starting';
+      res.status.conditions.push({
+        type: 'Ready',
+        status: 'False',
+        reason: 'WaitingForMongoDB',
+        message: 'Waiting for MongoDB container to become ready'
       });
     }
     
-    // Add initialization completion conditions
-    res.status.conditions.push({
-      type: 'ReplicaSetInitialized',
-      status: 'True',
-      reason: 'InitJobSucceeded',
-      message: `MongoDB replica set initialized at ${replicaSetInitialized}`
-    });
+    // Request requeue if not fully Ready (ensures continuous progress through initialization)
+    // Metacontroller will resync after this interval to check for annotation updates
+    if (!userInitializedBool || !podReady) {
+      res.resyncAfterSeconds = 15;
+      console.log(`  Requesting requeue in 15 seconds (waiting for initialization)`);
+    }
     
-    res.status.conditions.push({
-      type: 'UserInitialized',
-      status: 'True',
-      reason: 'CreateUserJobSucceeded',
-      message: `MongoDB user created at ${userInitialized}`
-    });
+    // Add initialization completion conditions (when set)
+    if (replicaSetInitialized) {
+      res.status.conditions.push({
+        type: 'ReplicaSetInitialized',
+        status: 'True',
+        reason: 'InitJobSucceeded',
+        message: `MongoDB replica set initialized at ${replicaSetInitialized}`
+      });
+    }
+    
+    if (userInitialized) {
+      res.status.conditions.push({
+        type: 'UserInitialized',
+        status: 'True',
+        reason: 'CreateUserJobSucceeded',
+        message: `MongoDB user created at ${userInitialized}`
+      });
+    }
     
     // Add status fields
     res.status.databaseName = req.databaseName;
     res.status.connectionSecret = req.authSecret?.metadata?.name;
     res.status.pvcName = req.pvcName;
+    res.status.podName = `${resourceName}-pod`;
+    res.status.podIP = existingPod?.status?.podIP;
     res.status.observedGeneration = req.parent.metadata.generation;
     
     return next();
@@ -806,10 +838,17 @@ function createTenantCompositeSync(config) {
    * Final handler: send response
    */
   function sendResponse(req, res, next) {
-    res.send({
+    const response = {
       status: res.status,
       children: res.children
-    });
+    };
+    
+    // Include resyncAfterSeconds if set (for initialization progress)
+    if (res.resyncAfterSeconds) {
+      response.resyncAfterSeconds = res.resyncAfterSeconds;
+    }
+    
+    res.send(response);
   }
   
   /**
