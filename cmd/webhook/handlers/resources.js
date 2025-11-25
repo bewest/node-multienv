@@ -1312,6 +1312,10 @@ function renderTenantPod(resourceName, namespace, spec, authSecret, keyfileSecre
   ];
   
   // Pod manifest
+  // Note: imagePullSecrets only included when non-empty to avoid desired/observed state mismatch
+  // (Kubernetes normalizes empty arrays differently, causing Metacontroller to detect drift)
+  const imagePullSecrets = config.multienv?.imagePullSecrets || [];
+  
   const pod = {
     apiVersion: 'v1',
     kind: 'Pod',
@@ -1325,7 +1329,7 @@ function renderTenantPod(resourceName, namespace, spec, authSecret, keyfileSecre
       }
     },
     spec: {
-      imagePullSecrets: config.multienv?.imagePullSecrets || [],
+      ...(imagePullSecrets.length > 0 ? { imagePullSecrets } : {}),
       initContainers: initContainers,
       containers: containers,
       volumes: volumes,
