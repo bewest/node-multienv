@@ -139,6 +139,7 @@ function createTenantCompositeSync(config) {
     res.children = [];
     res.status = { phase: 'Pending', conditions: [] };
     
+    console.log("INCOMING CONTEXT", JSON.stringify(req.body, null, 2));
     console.log(`Tenant composite sync for resource: ${req.resourceName}`);
     console.log(`  Storage ID: ${req.storageId}`);
     console.log(`  Tenant ID: ${req.tenantId} (explicit: ${req.tenantSet})`);
@@ -200,8 +201,8 @@ function createTenantCompositeSync(config) {
     const keyfileSecretName = `${resourceName}-mongo-keyfile`;
     
     // Check if keyfile Secret already exists (robust lookup with namespace)
-    const existingKeyfile = findResource(req.children['secrets.v1'], keyfileSecretName, namespace) || 
-                           findResource(req.related['secrets.v1'], keyfileSecretName, namespace);
+    const existingKeyfile = findResource(req.children['Secret.v1'], keyfileSecretName, namespace) || 
+                           findResource(req.related['Secret.v1'], keyfileSecretName, namespace);
     
     if (existingKeyfile) {
       console.log(`  Keyfile Secret ${keyfileSecretName} exists`);
@@ -270,7 +271,7 @@ function createTenantCompositeSync(config) {
     console.log(`  Looking up mongo-auth Secret: ${authSecretName}`);
     
     // Find Secret in related resources (provisioner-owned, not a child)
-    const existingAuth = findResource(req.related['secrets.v1'], authSecretName, namespace);
+    const existingAuth = findResource(req.related['Secret.v1'], authSecretName, namespace);
     
     if (!existingAuth) {
       console.error(`  ERROR: mongo-auth Secret ${authSecretName} not found in related resources`);
@@ -405,7 +406,7 @@ function createTenantCompositeSync(config) {
     // Look for referenced ConfigMap in children (owned) or related (actual cluster state)
     // After first reconcile, adopted ConfigMap moves from related to children
     let existingConfigMap = findResource(
-      req.children['configmaps.v1'],
+      req.children['ConfigMap.v1'],
       configMapName,
       configMapNamespace
     );
@@ -413,7 +414,7 @@ function createTenantCompositeSync(config) {
     // If not in children, check related resources (first reconcile)
     if (!existingConfigMap) {
       existingConfigMap = findResource(
-        req.related['configmaps.v1'],
+        req.related['ConfigMap.v1'],
         configMapName,
         configMapNamespace
       );
@@ -453,7 +454,7 @@ function createTenantCompositeSync(config) {
     
     // Only set phase if not already in Error state
     if (!inErrorState) {
-      res.status.phase = 'Provisioned';
+      res.status.phase = 'Pending';
     }
     
     res.status.conditions.push({
@@ -491,7 +492,7 @@ function createTenantCompositeSync(config) {
     }
     
     // Check if secret already exists
-    const existingSecret = findResource(req.children['secrets.v1'], secretName, namespace);
+    const existingSecret = findResource(req.children['Secret.v1'], secretName, namespace);
 
     // Generate new app-credentials Secret using shared helper
     console.log(`  Ensuring app-credentials Secret`);
@@ -524,8 +525,8 @@ function createTenantCompositeSync(config) {
     
     // Helper: Find PVC in children or related (with namespace matching)
     function findPVC() {
-      return findResource(req.children['persistentvolumeclaims.v1'], pvcName, req.namespace) ||
-             findResource(req.related['persistentvolumeclaims.v1'], pvcName, req.namespace);
+      return findResource(req.children['PersistentVolumeClaim.v1'], pvcName, req.namespace) ||
+             findResource(req.related['PersistentVolumeClaim.v1'], pvcName, req.namespace);
     }
     
     // Helper: Find init Job in children (with namespace matching)
@@ -601,7 +602,7 @@ function createTenantCompositeSync(config) {
     console.log(`  Checking PVC existence: ${pvcName}`);
     
     // Look for PVC in related resources
-    const pvc = findResource(req.related['persistentvolumeclaims.v1'], pvcName, req.namespace);
+    const pvc = findResource(req.related['PersistentVolumeClaim.v1'], pvcName, req.namespace);
     
     if (!pvc) {
       console.warn(`  WARNING: PVC ${pvcName} not found (provisioner must create it)`);

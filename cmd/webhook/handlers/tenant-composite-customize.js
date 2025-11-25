@@ -52,15 +52,12 @@ function createTenantCompositeCustomize(config) {
     if (spec.mongoAuthSecretRef) {
       related.push({
         apiVersion: 'v1',
-        resource: 'secret',
+        resource: 'secrets',
         names: [spec.mongoAuthSecretRef]
       });
 
     }
-    
-    
-    
-    
+
     console.log("TENANT RELATED", related);
     // Send response
     res.send({

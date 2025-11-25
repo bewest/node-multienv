@@ -262,6 +262,12 @@ function createTenantInitializationDecoratorSync(config) {
       return next();
     }
     
+    // skip replicaset stuff for now
+    const replicaSetRequired = req.tenant.metadata?.annotation?.['ns.mdn.io/replica-set-required'] == 'true';
+    if (!replicaSetRequired) {
+      return next();
+    }
+
     // Check if already initialized (annotation on tenant)
     const replicaSetInitialized = req.tenant.metadata?.annotations?.['ns.mdn.io/replica-set-initialized'];
     if (replicaSetInitialized) {

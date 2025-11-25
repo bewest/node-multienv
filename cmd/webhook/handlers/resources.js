@@ -801,10 +801,13 @@ function renderInitMongoClusterJob(parent, storageAccount, config) {
           }
         },
         spec: {
+          imagePullSecrets: parent.data.IMAGE_PULL_SECRET 
+            ? [{ name: parent.data.IMAGE_PULL_SECRET }] 
+            : config.multienv.imagePullSecrets,
           restartPolicy: 'OnFailure',
           // XXX: needs imagePullSecrets or serviceAccountName with imagePullSecrets
           // to get pull private registry
-          serviceAccountName: 'multienv-tenantadmin',
+          // serviceAccountName: 'multienv-tenantadmin',
           containers: [
             {
               name: 'init-replica-set',
