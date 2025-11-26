@@ -59,9 +59,11 @@ const {
   hashPodInputs
 } = require('./resources');
 
-// Feature flag: Use ReplicaSet instead of direct Pod management
-// ReplicaSet provides a buffer layer that isolates Metacontroller from Pod-level drift
-const USE_REPLICASET = true;
+// Feature flag: Toggle between ReplicaSet and direct Pod management
+// - USE_REPLICASET=true: ReplicaSet buffer layer, InPlace updates, K8s manages Pod lifecycle
+// - USE_REPLICASET=false: Direct Pod, generateSelector=false, spec-hash triggers RollingRecreate
+// Direct Pod mode has lower resource overhead (no ReplicaSet object per tenant)
+const USE_REPLICASET = false;
 
 function createTenantCompositeSync(config) {
   
@@ -781,15 +783,18 @@ function createTenantCompositeSync(config) {
       console.log(`  Existing ReplicaSet: ${!!existingRS}, Pod: ${!!existingPod}, Pod ready: ${!!podReady}, MongoDB ready: ${!!mongoReady}`);
       
     } else {
-      // Direct Pod mode: Use spec-hash pattern to prevent drift detection
+      // Direct Pod mode with generateSelector=false
+      // With generateSelector=false, Metacontroller doesn't inject controller-uid into labels,
+      // so we can render a clean Pod without preservation logic. The spec-hash annotation
+      // in the Pod spec triggers Pod recreation when inputs change (RollingRecreate strategy).
       console.log(`  Rendering Pod with userInitialized=${userInitializedBool}`);
       
-      // Compute spec hash for Pod inputs - this determines if Pod needs recreation
+      // Compute spec hash for Pod inputs - embedded in Pod annotation to trigger recreation
       const authSecretName = req.authSecret?.metadata?.name || `${resourceName}-mongo-auth`;
       const keyfileSecretName = req.keyfileSecret?.metadata?.name || `${resourceName}-mongo-keyfile`;
       const appCredentialsSecretName = req.appCredentialsSecret?.metadata?.name || `${resourceName}-app-credentials`;
       
-      const desiredSpecHash = hashPodInputs({
+      const specHash = hashPodInputs({
         resourceName,
         spec,
         authSecretName,
@@ -800,56 +805,29 @@ function createTenantCompositeSync(config) {
         config
       });
       
-      // Check existing Pod - use spec-hash annotation for preservation decision
+      // Always render fresh Pod - generateSelector=false ensures no drift from controller-uid
+      // The spec-hash annotation changes when inputs change, triggering RollingRecreate
+      console.log(`  Rendering Pod with spec-hash: ${specHash}`);
+      const pod = renderTenantPod(
+        resourceName,
+        req.namespace,
+        spec,
+        req.authSecret,
+        req.keyfileSecret,
+        req.appCredentialsSecret,
+        userInitializedBool,
+        identityLabels,
+        config,
+        specHash
+      );
+      res.children.push(pod);
+      
+      // Check existing Pod for status
       existingPod = findResource(req.children['Pod.v1'], `${resourceName}-pod`, req.namespace);
-      const existingSpecHash = existingPod?.metadata?.annotations?.['ns.mdn.io/spec-hash'];
-      
-      console.log(`  Existing Pod: ${!!existingPod}, existing hash: ${existingSpecHash || 'none'}, desired hash: ${desiredSpecHash}`);
-      
-      if (existingPod && existingSpecHash === desiredSpecHash) {
-        // Preserve existing Pod - spec hash matches, no significant inputs changed
-        console.log(`  Preserving existing Pod (spec-hash matches: ${desiredSpecHash})`);
-        
-        // Render fresh Pod to get exact desired metadata (labels, annotations)
-        const freshPod = renderTenantPod(
-          resourceName,
-          req.namespace,
-          spec,
-          req.authSecret,
-          req.keyfileSecret,
-          req.appCredentialsSecret,
-          userInitializedBool,
-          identityLabels,
-          config,
-          desiredSpecHash
-        );
-        
-        // Clean the existing Pod and replace metadata with exact desired state
-        const preservedPod = cleanResource(existingPod);
-        preservedPod.metadata.labels = freshPod.metadata.labels;
-        preservedPod.metadata.annotations = freshPod.metadata.annotations;
-        
-        res.children.push(preservedPod);
-      } else {
-        // Render fresh Pod - either no Pod exists or inputs changed
-        console.log(`  Rendering fresh Pod (${existingPod ? 'spec-hash changed' : 'no existing Pod'})`);
-        const pod = renderTenantPod(
-          resourceName,
-          req.namespace,
-          spec,
-          req.authSecret,
-          req.keyfileSecret,
-          req.appCredentialsSecret,
-          userInitializedBool,
-          identityLabels,
-          config,
-          desiredSpecHash
-        );
-        res.children.push(pod);
-      }
-      
       podReady = existingPod?.status?.conditions?.find(c => c.type === 'Ready' && c.status === 'True');
       mongoReady = existingPod?.status?.containerStatuses?.find(c => c.name === 'mongodb' && c.ready);
+      
+      console.log(`  Existing Pod: ${!!existingPod}, Pod ready: ${!!podReady}, MongoDB ready: ${!!mongoReady}`);
     }
     
     console.log(`  Pod exists: ${!!existingPod}, Pod ready: ${!!podReady}, MongoDB ready: ${!!mongoReady}`);
