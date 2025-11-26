@@ -411,7 +411,10 @@
       name='tenant-composite',
       syncUrl=webhookServiceUrl + '/composite/tenant/sync',
       customizeUrl=webhookServiceUrl + '/composite/tenant/customize',
-      generateSelector=true,
+      // generateSelector=false prevents Metacontroller from injecting controller-uid
+      // into child labels. This avoids drift detection on server-managed Pod fields
+      // because the webhook controls all labels via spec-hash pattern.
+      generateSelector=false,
       parentResource={
         apiVersion: crdGroup + '/' + crdVersion,
         resource: 'nightscouttenants',
@@ -427,10 +430,20 @@
             method: 'InPlace'
           }
         },
-        // Pods are managed by ReplicaSet, not directly by Metacontroller
-        // Keeping Pod as child resource allows customize hook to discover existing Pods
-        // for status checking, but updates go through ReplicaSet
-        { apiVersion: 'v1', resource: 'pods' },
+        // Direct Pod mode: generateSelector=false prevents Metacontroller from injecting
+        // controller-uid into Pod labels, avoiding drift on server-managed fields.
+        // The webhook renders Pods with stable spec-hash annotation for change detection.
+        // RollingRecreate with statusChecks ensures orderly rollouts when hash changes.
+        { apiVersion: 'v1', resource: 'pods',
+          updateStrategy: {
+            method: 'RollingRecreate',
+            statusChecks: {
+              conditions: [
+                { type: 'Ready', status: 'True' }
+              ]
+            }
+          }
+        },
         // Secrets for MongoDB keyfile and Nightscout config
         { apiVersion: 'v1', resource: 'secrets',
           updateStrategy: {
