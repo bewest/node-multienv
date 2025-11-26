@@ -420,25 +420,17 @@
         }
       },
       childResources=[
-        // Steady state: ReplicaSet with co-located containers (no interstitial StatefulSet)
+        // ReplicaSet mode: InPlace updates - ReplicaSet controller handles Pod lifecycle
+        // This provides a buffer layer that isolates Metacontroller from Pod-level drift
         { apiVersion: 'apps/v1', resource: 'replicasets',
           updateStrategy: {
-            method: 'RollingRecreate'
+            method: 'InPlace'
           }
         },
-        // Pod children with RollingRecreate + statusChecks
-        // statusChecks gates rollout on Pod readiness (like StatefulSet)
-        // Note: The webhook uses spec-hash pattern to prevent false drift detection
-        { apiVersion: 'v1', resource: 'pods',
-          updateStrategy: {
-            method: 'RollingRecreate',
-            statusChecks: {
-              conditions: [
-                { type: 'Ready', status: 'True' }
-              ]
-            }
-          }
-        },
+        // Pods are managed by ReplicaSet, not directly by Metacontroller
+        // Keeping Pod as child resource allows customize hook to discover existing Pods
+        // for status checking, but updates go through ReplicaSet
+        { apiVersion: 'v1', resource: 'pods' },
         // Secrets for MongoDB keyfile and Nightscout config
         { apiVersion: 'v1', resource: 'secrets',
           updateStrategy: {
