@@ -1691,10 +1691,27 @@ function renderTenantReplicaSet(resourceName, namespace, spec, authSecret, keyfi
   // Init container to prepare keyfile with correct permissions
   const initContainers = [
     {
-      name: 'keyfile-prep',
-      image: utilityImage,
-      imagePullPolicy: utilityImagePullPolicy,
-      command: ['sh', '-c', 'cp /keyfile-secret/mongodb-keyfile /data/configdb/mongodb-keyfile && chmod 400 /data/configdb/mongodb-keyfile && chown 999:999 /data/configdb/mongodb-keyfile'],
+      name: 'prepare-keyfile',
+      image: config.images.nsUtility,
+      command: config.commands.prepareKeyfile, // ['/app/multienvctl/entrypoints/prepare-keyfile.sh'],
+      env: [
+        {
+          name: 'KEYFILE_SOURCE',
+          value: '/keyfile-secret/keyfile'
+        },
+        {
+          name: 'KEYFILE_DEST',
+          value: '/keyfile-prep/keyfile'
+        },
+        {
+          name: 'KEYFILE_UID',
+          value: config.mongodb.keyfile.uid, // '999'
+        },
+        {
+          name: 'KEYFILE_GID',
+          value: config.mongodb.keyfile.gid, // '999'
+        }
+      ],
       volumeMounts: [
         {
           name: 'keyfile-secret',
@@ -1703,17 +1720,17 @@ function renderTenantReplicaSet(resourceName, namespace, spec, authSecret, keyfi
         },
         {
           name: 'keyfile-prep',
-          mountPath: '/data/configdb'
+          mountPath: '/keyfile-prep'
         }
       ],
       resources: {
         requests: {
-          cpu: '10m',
-          memory: '16Mi'
+          cpu: config.resources.utility.requests.cpu,
+          memory: config.resources.utility.requests.memory
         },
         limits: {
-          cpu: '50m',
-          memory: '32Mi'
+          cpu: config.resources.utility.limits.cpu,
+          memory: config.resources.utility.limits.memory
         }
       }
     }

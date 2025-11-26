@@ -735,7 +735,6 @@ function createTenantCompositeSync(config) {
     // Build identity labels for Pod
     const identityLabels = {
       'ns.mdn.io/storage': req.storageId
-      // 'ns.mdn.io/composite': 'tenant', 
     };
     if (req.tenantSet) {
       identityLabels['ns.mdn.io/tenant'] = req.tenantId;
@@ -751,6 +750,22 @@ function createTenantCompositeSync(config) {
     let existingPod = null;
     let podReady = false;
     let mongoReady = false;
+    // Compute spec hash for Pod inputs - embedded in Pod annotation to trigger recreation
+    const authSecretName = req.authSecret?.metadata?.name || `${resourceName}-mongo-auth`;
+    const keyfileSecretName = req.keyfileSecret?.metadata?.name || `${resourceName}-mongo-keyfile`;
+    const appCredentialsSecretName = req.appCredentialsSecret?.metadata?.name || `${resourceName}-app-credentials`;
+      
+    const specHash = hashPodInputs({
+      resourceName,
+      spec,
+      authSecretName,
+      keyfileSecretName,
+      appCredentialsSecretName,
+      userInitialized: userInitializedBool,
+      identityLabels,
+      config
+    });
+    res.status.specHash = specHash;
     
     if (USE_REPLICASET) {
       // ReplicaSet mode: Render ReplicaSet, let K8s manage Pod lifecycle
@@ -796,21 +811,6 @@ function createTenantCompositeSync(config) {
       // in the Pod spec triggers Pod recreation when inputs change (RollingRecreate strategy).
       console.log(`  Rendering Pod with userInitialized=${userInitializedBool}`);
       
-      // Compute spec hash for Pod inputs - embedded in Pod annotation to trigger recreation
-      const authSecretName = req.authSecret?.metadata?.name || `${resourceName}-mongo-auth`;
-      const keyfileSecretName = req.keyfileSecret?.metadata?.name || `${resourceName}-mongo-keyfile`;
-      const appCredentialsSecretName = req.appCredentialsSecret?.metadata?.name || `${resourceName}-app-credentials`;
-      
-      const specHash = hashPodInputs({
-        resourceName,
-        spec,
-        authSecretName,
-        keyfileSecretName,
-        appCredentialsSecretName,
-        userInitialized: userInitializedBool,
-        identityLabels,
-        config
-      });
       
       // Always render fresh Pod - generateSelector=false ensures no drift from controller-uid
       // The spec-hash annotation changes when inputs change, triggering RollingRecreate
