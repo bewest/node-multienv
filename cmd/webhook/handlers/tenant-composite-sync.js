@@ -63,7 +63,7 @@ const {
 // - USE_REPLICASET=true: ReplicaSet buffer layer, InPlace updates, K8s manages Pod lifecycle
 // - USE_REPLICASET=false: Direct Pod, generateSelector=false, spec-hash triggers RollingRecreate
 // Direct Pod mode has lower resource overhead (no ReplicaSet object per tenant)
-const USE_REPLICASET = false;
+const USE_REPLICASET = true;
 
 function createTenantCompositeSync(config) {
   
@@ -204,6 +204,7 @@ function createTenantCompositeSync(config) {
       'app.kubernetes.io/instance': req.resourceName,
       'app.kubernetes.io/managed-by': 'metacontroller',
       'ns.mdn.io/storage': req.storageId,
+      'ns.mdn.io/composite': 'tenant', 
       ...additionalLabels
     };
     
@@ -523,21 +524,25 @@ function createTenantCompositeSync(config) {
     const existingSecret = findResource(req.children['Secret.v1'], secretName, namespace);
 
     // Generate new app-credentials Secret using shared helper
-    console.log(`  Ensuring app-credentials Secret`);
+    console.log(`  Ensuring app-credentials Secret`, existingSecret);
     
     // Build identity labels for the secret
     const identityLabels = buildStandardLabels(req, 'application');
+    var overrides = {
+      mongoHost: 'localhost',
+    };
     
     const appCredentialsSecret = renderAppCredentialsSecret(
       resourceName,
       namespace,
       req.databaseName,
       existingSecret,  // null for first cycle, existing Secret to preserve
-      identityLabels
+      identityLabels,
+      overrides
     );
 
     res.children.push(appCredentialsSecret);
-    req.appCredentialsSecret = appCredentialsSecret;
+    req.appCredentialsSecret = existingSecret;
 
     return next();
   }
@@ -730,9 +735,11 @@ function createTenantCompositeSync(config) {
     // Build identity labels for Pod
     const identityLabels = {
       'ns.mdn.io/storage': req.storageId
+      // 'ns.mdn.io/composite': 'tenant', 
     };
     if (req.tenantSet) {
       identityLabels['ns.mdn.io/tenant'] = req.tenantId;
+      identityLabels['tenant'] = req.tenantId;
     }
     
     // Two-phase container rendering:
@@ -953,6 +960,8 @@ function createTenantCompositeSync(config) {
     if (!req.computeConfigMap) {
       return next();
     }
+    // No adoption at all.
+    return next();
     
     const resourceName = req.resourceName;
     const namespace = req.namespace;

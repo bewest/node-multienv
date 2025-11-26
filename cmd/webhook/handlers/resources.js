@@ -946,7 +946,7 @@ function generateAppCredentials(tenantId, mongoHost, mongoPort, databaseName, us
  * @param {object} identityLabels - Identity labels from buildStandardLabels (includes ns.mdn.io/storage, ns.mdn.io/tenant)
  * @returns {object} Secret manifest
  */
-function renderAppCredentialsSecret(resourceName, namespace, databaseName, existingSecret, identityLabels) {
+function renderAppCredentialsSecret(resourceName, namespace, databaseName, existingSecret, identityLabels, overrides) {
   const secretName = `${resourceName}-app-credentials`;
   const existingAnnotations = existingSecret?.metadata?.annotations || {};
   const existingLabels = existingSecret?.metadata?.labels || {};
@@ -996,7 +996,7 @@ function renderAppCredentialsSecret(resourceName, namespace, databaseName, exist
     const username = generateUsername(resourceName);
     const password = generateSecurePassword(16);
     
-    const mongoHost = `mongo-${databaseName}`;
+    const mongoHost = overrides ? overrides?.mongoHost : `mongo-${databaseName}`;
     const mongoPort = '27017';
     
     // Generate MongoDB credentials
@@ -1018,13 +1018,7 @@ function renderAppCredentialsSecret(resourceName, namespace, databaseName, exist
       ...appCredentials,
       // Nightscout application runtime configuration
       MONGO_CONNECTION: mongoConnection,
-      API_SECRET: apiSecret,
-      INSECURE_USE_HTTP: 'true',
-      HOSTNAME: `${resourceName}.nightscout.svc.cluster.local`,
-      BASE_URL: `https://${resourceName}.nightscout.example.com`,
-      ENABLE: 'careportal basal dbsize rawbg iob cob bwp cage iage sage boluscalc pushover treatmentnotify mmconnect loop pump profile food openaps bage alexa override cors',
-      TIME_FORMAT: '24',
-      THEME: 'colors'
+      // API_SECRET: apiSecret,
     };
 
     // Encode all fields to base64
@@ -1203,6 +1197,12 @@ function renderTenantPod(resourceName, namespace, spec, authSecret, keyfileSecre
   const utilityImage = config.images?.nsUtility || 'nightscout/ns-utility:latest';
   const utilityImagePullPolicy = config.imagePullPolicies?.nsUtility || 'IfNotPresent';
   
+  /*
+  Spec looks like this:
+  'ns.mdn.io/storage': storageAccountId,
+  'app.kubernetes.io/part-of': 'nightscout-tenant', 
+  'ns.mdn.io/composite': 'tenant', 
+  */
   // Standard labels for the Pod
   const standardLabels = {
     'app.kubernetes.io/name': 'nightscout-tenant',
@@ -1210,6 +1210,7 @@ function renderTenantPod(resourceName, namespace, spec, authSecret, keyfileSecre
     'app.kubernetes.io/part-of': 'nightscout-tenant',
     'app.kubernetes.io/instance': resourceName,
     'app.kubernetes.io/managed-by': 'metacontroller',
+    'ns.mdn.io/composite': 'tenant', 
     ...identityLabels
   };
   
@@ -1755,7 +1756,10 @@ function renderTenantReplicaSet(resourceName, namespace, spec, authSecret, keyfi
     metadata: {
       name: rsName,
       namespace: namespace,
-      labels: standardLabels,
+      labels: {
+        'ns.mdn.io/composite': 'tenant',
+         ...standardLabels,
+      },
       annotations: {
         'ns.mdn.io/user-initialized': userInitialized ? 'true' : 'false',
         'ns.mdn.io/container-count': String(containers.length)
