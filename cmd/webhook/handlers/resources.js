@@ -1039,17 +1039,60 @@ function renderAppCredentialsSecret(resourceName, namespace, databaseName, exist
 }
 
 /**
+ * Build Tenant Pod Metadata (Shared Helper)
+ * 
+ * This function generates the canonical labels and annotations for a tenant Pod.
+ * Used by both hashPodInputs() and renderTenantPod() to ensure consistency.
+ * 
+ * @param {object} params - Metadata input parameters
+ * @param {string} params.resourceName - CR name
+ * @param {boolean} params.userInitialized - Whether user credentials have been created
+ * @param {object} params.identityLabels - Identity labels (ns.mdn.io/storage, ns.mdn.io/tenant)
+ * @param {string} [params.specHash] - Spec hash (optional, added to annotations if provided)
+ * @returns {object} { labels, annotations } for Pod metadata
+ */
+function buildTenantPodMetadata(params) {
+  const {
+    resourceName,
+    userInitialized,
+    identityLabels,
+    specHash
+  } = params;
+  
+  const userInitializedBool = !!userInitialized;
+  const containerCount = userInitializedBool ? 2 : 1;
+  
+  // Standard Kubernetes recommended labels + identity labels
+  const labels = {
+    'app.kubernetes.io/name': 'nightscout-tenant',
+    'app.kubernetes.io/component': 'tenant-pod',
+    'app.kubernetes.io/part-of': 'nightscout-tenant',
+    'app.kubernetes.io/instance': resourceName,
+    'app.kubernetes.io/managed-by': 'metacontroller',
+    ...(identityLabels || {})
+  };
+  
+  // Annotations (spec-hash only included if provided)
+  const annotations = {
+    'ns.mdn.io/user-initialized': userInitializedBool ? 'true' : 'false',
+    'ns.mdn.io/container-count': String(containerCount),
+    ...(specHash ? { 'ns.mdn.io/spec-hash': specHash } : {})
+  };
+  
+  return { labels, annotations };
+}
+
+/**
  * Compute a hash of significant Pod inputs for change detection
  * 
- * This hash captures ALL inputs that renderTenantPod uses to generate Pod metadata:
+ * This hash captures ALL inputs that renderTenantPod uses to generate Pod:
  * - Container images (MongoDB, Nightscout, utility)
  * - Secret references (auth, keyfile, app credentials)
  * - PVC name
  * - Initialization state (userInitialized)
  * - Resource limits
  * - ImagePullSecrets
- * - All labels that renderTenantPod writes (standard + identity)
- * - All annotations that renderTenantPod writes (user-initialized, container-count)
+ * - Labels and annotations (via buildTenantPodMetadata, excluding spec-hash)
  * 
  * When this hash changes, the Pod should be recreated.
  * When unchanged, preserve the existing Pod to avoid drift detection.
@@ -1070,32 +1113,22 @@ function hashPodInputs(params) {
   } = params;
   
   const pvcName = spec.pvcName || `${resourceName}-data`;
-  const userInitializedBool = !!userInitialized;
-  const containerCount = userInitializedBool ? 2 : 1;
   
-  // Include ALL labels that renderTenantPod writes
-  const desiredLabels = {
-    'app.kubernetes.io/name': 'nightscout-tenant',
-    'app.kubernetes.io/component': 'tenant-pod',
-    'app.kubernetes.io/part-of': 'nightscout-tenant',
-    'app.kubernetes.io/instance': resourceName,
-    'app.kubernetes.io/managed-by': 'metacontroller',
-    ...(identityLabels || {})
-  };
-  
-  // Include ALL annotations that renderTenantPod writes
-  const desiredAnnotations = {
-    'ns.mdn.io/user-initialized': userInitializedBool ? 'true' : 'false',
-    'ns.mdn.io/container-count': String(containerCount)
-  };
+  // Get canonical metadata via shared helper (without spec-hash to avoid circular dependency)
+  const metadata = buildTenantPodMetadata({
+    resourceName,
+    userInitialized,
+    identityLabels
+    // Note: specHash intentionally omitted - hash is computed BEFORE specHash is known
+  });
   
   const hashInputs = {
     pvcName,
     authSecretName,
     keyfileSecretName,
     appCredentialsSecretName,
-    labels: desiredLabels,
-    annotations: desiredAnnotations,
+    labels: metadata.labels,
+    annotations: metadata.annotations,
     images: {
       mongodb: config.images?.mongodb || 'mongo:6.0',
       nightscout: config.images?.nightscout || 'nightscout/cgm-remote-monitor:latest',
