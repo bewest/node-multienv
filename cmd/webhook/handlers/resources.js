@@ -1039,6 +1039,60 @@ function renderAppCredentialsSecret(resourceName, namespace, databaseName, exist
 }
 
 /**
+ * Compute a hash of significant Pod inputs for change detection
+ * 
+ * This hash captures the inputs that should trigger Pod recreation:
+ * - Container images (MongoDB, Nightscout, utility)
+ * - Secret references (auth, keyfile, app credentials)
+ * - PVC name
+ * - Initialization state (userInitialized)
+ * - Resource limits
+ * - ImagePullSecrets
+ * 
+ * When this hash changes, the Pod should be recreated.
+ * When unchanged, preserve the existing Pod to avoid drift detection.
+ * 
+ * @param {object} params - Pod input parameters
+ * @returns {string} SHA256 hash (first 12 chars) of Pod inputs
+ */
+function hashPodInputs(params) {
+  const {
+    resourceName,
+    spec,
+    authSecretName,
+    keyfileSecretName,
+    appCredentialsSecretName,
+    userInitialized,
+    config
+  } = params;
+  
+  const pvcName = spec.pvcName || `${resourceName}-data`;
+  
+  const hashInputs = {
+    pvcName,
+    authSecretName,
+    keyfileSecretName,
+    appCredentialsSecretName,
+    userInitialized: !!userInitialized,
+    images: {
+      mongodb: config.images?.mongodb || 'mongo:6.0',
+      nightscout: config.images?.nightscout || 'nightscout/cgm-remote-monitor:latest',
+      nsUtility: config.images?.nsUtility || 'nightscout/ns-utility:latest'
+    },
+    resources: {
+      mongodb: config.resources?.mongodb,
+      nightscout: config.resources?.nightscout
+    },
+    imagePullSecrets: config.multienv?.imagePullSecrets || []
+  };
+  
+  const hashString = JSON.stringify(hashInputs);
+  const hash = crypto.createHash('sha256').update(hashString).digest('hex');
+  
+  return hash.substring(0, 12);
+}
+
+/**
  * Render Tenant Pod (Gen5 Architecture)
  * 
  * Co-located MongoDB + Nightscout containers in a single Pod
@@ -1047,6 +1101,11 @@ function renderAppCredentialsSecret(resourceName, namespace, databaseName, exist
  *   Phase 2: MongoDB + Nightscout containers (userInitialized = true)
  * 
  * This enables initialization Jobs to run against MongoDB before Nightscout starts
+ * 
+ * Uses spec-hash annotation pattern to prevent Metacontroller drift detection:
+ * - Hash of significant Pod inputs stored as annotation
+ * - Sync logic compares hashes to decide preserve vs recreate
+ * - Only recreates Pod when inputs actually change
  * 
  * @param {string} resourceName - CR name (used for Pod naming)
  * @param {string} namespace - Kubernetes namespace
@@ -1057,9 +1116,10 @@ function renderAppCredentialsSecret(resourceName, namespace, databaseName, exist
  * @param {boolean} userInitialized - Whether user credentials have been created
  * @param {object} identityLabels - Identity labels (ns.mdn.io/storage, ns.mdn.io/tenant)
  * @param {object} config - Webhook configuration
+ * @param {string} specHash - Pre-computed spec hash (from hashPodInputs)
  * @returns {object} Pod manifest
  */
-function renderTenantPod(resourceName, namespace, spec, authSecret, keyfileSecret, appCredentialsSecret, userInitialized, identityLabels, config) {
+function renderTenantPod(resourceName, namespace, spec, authSecret, keyfileSecret, appCredentialsSecret, userInitialized, identityLabels, config, specHash) {
   const podName = `${resourceName}-pod`;
   const pvcName = spec.pvcName || `${resourceName}-data`;
   
@@ -1325,7 +1385,8 @@ function renderTenantPod(resourceName, namespace, spec, authSecret, keyfileSecre
       labels: standardLabels,
       annotations: {
         'ns.mdn.io/user-initialized': userInitialized ? 'true' : 'false',
-        'ns.mdn.io/container-count': String(containers.length)
+        'ns.mdn.io/container-count': String(containers.length),
+        'ns.mdn.io/spec-hash': specHash
       }
     },
     spec: {
@@ -1484,5 +1545,6 @@ module.exports = {
   generateAppCredentials,
   renderAppCredentialsSecret,
   renderCreateUserJob,
-  renderTenantPod
+  renderTenantPod,
+  hashPodInputs
 };
