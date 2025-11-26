@@ -1041,13 +1041,15 @@ function renderAppCredentialsSecret(resourceName, namespace, databaseName, exist
 /**
  * Compute a hash of significant Pod inputs for change detection
  * 
- * This hash captures the inputs that should trigger Pod recreation:
+ * This hash captures ALL inputs that renderTenantPod uses to generate Pod metadata:
  * - Container images (MongoDB, Nightscout, utility)
  * - Secret references (auth, keyfile, app credentials)
  * - PVC name
  * - Initialization state (userInitialized)
  * - Resource limits
  * - ImagePullSecrets
+ * - All labels that renderTenantPod writes (standard + identity)
+ * - All annotations that renderTenantPod writes (user-initialized, container-count)
  * 
  * When this hash changes, the Pod should be recreated.
  * When unchanged, preserve the existing Pod to avoid drift detection.
@@ -1063,17 +1065,37 @@ function hashPodInputs(params) {
     keyfileSecretName,
     appCredentialsSecretName,
     userInitialized,
+    identityLabels,
     config
   } = params;
   
   const pvcName = spec.pvcName || `${resourceName}-data`;
+  const userInitializedBool = !!userInitialized;
+  const containerCount = userInitializedBool ? 2 : 1;
+  
+  // Include ALL labels that renderTenantPod writes
+  const desiredLabels = {
+    'app.kubernetes.io/name': 'nightscout-tenant',
+    'app.kubernetes.io/component': 'tenant-pod',
+    'app.kubernetes.io/part-of': 'nightscout-tenant',
+    'app.kubernetes.io/instance': resourceName,
+    'app.kubernetes.io/managed-by': 'metacontroller',
+    ...(identityLabels || {})
+  };
+  
+  // Include ALL annotations that renderTenantPod writes
+  const desiredAnnotations = {
+    'ns.mdn.io/user-initialized': userInitializedBool ? 'true' : 'false',
+    'ns.mdn.io/container-count': String(containerCount)
+  };
   
   const hashInputs = {
     pvcName,
     authSecretName,
     keyfileSecretName,
     appCredentialsSecretName,
-    userInitialized: !!userInitialized,
+    labels: desiredLabels,
+    annotations: desiredAnnotations,
     images: {
       mongodb: config.images?.mongodb || 'mongo:6.0',
       nightscout: config.images?.nightscout || 'nightscout/cgm-remote-monitor:latest',

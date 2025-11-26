@@ -54,7 +54,8 @@ const {
   generateUsername,
   generateAppCredentials,
   renderAppCredentialsSecret,
-  renderTenantPod
+  renderTenantPod,
+  hashPodInputs
 } = require('./resources');
 
 function createTenantCompositeSync(config) {
@@ -734,23 +735,64 @@ function createTenantCompositeSync(config) {
     
     console.log(`  Rendering Pod with userInitialized=${userInitializedBool}`);
     
-    // Check existing Pod first - preserve it if it matches our desired state
-    // This prevents Metacontroller from detecting drift on server-added labels (e.g., controller-uid)
+    // Compute spec hash for Pod inputs - this determines if Pod needs recreation
+    // Hash includes: images, secrets, PVC, userInitialized, resources
+    const authSecretName = req.authSecret?.metadata?.name || `${resourceName}-mongo-auth`;
+    const keyfileSecretName = req.keyfileSecret?.metadata?.name || `${resourceName}-mongo-keyfile`;
+    const appCredentialsSecretName = req.appCredentialsSecret?.metadata?.name || `${resourceName}-app-credentials`;
+    
+    const desiredSpecHash = hashPodInputs({
+      resourceName,
+      spec,
+      authSecretName,
+      keyfileSecretName,
+      appCredentialsSecretName,
+      userInitialized: userInitializedBool,
+      identityLabels,
+      config
+    });
+    
+    // Check existing Pod - use spec-hash annotation for preservation decision
+    // This prevents Metacontroller from detecting drift on server-added fields
     const existingPod = findResource(req.children['Pod.v1'], `${resourceName}-pod`, req.namespace);
-    const existingContainerCount = existingPod?.spec?.containers?.length || 0;
-    const desiredContainerCount = userInitializedBool ? 2 : 1; // MongoDB-only (1) vs MongoDB+Nightscout (2)
+    const existingSpecHash = existingPod?.metadata?.annotations?.['ns.mdn.io/spec-hash'];
     
-    console.log(`  Existing Pod containers: ${existingContainerCount}, desired: ${desiredContainerCount}`);
+    console.log(`  Existing Pod: ${!!existingPod}, existing hash: ${existingSpecHash || 'none'}, desired hash: ${desiredSpecHash}`);
     
-    if (false && existingPod && existingContainerCount === desiredContainerCount) {
-      // Preserve existing Pod - it already matches our desired state
-      // Clean server-managed fields but preserve labels (including controller-uid)
-      console.log(`  Preserving existing Pod (container count matches)`);
+    if (existingPod && existingSpecHash === desiredSpecHash) {
+      // Preserve existing Pod - spec hash matches, no significant inputs changed
+      // Return the existing Pod (cleaned) to prevent Metacontroller from detecting drift
+      // 
+      // Strategy: Render a fresh Pod to get exact desired metadata, then apply it to
+      // the cleaned existing Pod. This guarantees labels/annotations match exactly.
+      console.log(`  Preserving existing Pod (spec-hash matches: ${desiredSpecHash})`);
+      
+      // Render fresh Pod to get exact desired metadata (labels, annotations)
+      const freshPod = renderTenantPod(
+        resourceName,
+        req.namespace,
+        spec,
+        req.authSecret,
+        req.keyfileSecret,
+        req.appCredentialsSecret,
+        userInitializedBool,
+        identityLabels,
+        config,
+        desiredSpecHash
+      );
+      
+      // Clean the existing Pod (removes server-managed fields like resourceVersion, uid, etc.)
       const preservedPod = cleanResource(existingPod);
+      
+      // Replace metadata with exact desired state from fresh Pod
+      // This guarantees labels/annotations match what renderTenantPod produces
+      preservedPod.metadata.labels = freshPod.metadata.labels;
+      preservedPod.metadata.annotations = freshPod.metadata.annotations;
+      
       res.children.push(preservedPod);
     } else {
-      // Render fresh Pod - either no Pod exists or container count changed
-      console.log(`  Rendering fresh Pod (${existingPod ? 'container count changed' : 'no existing Pod'})`);
+      // Render fresh Pod - either no Pod exists or inputs changed (hash differs)
+      console.log(`  Rendering fresh Pod (${existingPod ? 'spec-hash changed' : 'no existing Pod'})`);
       const pod = renderTenantPod(
         resourceName,
         req.namespace,
@@ -760,7 +802,8 @@ function createTenantCompositeSync(config) {
         req.appCredentialsSecret,
         userInitializedBool,
         identityLabels,
-        config
+        config,
+        desiredSpecHash
       );
       res.children.push(pod);
     }
