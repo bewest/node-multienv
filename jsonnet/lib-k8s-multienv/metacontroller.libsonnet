@@ -426,9 +426,17 @@
             method: 'RollingRecreate'
           }
         },
+        // Pod children with RollingRecreate + statusChecks
+        // statusChecks gates rollout on Pod readiness (like StatefulSet)
+        // Note: The webhook uses spec-hash pattern to prevent false drift detection
         { apiVersion: 'v1', resource: 'pods',
           updateStrategy: {
-            method: 'RollingRecreate'
+            method: 'RollingRecreate',
+            statusChecks: {
+              conditions: [
+                { type: 'Ready', status: 'True' }
+              ]
+            }
           }
         },
         // Secrets for MongoDB keyfile and Nightscout config
