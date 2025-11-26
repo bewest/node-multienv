@@ -432,7 +432,11 @@
           }
         },
         // Secrets for MongoDB keyfile and Nightscout config
-        { apiVersion: 'v1', resource: 'secrets' },
+        { apiVersion: 'v1', resource: 'secrets',
+          updateStrategy: {
+            method: 'InPlace',
+          },
+        },
         // ConfigMaps for tenant settings (adopted from provisioner via spec.configMapRef)
         // { apiVersion: 'v1', resource: 'configmaps' },
         // Note: Jobs managed by tenant-initialization-decorator (not this composite)

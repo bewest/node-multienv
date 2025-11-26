@@ -490,8 +490,8 @@ function createTenantInitializationDecoratorSync(config) {
     }
     
     if (hasResync) {
-      response.resyncAfterSeconds = res.resyncAfterSeconds;
-      console.log(`  Requesting requeue after ${res.resyncAfterSeconds} seconds`);
+      // response.resyncAfterSeconds = res.resyncAfterSeconds;
+      // console.log(`  Requesting requeue after ${res.resyncAfterSeconds} seconds`);
     }
     
     // Always return response (may be empty object for no-op)

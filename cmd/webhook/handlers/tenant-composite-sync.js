@@ -421,11 +421,12 @@ function createTenantCompositeSync(config) {
     // Look for referenced ConfigMap in children (owned) or related (actual cluster state)
     // After first reconcile, adopted ConfigMap moves from related to children
     let existingConfigMap = findResource(
-      req.children['ConfigMap.v1'],
+      req.related['ConfigMap.v1'],
       configMapName,
       configMapNamespace
     );
     
+    /*
     // If not in children, check related resources (first reconcile)
     if (!existingConfigMap) {
       existingConfigMap = findResource(
@@ -434,8 +435,11 @@ function createTenantCompositeSync(config) {
         configMapNamespace
       );
     }
+    */
     
     if (existingConfigMap) {
+      console.log(`  Found existing ConfigMap`);
+      /*
       console.log(`  Found existing ConfigMap - adopting for compute activation`);
       
       // Adopt existing ConfigMap (preserves name/namespace, adds management labels)
@@ -448,14 +452,15 @@ function createTenantCompositeSync(config) {
       Object.assign(adoptedConfigMap.metadata.labels, buildStandardLabels(req, 'userdata'));
       
       res.children.push(adoptedConfigMap);
+      */
       req.computeEnabled = true;
-      req.computeConfigMap = adoptedConfigMap;
+      req.computeConfigMap = existingConfigMap;
       
       res.status.conditions.push({
         type: 'ComputeActivated',
         status: 'True',
         reason: 'ConfigMapAdopted',
-        message: `ConfigMap ${configMapNamespace}/${configMapName} adopted (compute enabled)`
+        message: `ConfigMap ${configMapNamespace}/${configMapName} found (compute enabled)`
       });
       
       return next();
@@ -546,7 +551,7 @@ function createTenantCompositeSync(config) {
     
     // Helper: Find init Job in children (with namespace matching)
     function findInitJob() {
-      return findResource(req.children['jobs.batch/v1'], initJobName, req.namespace);
+      return findResource(req.children['Job.batch/v1'], initJobName, req.namespace);
     }
     
     // Check for existing PVC
@@ -737,7 +742,7 @@ function createTenantCompositeSync(config) {
     
     console.log(`  Existing Pod containers: ${existingContainerCount}, desired: ${desiredContainerCount}`);
     
-    if (existingPod && existingContainerCount === desiredContainerCount) {
+    if (false && existingPod && existingContainerCount === desiredContainerCount) {
       // Preserve existing Pod - it already matches our desired state
       // Clean server-managed fields but preserve labels (including controller-uid)
       console.log(`  Preserving existing Pod (container count matches)`);
@@ -860,9 +865,13 @@ function createTenantCompositeSync(config) {
     
     // Include resyncAfterSeconds if set (for initialization progress)
     if (res.resyncAfterSeconds) {
-      response.resyncAfterSeconds = res.resyncAfterSeconds;
+      // response.resyncAfterSeconds = res.resyncAfterSeconds;
+    }
+    if (Object.entries(res.annotations).length > 0) {
+      response.annotations = res.annotations;
     }
     
+    console.log("RESPONSE", JSON.stringify(response, null, 2));
     res.send(response);
   }
   
