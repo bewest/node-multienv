@@ -437,11 +437,13 @@
         { apiVersion: 'v1', resource: 'pods',
           updateStrategy: {
             method: 'RollingRecreate',
+            /*
             statusChecks: {
               conditions: [
                 { type: 'Ready', status: 'True' }
               ]
             }
+            */
           }
         },
         // Secrets for MongoDB keyfile and Nightscout config
