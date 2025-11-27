@@ -117,13 +117,23 @@ function createAppCredentialsInitDecoratorSync(config) {
       console.log(`  Found mongo-auth Secret: ${mongoAuthSecret.metadata.name}`);
       req.mongoAuthSecret = mongoAuthSecret;
       
+      // Check replica set initialization status
       const replicaSetInitialized = mongoAuthSecret.metadata?.annotations?.['ns.mdn.io/replica-set-initialized'];
-      req.replicaSetInitialized = !!replicaSetInitialized;
+      
+      // Check if replica set is required (default true for backwards compatibility)
+      const replicasetRequired = mongoAuthSecret.metadata?.annotations?.['ns.mdn.io/replicaset-required'];
+      req.replicasetRequired = replicasetRequired !== 'false';
       
       if (replicaSetInitialized) {
         console.log(`    Replica set initialized at: ${replicaSetInitialized}`);
+        req.replicaSetInitialized = true;
+      } else if (!req.replicasetRequired) {
+        // If replicaset is not required, treat as initialized
+        console.log('    Replica set NOT required - treating as initialized');
+        req.replicaSetInitialized = true;
       } else {
-        console.log('    Replica set NOT initialized yet');
+        console.log('    Replica set NOT initialized yet (required)');
+        req.replicaSetInitialized = false;
       }
       
       req.databaseName = Buffer.from(mongoAuthSecret.data?.MONGO_INITDB_DATABASE || '', 'base64').toString('utf-8') ||
@@ -133,6 +143,7 @@ function createAppCredentialsInitDecoratorSync(config) {
       console.log('  mongo-auth Secret not found');
       req.mongoAuthSecret = null;
       req.replicaSetInitialized = false;
+      req.replicasetRequired = true;  // Assume required if we can't find the secret
     }
     
     return next();
@@ -187,21 +198,18 @@ function createAppCredentialsInitDecoratorSync(config) {
       return next();
     }
     
-    if (!req.podReady || !req.podIP) {
-      console.log(`  Pod not ready (ready: ${req.podReady}, IP: ${req.podIP}) - waiting`);
-      return next();
-    }
-    
     const tenantIdForJob = req.tenantId || req.resourceName;
     const createUserJobName = `${req.storageId}-${tenantIdForJob}-create-user`;
     
-    const existingJobs = req.attachments['Job.batch/v1'] || {};
-    const existingJob = existingJobs[createUserJobName] || 
+    // First, check for existing Job in attachments OR related (preserve existing Jobs)
+    const existingJobsAttachments = req.attachments['Job.batch/v1'] || {};
+    const existingJob = existingJobsAttachments[createUserJobName] || 
                         findResource(req.related['Job.batch/v1'], j => j.metadata?.name === createUserJobName);
     
     if (existingJob && jobSucceeded(existingJob)) {
       console.log('  Create-user Job succeeded - marking user initialized');
       res.annotations['ns.mdn.io/user-initialized'] = new Date().toISOString();
+      // Preserve the completed Job (K8s TTL controller will clean it up)
       res.attachments.push(cleanForAttachment(existingJob));
       return next();
     }
@@ -209,6 +217,18 @@ function createAppCredentialsInitDecoratorSync(config) {
     if (existingJob) {
       console.log('  Create-user Job exists but not succeeded - preserving');
       res.attachments.push(cleanForAttachment(existingJob));
+      return next();
+    }
+    
+    // Gate on replica set initialized (either actually initialized, or not required)
+    if (!req.replicaSetInitialized) {
+      console.log('  Replica set not initialized yet - waiting before creating user');
+      return next();
+    }
+    
+    // Only create new Job if Pod is ready
+    if (!req.podReady || !req.podIP) {
+      console.log(`  Pod not ready (ready: ${req.podReady}, IP: ${req.podIP}) - waiting`);
       return next();
     }
     

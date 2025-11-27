@@ -127,25 +127,52 @@ function createMongoAuthInitDecoratorSync(config) {
     return next();
   }
   
+  function checkReplicasetRequired(req, res, next) {
+    if (req.alreadyInitialized) {
+      return next();
+    }
+    
+    // Check if this storage requires replica set initialization
+    // Default to true for backwards compatibility (most deployments need it)
+    const replicasetRequired = req.secret.metadata?.annotations?.['ns.mdn.io/replicaset-required'];
+    
+    // If annotation is explicitly "false", skip replica set initialization
+    if (replicasetRequired === 'false') {
+      console.log('  Replicaset NOT required (annotation=false) - marking initialized');
+      req.replicasetNotRequired = true;
+      // Mark as initialized immediately since no init Job is needed
+      res.annotations['ns.mdn.io/replica-set-initialized'] = new Date().toISOString();
+    } else {
+      req.replicasetNotRequired = false;
+      console.log(`  Replicaset required: ${replicasetRequired || 'true (default)'}`);
+    }
+    
+    return next();
+  }
+  
   function planInitJob(req, res, next) {
     if (req.alreadyInitialized) {
       console.log('  Already initialized - no Job needed');
       return next();
     }
     
-    if (!req.podReady || !req.podIP) {
-      console.log(`  Pod not ready (ready: ${req.podReady}, IP: ${req.podIP}) - waiting`);
+    // Skip if replica set is not required (annotation already stamped in checkReplicasetRequired)
+    if (req.replicasetNotRequired) {
+      console.log('  Replicaset not required - skipping init Job');
       return next();
     }
     
     const initJobName = `${req.storageId}-init-rs`;
-    const existingJobs = req.attachments['Job.batch/v1'] || {};
-    const existingJob = existingJobs[initJobName] || 
+    
+    // First, check for existing Job in attachments OR related (preserve existing Jobs)
+    const existingJobsAttachments = req.attachments['Job.batch/v1'] || {};
+    const existingJob = existingJobsAttachments[initJobName] || 
                         findResource(req.related['Job.batch/v1'], j => j.metadata?.name === initJobName);
     
     if (existingJob && jobSucceeded(existingJob)) {
       console.log('  Init Job succeeded - marking replica set initialized');
       res.annotations['ns.mdn.io/replica-set-initialized'] = new Date().toISOString();
+      // Preserve the completed Job (K8s TTL controller will clean it up)
       res.attachments.push(cleanForAttachment(existingJob));
       return next();
     }
@@ -153,6 +180,12 @@ function createMongoAuthInitDecoratorSync(config) {
     if (existingJob) {
       console.log('  Init Job exists but not succeeded - preserving');
       res.attachments.push(cleanForAttachment(existingJob));
+      return next();
+    }
+    
+    // Only create new Job if Pod is ready
+    if (!req.podReady || !req.podIP) {
+      console.log(`  Pod not ready (ready: ${req.podReady}, IP: ${req.podIP}) - waiting`);
       return next();
     }
     
@@ -268,6 +301,7 @@ function createMongoAuthInitDecoratorSync(config) {
   return [
     initialize,
     checkAlreadyInitialized,
+    checkReplicasetRequired,
     discoverPod,
     planInitJob,
     formatResponse
