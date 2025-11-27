@@ -60,9 +60,7 @@ function createTenantInitializationDecoratorCustomize(config) {
       relatedResources.push({
         apiVersion: 'v1',
         resource: 'configmaps',
-        nameSelector: {
-          matchNames: [configMapRef.name]
-        },
+        names: [configMapRef.name],
         // namespace: configMapRef.namespace || namespace
       });
       console.log(`  ConfigMap ref: ${configMapRef.name}`);
@@ -100,9 +98,7 @@ function createTenantInitializationDecoratorCustomize(config) {
       relatedResources.push({
         apiVersion: 'v1',
         resource: 'secrets',
-        nameSelector: {
-          matchNames: [mongoAuthSecretRef]
-        },
+        names: [mongoAuthSecretRef]
         // namespace: namespace
       });
       console.log(`  mongo-auth Secret ref: ${mongoAuthSecretRef}`);
@@ -121,6 +117,7 @@ function createTenantInitializationDecoratorCustomize(config) {
     }
     
     console.log(`  Requesting ${relatedResources.length} related resource types`);
+    console.log("TENANT DECORATOR", relatedResources);
     
     res.send({ relatedResources });
     return next();

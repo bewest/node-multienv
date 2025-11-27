@@ -151,7 +151,7 @@ function createTenantInitializationDecoratorSync(config) {
   function initialize(req, res, next) {
     const { object: tenant, related, attachments } = req.body;
     
-    console.log("DECORATING INCOMING", JSON.stringify(req.body, null, 2));
+    // console.log("DECORATING INCOMING", JSON.stringify(req.body, null, 2));
     req.tenant = tenant;
     req.related = related || {};
     req.attachments = attachments || { };

@@ -58,7 +58,7 @@ function createTenantCompositeCustomize(config) {
 
     }
 
-    console.log("TENANT RELATED", related);
+    // console.log("TENANT RELATED", related);
     // Send response
     res.send({
       relatedResources: related
