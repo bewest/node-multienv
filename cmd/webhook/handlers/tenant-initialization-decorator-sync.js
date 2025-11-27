@@ -478,7 +478,7 @@ function createTenantInitializationDecoratorSync(config) {
     const hasAnnotations = Object.keys(res.annotations).length > 0;
     const hasResync = res.resyncAfterSeconds !== undefined;
     
-    const response = {};
+    const response = { attachments: [ ] };
     
     if (hasAttachments) {
       response.attachments = res.attachments;

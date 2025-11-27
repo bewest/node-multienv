@@ -63,7 +63,7 @@ function createTenantInitializationDecoratorCustomize(config) {
         nameSelector: {
           matchNames: [configMapRef.name]
         },
-        namespace: configMapRef.namespace || namespace
+        // namespace: configMapRef.namespace || namespace
       });
       console.log(`  ConfigMap ref: ${configMapRef.name}`);
     }
@@ -103,7 +103,7 @@ function createTenantInitializationDecoratorCustomize(config) {
         nameSelector: {
           matchNames: [mongoAuthSecretRef]
         },
-        namespace: namespace
+        // namespace: namespace
       });
       console.log(`  mongo-auth Secret ref: ${mongoAuthSecretRef}`);
     } else {

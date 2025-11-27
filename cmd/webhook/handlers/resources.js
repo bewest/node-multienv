@@ -1523,6 +1523,7 @@ function renderTenantReplicaSet(resourceName, namespace, spec, authSecret, keyfi
   
   // Pod selector labels (subset used for matching)
   const selectorLabels = {
+    'app.kubernetes.io/component': 'tenant-pod',
     'app.kubernetes.io/name': 'nightscout-tenant',
     'app.kubernetes.io/instance': resourceName
   };

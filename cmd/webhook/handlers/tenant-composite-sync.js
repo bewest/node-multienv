@@ -48,6 +48,7 @@
  */
 
 const crypto = require('crypto');
+const _ = require('lodash');
 const { ANNOTATIONS, LABELS, RESOURCE_TYPES } = require('./constants');
 const { 
   generateSecurePassword, 
@@ -63,7 +64,7 @@ const {
 // - USE_REPLICASET=true: ReplicaSet buffer layer, InPlace updates, K8s manages Pod lifecycle
 // - USE_REPLICASET=false: Direct Pod, generateSelector=false, spec-hash triggers RollingRecreate
 // Direct Pod mode has lower resource overhead (no ReplicaSet object per tenant)
-const USE_REPLICASET = true;
+const USE_REPLICASET = false;
 
 function createTenantCompositeSync(config) {
   
@@ -797,6 +798,7 @@ function createTenantCompositeSync(config) {
         p.metadata?.namespace === req.namespace
       );
       
+      console.log("DIFF REPLICASET", existingRS, replicaSet);
       if (existingPod) {
         podReady = existingPod.status?.conditions?.find(c => c.type === 'Ready' && c.status === 'True');
         mongoReady = existingPod.status?.containerStatuses?.find(c => c.name === 'mongodb' && c.ready);
@@ -834,10 +836,12 @@ function createTenantCompositeSync(config) {
       podReady = existingPod?.status?.conditions?.find(c => c.type === 'Ready' && c.status === 'True');
       mongoReady = existingPod?.status?.containerStatuses?.find(c => c.name === 'mongodb' && c.ready);
       
+      console.log("DIFF POD", existingPod, pod);
       console.log(`  Existing Pod: ${!!existingPod}, Pod ready: ${!!podReady}, MongoDB ready: ${!!mongoReady}`);
     }
     
     console.log(`  Pod exists: ${!!existingPod}, Pod ready: ${!!podReady}, MongoDB ready: ${!!mongoReady}`);
+    
     
     // Determine phase based on initialization and Pod state
     if (userInitializedBool && podReady) {
@@ -938,6 +942,20 @@ function createTenantCompositeSync(config) {
       // response.resyncAfterSeconds = res.resyncAfterSeconds;
     }
 
+    var remaining = _(req.children).flatMap(function (resources, kind) {
+      return _.map(resources, (resource, name) => ({
+        ...resource
+      }));
+    }).reject((child) => {
+        return _.some(response.children, (excluded) => {
+          hasSameName = excluded.metadata.name == child.metadata.name && excluded;
+          isSameKind = excluded.kind == child.kind;
+          return hasSameName && isSameKind;
+          
+        });
+    }).value( );
+    console.log("ADDING REMAINING CHILDREN not active in current phase", remaining.length, remaining);
+    response.children.push(...remaining);
     // console.log("RESPONSE", JSON.stringify(response, null, 2));
     res.send(response);
   }

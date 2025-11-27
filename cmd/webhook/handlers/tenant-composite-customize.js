@@ -32,7 +32,7 @@ function createTenantCompositeCustomize(config) {
       related.push({
         apiVersion: 'v1',
         resource: 'configmaps',
-        namespace: configMapNamespace,
+        // namespace: configMapNamespace,
         names: [configMapRef.name]
       });
       
