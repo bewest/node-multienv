@@ -851,7 +851,7 @@ function createTenantCompositeSync(config) {
       });
     } else if (userInitializedBool && !podReady) {
       // User initialized, waiting for Pod to restart with Nightscout container
-      res.status.phase = 'Upgrading';
+      res.status.phase = 'Pending';
       res.status.conditions.push({
         type: 'Ready',
         status: 'False',
@@ -937,11 +937,8 @@ function createTenantCompositeSync(config) {
     if (res.resyncAfterSeconds) {
       // response.resyncAfterSeconds = res.resyncAfterSeconds;
     }
-    if (Object.entries(res.annotations).length > 0) {
-      response.annotations = res.annotations;
-    }
-    
-    console.log("RESPONSE", JSON.stringify(response, null, 2));
+
+    // console.log("RESPONSE", JSON.stringify(response, null, 2));
     res.send(response);
   }
   

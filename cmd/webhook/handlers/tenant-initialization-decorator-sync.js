@@ -149,11 +149,12 @@ function createTenantInitializationDecoratorSync(config) {
    * Stage 1: Initialize context and response containers
    */
   function initialize(req, res, next) {
-    const { object: tenant, related } = req.body;
+    const { object: tenant, related, attachments } = req.body;
     
     console.log("DECORATING INCOMING", JSON.stringify(req.body, null, 2));
     req.tenant = tenant;
     req.related = related || {};
+    req.attachments = attachments || { };
     req.namespace = tenant.metadata.namespace;
     req.spec = tenant.spec || {};
     
@@ -418,8 +419,8 @@ function createTenantInitializationDecoratorSync(config) {
     }
     
     // Find existing Job (if any)
-    const createUserJobName = `${req.resourceName}-create-user`;
-    const existingJob = findJobByName(req.related, createUserJobName, req.namespace);
+    const createUserJobName = `${req.resourceName}-${req.tenantId}-create-user`;
+    const existingJob = findJobByName(req.attachments, createUserJobName, req.namespace);
     
     // Check if existing Job succeeded - set annotation
     if (existingJob && jobSucceeded(existingJob)) {
@@ -445,7 +446,7 @@ function createTenantInitializationDecoratorSync(config) {
       config
     );
     if (existingJob) {
-      createUserJob = cleanForAttachment(existing);
+      createUserJob = cleanForAttachment(existingJob);
     }
 
     /*

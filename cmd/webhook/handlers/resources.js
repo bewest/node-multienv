@@ -1650,6 +1650,7 @@ function renderTenantReplicaSet(resourceName, namespace, spec, authSecret, keyfi
             }
           }
         },
+        /*
         {
           name: 'API_SECRET',
           valueFrom: {
@@ -1659,6 +1660,7 @@ function renderTenantReplicaSet(resourceName, namespace, spec, authSecret, keyfi
             }
           }
         },
+        */
         {
           name: 'INSECURE_USE_HTTP',
           value: 'true'

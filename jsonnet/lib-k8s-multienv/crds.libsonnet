@@ -912,6 +912,10 @@
                       type: 'string',
                       description: 'Name of persistent volume claim',
                     },
+                    specHash: {
+                      type: 'string',
+                      description: 'Hash of inputs',
+                    },
                     podName: {
                       type: 'string',
                       description: 'Name of the running pod',
