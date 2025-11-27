@@ -38,8 +38,8 @@ The platform utilizes Metacontroller with both Gen4 (Composite and Decorator) an
 
 **Shared Decorators (Gen4/Gen5):**
 Secret-watching decorators that stamp annotations on Secrets rather than CRs, avoiding drift with composite controllers:
-- **Mongo-Auth Init DecoratorController**: Watches mongo-auth Secrets, creates init-replica-set Job, stamps `ns.mdn.io/replica-set-initialized` on Secret.
-- **App-Credentials Init DecoratorController**: Watches app-credentials Secrets, creates create-user Job, stamps `ns.mdn.io/user-initialized` on Secret.
+- **Mongo-Auth Init DecoratorController**: Watches mongo-auth Secrets, creates init-replica-set Job (if `ns.mdn.io/replicaset-required` != "false"), stamps `ns.mdn.io/replica-set-initialized` on Secret. Preserves existing Jobs to prevent premature deletion.
+- **App-Credentials Init DecoratorController**: Watches app-credentials Secrets, gates on replica-set-initialized (unless not required), creates create-user Job, stamps `ns.mdn.io/user-initialized` on Secret. Preserves existing Jobs to prevent premature deletion.
 
 ### Key Technologies
 - **Orchestration**: Kubernetes, Metacontroller.
