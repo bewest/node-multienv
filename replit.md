@@ -34,7 +34,12 @@ The platform utilizes Metacontroller with both Gen4 (Composite and Decorator) an
 
 **Gen5 Controllers (Pod-Based Decorator-Driven Architecture):**
 - **Tenant CompositeController**: Renders tenant Pods directly for minimal control plane load. Pod contains MongoDB initially; adds Nightscout after user initialization. ConfigMap presence via `spec.configMapRef` controls compute activation.
-- **Tenant-Initialization DecoratorController**: Orchestrates MongoDB initialization Jobs, connecting via Pod IP. Gates on Pod readiness, sets `ns.mdn.io/user-initialized` annotation on completion.
+- **Tenant-Initialization DecoratorController** (DEPRECATED): Orchestrates MongoDB initialization Jobs on NightscoutTenant CRs. Consider using mongo-auth-init + app-credentials-init decorators instead.
+
+**Shared Decorators (Gen4/Gen5):**
+Secret-watching decorators that stamp annotations on Secrets rather than CRs, avoiding drift with composite controllers:
+- **Mongo-Auth Init DecoratorController**: Watches mongo-auth Secrets, creates init-replica-set Job, stamps `ns.mdn.io/replica-set-initialized` on Secret.
+- **App-Credentials Init DecoratorController**: Watches app-credentials Secrets, creates create-user Job, stamps `ns.mdn.io/user-initialized` on Secret.
 
 ### Key Technologies
 - **Orchestration**: Kubernetes, Metacontroller.

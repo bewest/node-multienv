@@ -725,13 +725,31 @@ function createTenantCompositeSync(config) {
       return next();
     }
     
-    // Read initialization annotations from parent (set by decorator)
-    const annotations = req.parent.metadata?.annotations || {};
-    const replicaSetInitialized = annotations['ns.mdn.io/replica-set-initialized'];
-    const userInitialized = annotations['ns.mdn.io/user-initialized'];
+    // Read initialization state from Secrets (set by decorators)
+    // - mongo-auth Secret: ns.mdn.io/replica-set-initialized annotation
+    // - app-credentials Secret: ns.mdn.io/user-initialized annotation
+    // This is more reliable than CR annotations because decorators can stamp Secrets
+    // without causing drift on the parent CR managed by the composite controller
     
-    console.log(`  Replica set initialized: ${replicaSetInitialized || 'no'}`);
-    console.log(`  User initialized: ${userInitialized || 'no'}`);
+    // Check mongo-auth Secret for replica set initialization
+    const mongoAuthAnnotations = req.authSecret?.metadata?.annotations || {};
+    const replicaSetInitialized = mongoAuthAnnotations['ns.mdn.io/replica-set-initialized'];
+    
+    // Check app-credentials Secret for user initialization
+    // First check existing children, then related (for first sync cycle)
+    const appCredentialsSecretNameLocal = `${resourceName}-app-credentials`;
+    const existingAppCreds = findResource(req.children['Secret.v1'], appCredentialsSecretNameLocal, req.namespace) ||
+                             findResource(req.related['Secret.v1'], appCredentialsSecretNameLocal, req.namespace);
+    const appCredsAnnotations = existingAppCreds?.metadata?.annotations || {};
+    const userInitialized = appCredsAnnotations['ns.mdn.io/user-initialized'];
+    
+    // Fallback: Also check parent CR annotations for backwards compatibility
+    const parentAnnotations = req.parent.metadata?.annotations || {};
+    const replicaSetInitializedFallback = replicaSetInitialized || parentAnnotations['ns.mdn.io/replica-set-initialized'];
+    const userInitializedFallback = userInitialized || parentAnnotations['ns.mdn.io/user-initialized'];
+    
+    console.log(`  Replica set initialized: ${replicaSetInitializedFallback || 'no'} (from Secret: ${!!replicaSetInitialized})`);
+    console.log(`  User initialized: ${userInitializedFallback || 'no'} (from Secret: ${!!userInitialized})`);
     
     // Build identity labels for Pod
     const identityLabels = {
@@ -745,7 +763,7 @@ function createTenantCompositeSync(config) {
     // Two-phase container rendering:
     // Phase 1: MongoDB-only (userInitialized = false) - allows Jobs to run
     // Phase 2: MongoDB + Nightscout (userInitialized = true) - full tenant
-    const userInitializedBool = !!userInitialized;
+    const userInitializedBool = !!userInitializedFallback;
     
     // Check for existing resources and determine readiness state
     let existingPod = null;
@@ -862,7 +880,7 @@ function createTenantCompositeSync(config) {
         reason: 'WaitingForPodRestart',
         message: 'User credentials created, waiting for Pod to restart with Nightscout container'
       });
-    } else if (mongoReady && !replicaSetInitialized) {
+    } else if (mongoReady && !replicaSetInitializedFallback) {
       // MongoDB running, waiting for replica set init Job
       res.status.phase = 'Initializing';
       res.status.conditions.push({
@@ -871,7 +889,7 @@ function createTenantCompositeSync(config) {
         reason: 'WaitingForReplicaSetInit',
         message: 'MongoDB running, waiting for replica set initialization Job'
       });
-    } else if (replicaSetInitialized && !userInitialized) {
+    } else if (replicaSetInitializedFallback && !userInitializedFallback) {
       // Replica set ready, waiting for user creation Job
       res.status.phase = 'Initializing';
       res.status.conditions.push({
@@ -899,21 +917,21 @@ function createTenantCompositeSync(config) {
     }
     
     // Add initialization completion conditions (when set)
-    if (replicaSetInitialized) {
+    if (replicaSetInitializedFallback) {
       res.status.conditions.push({
         type: 'ReplicaSetInitialized',
         status: 'True',
         reason: 'InitJobSucceeded',
-        message: `MongoDB replica set initialized at ${replicaSetInitialized}`
+        message: `MongoDB replica set initialized at ${replicaSetInitializedFallback}`
       });
     }
     
-    if (userInitialized) {
+    if (userInitializedFallback) {
       res.status.conditions.push({
         type: 'UserInitialized',
         status: 'True',
         reason: 'CreateUserJobSucceeded',
-        message: `MongoDB user created at ${userInitialized}`
+        message: `MongoDB user created at ${userInitializedFallback}`
       });
     }
     

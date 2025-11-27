@@ -17,6 +17,8 @@ const { createStorageInitializationDecoratorCustomize } = require('./handlers/st
 const { createTenantInitializationDecoratorSync } = require('./handlers/tenant-initialization-decorator-sync');
 const { createTenantInitializationDecoratorCustomize } = require('./handlers/tenant-initialization-decorator-customize');
 const createInstanceUserdataDecorator = require('./handlers/instance-userdata-decorator');
+const { createMongoAuthInitDecoratorSync, createMongoAuthInitDecoratorCustomize } = require('./handlers/mongo-auth-init-decorator');
+const { createAppCredentialsInitDecoratorSync, createAppCredentialsInitDecoratorCustomize } = require('./handlers/app-credentials-init-decorator');
 
 // Create handlers with config
 const storageCompositeSync = createStorageCompositeSync(config);
@@ -35,6 +37,10 @@ const tenantInitializationDecoratorCustomize = createTenantInitializationDecorat
 const instanceUserdataDecorator = createInstanceUserdataDecorator(config);
 const instanceUserdataDecoratorSync = instanceUserdataDecorator.sync;
 const instanceUserdataDecoratorCustomize = instanceUserdataDecorator.customize;
+const mongoAuthInitDecoratorSync = createMongoAuthInitDecoratorSync(config);
+const mongoAuthInitDecoratorCustomize = createMongoAuthInitDecoratorCustomize(config);
+const appCredentialsInitDecoratorSync = createAppCredentialsInitDecoratorSync(config);
+const appCredentialsInitDecoratorCustomize = createAppCredentialsInitDecoratorCustomize(config);
 
 const server = restify.createServer({
   name: config.server.name,
@@ -93,6 +99,14 @@ server.post('/decorator/instance-userdata/sync', ...instanceUserdataDecoratorSyn
 server.post('/decorator/tenant-initialization/customize', tenantInitializationDecoratorCustomize);
 server.post('/decorator/tenant-initialization/sync', ...tenantInitializationDecoratorSync);
 
+// Decorator: Mongo-auth init (Shared Gen4/Gen5: mongo-auth Secret → init-rs Job → replica-set-initialized)
+server.post('/decorator/mongo-auth-init/customize', mongoAuthInitDecoratorCustomize);
+server.post('/decorator/mongo-auth-init/sync', ...mongoAuthInitDecoratorSync);
+
+// Decorator: App-credentials init (Shared Gen4/Gen5: app-credentials Secret → create-user Job → user-initialized)
+server.post('/decorator/app-credentials-init/customize', appCredentialsInitDecoratorCustomize);
+server.post('/decorator/app-credentials-init/sync', ...appCredentialsInitDecoratorSync);
+
 server.get('/health', (req, res, next) => {
   res.send({ status: 'healthy', timestamp: new Date().toISOString() });
   return next();
@@ -100,7 +114,7 @@ server.get('/health', (req, res, next) => {
 
 server.listen(port, '0.0.0.0', () => {
   console.log(`Metacontroller webhook server listening on port ${port}`);
-  console.log(`Gen 4/5: Multi-Architecture Support (3 Composites + 5 Decorators)`);
+  console.log(`Gen 4/5: Multi-Architecture Support (3 Composites + 7 Decorators)`);
   console.log(`Endpoints:`);
   console.log(`  POST /composite/storage/customize - Gen4: Storage: Related resource discovery`);
   console.log(`  POST /composite/storage/sync - Gen4: StorageAccount → MongoDB + Migration`);
@@ -117,5 +131,9 @@ server.listen(port, '0.0.0.0', () => {
   console.log(`  POST /decorator/instance-userdata/sync - ConfigMap migration: Gen 3 → Gen 4 cutover`);
   console.log(`  POST /decorator/tenant-initialization/customize - Tenant Init: Job orchestration discovery`);
   console.log(`  POST /decorator/tenant-initialization/sync - Tenant Init: MongoDB Jobs (init-rs, create-user)`);
+  console.log(`  POST /decorator/mongo-auth-init/customize - Shared: mongo-auth Secret discovery`);
+  console.log(`  POST /decorator/mongo-auth-init/sync - Shared: mongo-auth → init-rs Job → replica-set-initialized`);
+  console.log(`  POST /decorator/app-credentials-init/customize - Shared: app-credentials Secret discovery`);
+  console.log(`  POST /decorator/app-credentials-init/sync - Shared: app-creds → create-user Job → user-initialized`);
   console.log(`  GET  /health - Health check`);
 });

@@ -359,6 +359,7 @@
   // Tenant Initialization Decorator (Gen 5: Job Orchestration for NightscoutTenant)
   // Watches NightscoutTenant CRs, renders init-replica-set and create-user Jobs as attachments
   // Sets annotations for replica-set-initialized and user-initialized on parent CR
+  // NOTE: Consider deprecating in favor of mongo-auth-init + app-credentials-init decorators
   tenantInitializationDecorator(
     webhookServiceUrl='http://webhook-service:3000',
     crdGroup='nightscout.io',
@@ -385,6 +386,94 @@
         },
       ],
       // Jobs are rendered as attachments by the decorator (init-rs, create-user)
+      attachments=[
+        {
+          apiVersion: 'batch/v1',
+          resource: 'jobs',
+          updateStrategy: {
+            method: 'InPlace',
+          },
+        },
+      ],
+      resyncPeriodSeconds=resyncPeriodSeconds,
+    ),
+
+  // Mongo-Auth Init Decorator (Shared Gen4/Gen5)
+  // Watches mongo-auth Secrets, orchestrates replica set initialization
+  // Stamps ns.mdn.io/replica-set-initialized annotation on Secret when init Job succeeds
+  mongoAuthInitDecorator(
+    webhookServiceUrl='http://webhook-service:3000',
+    resyncPeriodSeconds=30,
+  )::
+    $.decoratorController(
+      name='mongo-auth-init-decorator',
+      webhookUrl=webhookServiceUrl + '/decorator/mongo-auth-init/sync',
+      customizeUrl=webhookServiceUrl + '/decorator/mongo-auth-init/customize',
+      resources=[
+        {
+          apiVersion: 'v1',
+          resource: 'secrets',
+          labelSelector: {
+            matchExpressions: [
+              // Match secrets with storage identity label
+              {
+                key: 'ns.mdn.io/storage',
+                operator: 'Exists',
+              },
+              // Match mongo-auth secrets specifically
+              {
+                key: 'ns.mdn.io/composite',
+                operator: 'In',
+                values: ['mongodb-auth'],
+              },
+            ],
+          },
+        },
+      ],
+      attachments=[
+        {
+          apiVersion: 'batch/v1',
+          resource: 'jobs',
+          updateStrategy: {
+            method: 'InPlace',
+          },
+        },
+      ],
+      resyncPeriodSeconds=resyncPeriodSeconds,
+    ),
+
+  // App-Credentials Init Decorator (Shared Gen4/Gen5)
+  // Watches app-credentials Secrets, orchestrates MongoDB user creation
+  // Stamps ns.mdn.io/user-initialized annotation on Secret when create-user Job succeeds
+  appCredentialsInitDecorator(
+    webhookServiceUrl='http://webhook-service:3000',
+    resyncPeriodSeconds=30,
+  )::
+    $.decoratorController(
+      name='app-credentials-init-decorator',
+      webhookUrl=webhookServiceUrl + '/decorator/app-credentials-init/sync',
+      customizeUrl=webhookServiceUrl + '/decorator/app-credentials-init/customize',
+      resources=[
+        {
+          apiVersion: 'v1',
+          resource: 'secrets',
+          labelSelector: {
+            matchExpressions: [
+              // Match secrets with storage identity label
+              {
+                key: 'ns.mdn.io/storage',
+                operator: 'Exists',
+              },
+              // Match app-credentials secrets specifically
+              {
+                key: 'ns.mdn.io/credential-type',
+                operator: 'In',
+                values: ['application'],
+              },
+            ],
+          },
+        },
+      ],
       attachments=[
         {
           apiVersion: 'batch/v1',
@@ -526,10 +615,21 @@
       crdVersion=crdVersion,
       resyncPeriodSeconds=userdataResyncSeconds,
     ),
+    // NOTE: tenantInitialization decorator targets CRs; consider deprecating
+    // in favor of mongoAuthInit + appCredentialsInit which target Secrets
     tenantInitialization: $.tenantInitializationDecorator(
       webhookServiceUrl=webhookServiceUrl,
       crdGroup=crdGroup,
       crdVersion=crdVersion,
+      resyncPeriodSeconds=initializationResyncSeconds,
+    ),
+    // Shared Gen4/Gen5 decorators - watch Secrets instead of CRs
+    mongoAuthInit: $.mongoAuthInitDecorator(
+      webhookServiceUrl=webhookServiceUrl,
+      resyncPeriodSeconds=initializationResyncSeconds,
+    ),
+    appCredentialsInit: $.appCredentialsInitDecorator(
+      webhookServiceUrl=webhookServiceUrl,
       resyncPeriodSeconds=initializationResyncSeconds,
     ),
   },
