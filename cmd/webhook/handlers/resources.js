@@ -976,6 +976,10 @@ function findContainerByName(containers, name) {
  * Merge rendered Pod spec with observed Pod spec
  * Preserves K8s defaults while applying our managed fields
  * 
+ * IMPORTANT: Container list is rebuilt from desired definitions only.
+ * This ensures containers removed from desired (e.g., Nightscout before user init)
+ * actually get removed - not preserved from observed state.
+ * 
  * @param {object} renderedSpec - Our rendered Pod spec
  * @param {object} observedSpec - Observed Pod spec from cluster (may be null)
  * @returns {object} Merged Pod spec
@@ -985,13 +989,18 @@ function mergePodSpecWithObserved(renderedSpec, observedSpec) {
     return renderedSpec;
   }
   
-  const merged = _.cloneDeep(observedSpec);
+  // Start with our desired spec as base - this ensures only containers we want are included
+  // Then selectively merge K8s-added defaults from observed
+  const merged = _.cloneDeep(renderedSpec);
   
+  // Rebuild containers from desired, merging K8s defaults for matching names
+  // Containers in observed but NOT in desired are intentionally dropped
   merged.containers = renderedSpec.containers.map(rendered => {
     const observed = findContainerByName(observedSpec.containers, rendered.name);
     return mergeContainerWithObserved(rendered, observed);
   });
   
+  // Same for init containers - only include those in desired
   if (renderedSpec.initContainers && renderedSpec.initContainers.length > 0) {
     merged.initContainers = renderedSpec.initContainers.map(rendered => {
       const observed = findContainerByName(observedSpec.initContainers, rendered.name);
@@ -999,14 +1008,32 @@ function mergePodSpecWithObserved(renderedSpec, observedSpec) {
     });
   }
   
-  merged.volumes = renderedSpec.volumes;
-  
-  if (renderedSpec.imagePullSecrets && renderedSpec.imagePullSecrets.length > 0) {
-    merged.imagePullSecrets = renderedSpec.imagePullSecrets;
+  // Preserve K8s-added pod-level defaults only if not explicitly set in our spec
+  // These are fields K8s might add that we don't typically manage
+  if (observedSpec.dnsPolicy && !renderedSpec.dnsPolicy) {
+    merged.dnsPolicy = observedSpec.dnsPolicy;
   }
-  
-  merged.restartPolicy = renderedSpec.restartPolicy;
-  merged.terminationGracePeriodSeconds = renderedSpec.terminationGracePeriodSeconds;
+  if (observedSpec.schedulerName && !renderedSpec.schedulerName) {
+    merged.schedulerName = observedSpec.schedulerName;
+  }
+  if (observedSpec.securityContext && !renderedSpec.securityContext) {
+    merged.securityContext = observedSpec.securityContext;
+  }
+  if (observedSpec.serviceAccount && !renderedSpec.serviceAccount) {
+    merged.serviceAccount = observedSpec.serviceAccount;
+  }
+  if (observedSpec.serviceAccountName && !renderedSpec.serviceAccountName) {
+    merged.serviceAccountName = observedSpec.serviceAccountName;
+  }
+  if (observedSpec.enableServiceLinks !== undefined && renderedSpec.enableServiceLinks === undefined) {
+    merged.enableServiceLinks = observedSpec.enableServiceLinks;
+  }
+  if (observedSpec.preemptionPolicy && !renderedSpec.preemptionPolicy) {
+    merged.preemptionPolicy = observedSpec.preemptionPolicy;
+  }
+  if (observedSpec.priority !== undefined && renderedSpec.priority === undefined) {
+    merged.priority = observedSpec.priority;
+  }
   
   return merged;
 }
