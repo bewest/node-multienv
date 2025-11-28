@@ -1,4 +1,106 @@
 /**
+ * Kubernetes Default Values
+ * =========================
+ * These defaults match what Kubernetes API server adds to Pod specs.
+ * By explicitly setting them, we prevent Metacontroller from detecting
+ * drift on server-managed fields, eliminating unnecessary InPlace updates.
+ * 
+ * Container-level defaults:
+ * - terminationMessagePath: '/dev/termination-log'
+ * - terminationMessagePolicy: 'File'
+ * - ports[].protocol: 'TCP'
+ * - probes: successThreshold: 1
+ * - env[].valueFrom.fieldRef.apiVersion: 'v1'
+ * 
+ * Pod-level defaults:
+ * - dnsPolicy: 'ClusterFirst'
+ * - restartPolicy: 'Always'
+ * - terminationGracePeriodSeconds: 30
+ * - schedulerName: 'default-scheduler'
+ * - enableServiceLinks: true
+ */
+
+/**
+ * Apply Kubernetes default values to a container spec
+ * Mutates the container in place and returns it
+ */
+function applyContainerDefaults(container) {
+  container.terminationMessagePath = container.terminationMessagePath || '/dev/termination-log';
+  container.terminationMessagePolicy = container.terminationMessagePolicy || 'File';
+  container.imagePullPolicy = container.imagePullPolicy || 'IfNotPresent';
+  
+  if (container.ports) {
+    container.ports.forEach(port => {
+      port.protocol = port.protocol || 'TCP';
+    });
+  }
+  
+  if (container.readinessProbe) {
+    container.readinessProbe.successThreshold = container.readinessProbe.successThreshold || 1;
+  }
+  if (container.livenessProbe) {
+    container.livenessProbe.successThreshold = container.livenessProbe.successThreshold || 1;
+  }
+  if (container.startupProbe) {
+    container.startupProbe.successThreshold = container.startupProbe.successThreshold || 1;
+  }
+  
+  if (container.env) {
+    container.env.forEach(envVar => {
+      if (envVar.valueFrom?.fieldRef && !envVar.valueFrom.fieldRef.apiVersion) {
+        envVar.valueFrom.fieldRef.apiVersion = 'v1';
+      }
+    });
+  }
+  
+  return container;
+}
+
+/**
+ * Default tolerations that Kubernetes adds to all Pods
+ * These handle node conditions like not-ready and unreachable
+ */
+const DEFAULT_TOLERATIONS = [
+  {
+    key: 'node.kubernetes.io/not-ready',
+    operator: 'Exists',
+    effect: 'NoExecute',
+    tolerationSeconds: 300
+  },
+  {
+    key: 'node.kubernetes.io/unreachable',
+    operator: 'Exists',
+    effect: 'NoExecute',
+    tolerationSeconds: 300
+  }
+];
+
+/**
+ * Apply Kubernetes default values to a Pod spec
+ * Mutates the spec in place and returns it
+ */
+function withPodDefaults(podSpec) {
+  podSpec.dnsPolicy = podSpec.dnsPolicy || 'ClusterFirst';
+  podSpec.restartPolicy = podSpec.restartPolicy || 'Always';
+  podSpec.terminationGracePeriodSeconds = podSpec.terminationGracePeriodSeconds ?? 30;
+  podSpec.schedulerName = podSpec.schedulerName || 'default-scheduler';
+  podSpec.enableServiceLinks = podSpec.enableServiceLinks ?? true;
+  
+  if (!podSpec.tolerations) {
+    podSpec.tolerations = DEFAULT_TOLERATIONS;
+  }
+  
+  if (podSpec.containers) {
+    podSpec.containers.forEach(applyContainerDefaults);
+  }
+  if (podSpec.initContainers) {
+    podSpec.initContainers.forEach(applyContainerDefaults);
+  }
+  
+  return podSpec;
+}
+
+/**
  * 
  * 
  * Gen 4 Two-Secret Architecture:
@@ -1432,6 +1534,15 @@ function renderTenantPod(resourceName, namespace, spec, authSecret, keyfileSecre
   // (Kubernetes normalizes empty arrays differently, causing Metacontroller to detect drift)
   const imagePullSecrets = config.multienv?.imagePullSecrets || [];
   
+  const podSpec = {
+    ...(imagePullSecrets.length > 0 ? { imagePullSecrets } : {}),
+    initContainers: initContainers,
+    containers: containers,
+    volumes: volumes,
+    restartPolicy: 'Always',
+    terminationGracePeriodSeconds: 30
+  };
+  
   const pod = {
     apiVersion: 'v1',
     kind: 'Pod',
@@ -1445,14 +1556,7 @@ function renderTenantPod(resourceName, namespace, spec, authSecret, keyfileSecre
         'ns.mdn.io/spec-hash': specHash
       }
     },
-    spec: {
-      ...(imagePullSecrets.length > 0 ? { imagePullSecrets } : {}),
-      initContainers: initContainers,
-      containers: containers,
-      volumes: volumes,
-      restartPolicy: 'Always',
-      terminationGracePeriodSeconds: 30
-    }
+    spec: withPodDefaults(podSpec)
   };
   
   console.log(`  Rendered Pod ${podName} with ${containers.length} containers (userInitialized: ${userInitialized})`);
@@ -1769,6 +1873,16 @@ function renderTenantReplicaSet(resourceName, namespace, spec, authSecret, keyfi
   // ImagePullSecrets (only included when non-empty)
   const imagePullSecrets = config.multienv?.imagePullSecrets || [];
   
+  // Build pod template spec with K8s defaults applied
+  const podTemplateSpec = withPodDefaults({
+    ...(imagePullSecrets.length > 0 ? { imagePullSecrets } : {}),
+    initContainers: initContainers,
+    containers: containers,
+    volumes: volumes,
+    restartPolicy: 'Always',
+    terminationGracePeriodSeconds: 30
+  });
+  
   // ReplicaSet manifest
   const replicaSet = {
     apiVersion: 'apps/v1',
@@ -1798,14 +1912,7 @@ function renderTenantReplicaSet(resourceName, namespace, spec, authSecret, keyfi
             'ns.mdn.io/container-count': String(containers.length)
           }
         },
-        spec: {
-          ...(imagePullSecrets.length > 0 ? { imagePullSecrets } : {}),
-          initContainers: initContainers,
-          containers: containers,
-          volumes: volumes,
-          restartPolicy: 'Always',
-          terminationGracePeriodSeconds: 30
-        }
+        spec: podTemplateSpec
       }
     }
   };
