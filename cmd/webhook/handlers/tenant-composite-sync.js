@@ -64,7 +64,7 @@ const {
 // - USE_REPLICASET=true: ReplicaSet buffer layer, InPlace updates, K8s manages Pod lifecycle
 // - USE_REPLICASET=false: Direct Pod, generateSelector=false, spec-hash triggers RollingRecreate
 // Direct Pod mode has lower resource overhead (no ReplicaSet object per tenant)
-const USE_REPLICASET = false;
+const USE_REPLICASET = true;
 
 function createTenantCompositeSync(config) {
   

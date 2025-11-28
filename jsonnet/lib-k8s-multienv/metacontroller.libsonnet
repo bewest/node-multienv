@@ -503,7 +503,7 @@
       // generateSelector=false prevents Metacontroller from injecting controller-uid
       // into child labels. This avoids drift detection on server-managed Pod fields
       // because the webhook controls all labels via spec-hash pattern.
-      generateSelector=false,
+      generateSelector=true,
       parentResource={
         apiVersion: crdGroup + '/' + crdVersion,
         resource: 'nightscouttenants',
@@ -617,18 +617,18 @@
     ),
     // NOTE: tenantInitialization decorator targets CRs; consider deprecating
     // in favor of mongoAuthInit + appCredentialsInit which target Secrets
-    tenantInitialization: $.tenantInitializationDecorator(
+    tenantInitialization:: $.tenantInitializationDecorator(
       webhookServiceUrl=webhookServiceUrl,
       crdGroup=crdGroup,
       crdVersion=crdVersion,
       resyncPeriodSeconds=initializationResyncSeconds,
     ),
     // Shared Gen4/Gen5 decorators - watch Secrets instead of CRs
-    mongoAuthInit: $.mongoAuthInitDecorator(
+    mongoAuthInit:: $.mongoAuthInitDecorator(
       webhookServiceUrl=webhookServiceUrl,
       resyncPeriodSeconds=initializationResyncSeconds,
     ),
-    appCredentialsInit: $.appCredentialsInitDecorator(
+    appCredentialsInit:: $.appCredentialsInitDecorator(
       webhookServiceUrl=webhookServiceUrl,
       resyncPeriodSeconds=initializationResyncSeconds,
     ),
