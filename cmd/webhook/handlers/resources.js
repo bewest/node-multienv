@@ -881,6 +881,135 @@ function generatePassword() {
 
 const crypto = require('crypto');
 const { ANNOTATIONS, LABELS, RESOURCE_TYPES } = require('./constants');
+const _ = require('lodash');
+
+/**
+ * Deep-merge helper for Pod/ReplicaSet rendering
+ * 
+ * Preserves Kubernetes-added defaults (terminationMessagePath, protocol, successThreshold, etc.)
+ * while applying our managed fields on top.
+ * 
+ * This prevents constant drift detection from Metacontroller when K8s adds defaults
+ * that we don't explicitly render.
+ */
+
+/**
+ * Merge a rendered container with an observed container from the cluster
+ * Preserves K8s defaults while applying our managed fields
+ * 
+ * @param {object} rendered - Our rendered container definition
+ * @param {object} observed - Observed container from cluster (may be null)
+ * @returns {object} Merged container
+ */
+function mergeContainerWithObserved(rendered, observed) {
+  if (!observed) {
+    return rendered;
+  }
+  
+  const merged = _.cloneDeep(observed);
+  
+  merged.name = rendered.name;
+  merged.image = rendered.image;
+  merged.imagePullPolicy = rendered.imagePullPolicy;
+  
+  if (rendered.command) merged.command = rendered.command;
+  if (rendered.args) merged.args = rendered.args;
+  
+  merged.env = rendered.env;
+  merged.ports = rendered.ports;
+  merged.volumeMounts = rendered.volumeMounts;
+  merged.resources = rendered.resources;
+  
+  if (rendered.readinessProbe) {
+    merged.readinessProbe = _.merge({}, observed.readinessProbe || {}, rendered.readinessProbe);
+  }
+  if (rendered.livenessProbe) {
+    merged.livenessProbe = _.merge({}, observed.livenessProbe || {}, rendered.livenessProbe);
+  }
+  if (rendered.startupProbe) {
+    merged.startupProbe = _.merge({}, observed.startupProbe || {}, rendered.startupProbe);
+  }
+  
+  return merged;
+}
+
+/**
+ * Merge a rendered init container with an observed init container
+ * 
+ * @param {object} rendered - Our rendered init container
+ * @param {object} observed - Observed init container (may be null)
+ * @returns {object} Merged init container
+ */
+function mergeInitContainerWithObserved(rendered, observed) {
+  if (!observed) {
+    return rendered;
+  }
+  
+  const merged = _.cloneDeep(observed);
+  
+  merged.name = rendered.name;
+  merged.image = rendered.image;
+  merged.imagePullPolicy = rendered.imagePullPolicy || observed.imagePullPolicy;
+  
+  if (rendered.command) merged.command = rendered.command;
+  if (rendered.args) merged.args = rendered.args;
+  if (rendered.env) merged.env = rendered.env;
+  if (rendered.volumeMounts) merged.volumeMounts = rendered.volumeMounts;
+  if (rendered.resources) merged.resources = rendered.resources;
+  
+  return merged;
+}
+
+/**
+ * Find a container by name in an array of containers
+ * 
+ * @param {Array} containers - Array of container definitions
+ * @param {string} name - Container name to find
+ * @returns {object|null} Container or null if not found
+ */
+function findContainerByName(containers, name) {
+  if (!containers || !Array.isArray(containers)) return null;
+  return containers.find(c => c.name === name) || null;
+}
+
+/**
+ * Merge rendered Pod spec with observed Pod spec
+ * Preserves K8s defaults while applying our managed fields
+ * 
+ * @param {object} renderedSpec - Our rendered Pod spec
+ * @param {object} observedSpec - Observed Pod spec from cluster (may be null)
+ * @returns {object} Merged Pod spec
+ */
+function mergePodSpecWithObserved(renderedSpec, observedSpec) {
+  if (!observedSpec) {
+    return renderedSpec;
+  }
+  
+  const merged = _.cloneDeep(observedSpec);
+  
+  merged.containers = renderedSpec.containers.map(rendered => {
+    const observed = findContainerByName(observedSpec.containers, rendered.name);
+    return mergeContainerWithObserved(rendered, observed);
+  });
+  
+  if (renderedSpec.initContainers && renderedSpec.initContainers.length > 0) {
+    merged.initContainers = renderedSpec.initContainers.map(rendered => {
+      const observed = findContainerByName(observedSpec.initContainers, rendered.name);
+      return mergeInitContainerWithObserved(rendered, observed);
+    });
+  }
+  
+  merged.volumes = renderedSpec.volumes;
+  
+  if (renderedSpec.imagePullSecrets && renderedSpec.imagePullSecrets.length > 0) {
+    merged.imagePullSecrets = renderedSpec.imagePullSecrets;
+  }
+  
+  merged.restartPolicy = renderedSpec.restartPolicy;
+  merged.terminationGracePeriodSeconds = renderedSpec.terminationGracePeriodSeconds;
+  
+  return merged;
+}
 
 /**
  * Generate secure random password with URL-safe characters
@@ -1156,6 +1285,11 @@ function hashPodInputs(params) {
  * - Sync logic compares hashes to decide preserve vs recreate
  * - Only recreates Pod when inputs actually change
  * 
+ * Deep-merge pattern: When observedChild is provided, the rendered Pod spec
+ * is merged with the observed spec to preserve Kubernetes-added defaults
+ * (terminationMessagePath, protocol, successThreshold, etc.)
+ * 
+ * @param {object|null} observedChild - Existing Pod from cluster (null for first creation)
  * @param {string} resourceName - CR name (used for Pod naming)
  * @param {string} namespace - Kubernetes namespace
  * @param {object} spec - NightscoutTenant spec
@@ -1168,7 +1302,7 @@ function hashPodInputs(params) {
  * @param {string} specHash - Pre-computed spec hash (from hashPodInputs)
  * @returns {object} Pod manifest
  */
-function renderTenantPod(resourceName, namespace, spec, authSecret, keyfileSecret, appCredentialsSecret, userInitialized, identityLabels, config, specHash) {
+function renderTenantPod(observedChild, resourceName, namespace, spec, authSecret, keyfileSecret, appCredentialsSecret, userInitialized, identityLabels, config, specHash) {
   const podName = `${resourceName}-pod`;
   const pvcName = spec.pvcName || `${resourceName}-data`;
   
@@ -1432,6 +1566,20 @@ function renderTenantPod(resourceName, namespace, spec, authSecret, keyfileSecre
   // (Kubernetes normalizes empty arrays differently, causing Metacontroller to detect drift)
   const imagePullSecrets = config.multienv?.imagePullSecrets || [];
   
+  // Build our desired Pod spec
+  const renderedPodSpec = {
+    ...(imagePullSecrets.length > 0 ? { imagePullSecrets } : {}),
+    initContainers: initContainers,
+    containers: containers,
+    volumes: volumes,
+    restartPolicy: 'Always',
+    terminationGracePeriodSeconds: 30
+  };
+  
+  // Merge with observed Pod spec to preserve K8s defaults
+  const observedPodSpec = observedChild?.spec || null;
+  const mergedPodSpec = mergePodSpecWithObserved(renderedPodSpec, observedPodSpec);
+  
   const pod = {
     apiVersion: 'v1',
     kind: 'Pod',
@@ -1445,17 +1593,10 @@ function renderTenantPod(resourceName, namespace, spec, authSecret, keyfileSecre
         'ns.mdn.io/spec-hash': specHash
       }
     },
-    spec: {
-      ...(imagePullSecrets.length > 0 ? { imagePullSecrets } : {}),
-      initContainers: initContainers,
-      containers: containers,
-      volumes: volumes,
-      restartPolicy: 'Always',
-      terminationGracePeriodSeconds: 30
-    }
+    spec: mergedPodSpec
   };
   
-  console.log(`  Rendered Pod ${podName} with ${containers.length} containers (userInitialized: ${userInitialized})`);
+  console.log(`  Rendered Pod ${podName} with ${containers.length} containers (userInitialized: ${userInitialized}, merged: ${!!observedPodSpec})`);
   
   return pod;
 }
@@ -1471,6 +1612,11 @@ function renderTenantPod(resourceName, namespace, spec, authSecret, keyfileSecre
  *   Phase 1: MongoDB container only (userInitialized = false)
  *   Phase 2: MongoDB + Nightscout containers (userInitialized = true)
  * 
+ * Deep-merge pattern: When observedChild is provided, the rendered Pod template
+ * spec is merged with the observed spec to preserve Kubernetes-added defaults
+ * (terminationMessagePath, protocol, successThreshold, etc.)
+ * 
+ * @param {object|null} observedChild - Existing ReplicaSet from cluster (null for first creation)
  * @param {string} resourceName - CR name (used for ReplicaSet naming)
  * @param {string} namespace - Kubernetes namespace
  * @param {object} spec - NightscoutTenant spec
@@ -1482,7 +1628,7 @@ function renderTenantPod(resourceName, namespace, spec, authSecret, keyfileSecre
  * @param {object} config - Webhook configuration
  * @returns {object} ReplicaSet manifest
  */
-function renderTenantReplicaSet(resourceName, namespace, spec, authSecret, keyfileSecret, appCredentialsSecret, userInitialized, identityLabels, config) {
+function renderTenantReplicaSet(observedChild, resourceName, namespace, spec, authSecret, keyfileSecret, appCredentialsSecret, userInitialized, identityLabels, config) {
   const rsName = `${resourceName}-rs`;
   const pvcName = spec.pvcName || `${resourceName}-data`;
   
@@ -1769,6 +1915,20 @@ function renderTenantReplicaSet(resourceName, namespace, spec, authSecret, keyfi
   // ImagePullSecrets (only included when non-empty)
   const imagePullSecrets = config.multienv?.imagePullSecrets || [];
   
+  // Build our desired Pod template spec
+  const renderedPodSpec = {
+    ...(imagePullSecrets.length > 0 ? { imagePullSecrets } : {}),
+    initContainers: initContainers,
+    containers: containers,
+    volumes: volumes,
+    restartPolicy: 'Always',
+    terminationGracePeriodSeconds: 30
+  };
+  
+  // Merge with observed Pod template spec to preserve K8s defaults
+  const observedPodSpec = observedChild?.spec?.template?.spec || null;
+  const mergedPodSpec = mergePodSpecWithObserved(renderedPodSpec, observedPodSpec);
+  
   // ReplicaSet manifest
   const replicaSet = {
     apiVersion: 'apps/v1',
@@ -1798,19 +1958,12 @@ function renderTenantReplicaSet(resourceName, namespace, spec, authSecret, keyfi
             'ns.mdn.io/container-count': String(containers.length)
           }
         },
-        spec: {
-          ...(imagePullSecrets.length > 0 ? { imagePullSecrets } : {}),
-          initContainers: initContainers,
-          containers: containers,
-          volumes: volumes,
-          restartPolicy: 'Always',
-          terminationGracePeriodSeconds: 30
-        }
+        spec: mergedPodSpec
       }
     }
   };
   
-  console.log(`  Rendered ReplicaSet ${rsName} with ${containers.length} containers (userInitialized: ${userInitialized})`);
+  console.log(`  Rendered ReplicaSet ${rsName} with ${containers.length} containers (userInitialized: ${userInitialized}, merged: ${!!observedPodSpec})`);
   
   return replicaSet;
 }
