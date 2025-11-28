@@ -122,7 +122,7 @@ function createAppCredentialsInitDecoratorSync(config) {
       
       // Check if replica set is required (default true for backwards compatibility)
       const replicasetRequired = mongoAuthSecret.metadata?.annotations?.['ns.mdn.io/replicaset-required'];
-      req.replicasetRequired = replicasetRequired !== 'false';
+      req.replicasetRequired = replicasetRequired == 'true';
       
       if (replicaSetInitialized) {
         console.log(`    Replica set initialized at: ${replicaSetInitialized}`);

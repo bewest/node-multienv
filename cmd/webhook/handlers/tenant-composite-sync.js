@@ -64,7 +64,7 @@ const {
 // - USE_REPLICASET=true: ReplicaSet buffer layer, InPlace updates, K8s manages Pod lifecycle
 // - USE_REPLICASET=false: Direct Pod, generateSelector=false, spec-hash triggers RollingRecreate
 // Direct Pod mode has lower resource overhead (no ReplicaSet object per tenant)
-const USE_REPLICASET = false;
+const USE_REPLICASET = true;
 
 function createTenantCompositeSync(config) {
   
@@ -791,11 +791,7 @@ function createTenantCompositeSync(config) {
       // This provides a buffer layer that isolates Metacontroller from Pod-level drift
       console.log(`  Rendering ReplicaSet with userInitialized=${userInitializedBool}`);
       
-      // Find existing ReplicaSet BEFORE render to pass to merge helper
-      const existingRS = findResource(req.children['ReplicaSet.apps/v1'], `${resourceName}-rs`, req.namespace);
-      
       const replicaSet = renderTenantReplicaSet(
-        existingRS,  // Pass observed child for deep-merge
         resourceName,
         req.namespace,
         spec,
@@ -807,6 +803,9 @@ function createTenantCompositeSync(config) {
         config
       );
       res.children.push(replicaSet);
+      
+      // Check existing ReplicaSet for status
+      const existingRS = findResource(req.children['ReplicaSet.apps/v1'], `${resourceName}-rs`, req.namespace);
       
       // Find Pod managed by this ReplicaSet (via owner reference or label selector)
       // Pods owned by ReplicaSet will have matching labels
@@ -832,15 +831,11 @@ function createTenantCompositeSync(config) {
       // in the Pod spec triggers Pod recreation when inputs change (RollingRecreate strategy).
       console.log(`  Rendering Pod with userInitialized=${userInitializedBool}`);
       
-      // Find existing Pod BEFORE render to pass to merge helper
-      existingPod = findResource(req.children['Pod.v1'], `${resourceName}-pod`, req.namespace);
       
       // Always render fresh Pod - generateSelector=false ensures no drift from controller-uid
       // The spec-hash annotation changes when inputs change, triggering RollingRecreate
-      // Deep-merge preserves K8s-added defaults (terminationMessagePath, protocol, etc.)
       console.log(`  Rendering Pod with spec-hash: ${specHash}`);
       const pod = renderTenantPod(
-        existingPod,  // Pass observed child for deep-merge
         resourceName,
         req.namespace,
         spec,
@@ -855,6 +850,7 @@ function createTenantCompositeSync(config) {
       res.children.push(pod);
       
       // Check existing Pod for status
+      existingPod = findResource(req.children['Pod.v1'], `${resourceName}-pod`, req.namespace);
       podReady = existingPod?.status?.conditions?.find(c => c.type === 'Ready' && c.status === 'True');
       mongoReady = existingPod?.status?.containerStatuses?.find(c => c.name === 'mongodb' && c.ready);
       
