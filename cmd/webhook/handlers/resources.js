@@ -8,7 +8,9 @@
  * Container-level defaults:
  * - terminationMessagePath: '/dev/termination-log'
  * - terminationMessagePolicy: 'File'
+ * - imagePullPolicy: 'IfNotPresent'
  * - ports[].protocol: 'TCP'
+ * - volumeMounts[].readOnly: false
  * - probes: successThreshold: 1
  * - env[].valueFrom.fieldRef.apiVersion: 'v1'
  * 
@@ -18,6 +20,7 @@
  * - terminationGracePeriodSeconds: 30
  * - schedulerName: 'default-scheduler'
  * - enableServiceLinks: true
+ * - tolerations: not-ready + unreachable (300s each)
  */
 
 /**
@@ -32,6 +35,14 @@ function applyContainerDefaults(container) {
   if (container.ports) {
     container.ports.forEach(port => {
       port.protocol = port.protocol || 'TCP';
+    });
+  }
+  
+  if (container.volumeMounts) {
+    container.volumeMounts.forEach(mount => {
+      if (mount.readOnly === undefined) {
+        mount.readOnly = false;
+      }
     });
   }
   
