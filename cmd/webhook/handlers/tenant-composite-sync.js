@@ -809,7 +809,7 @@ function createTenantCompositeSync(config) {
       
       // Find Pod managed by this ReplicaSet (via owner reference or label selector)
       // Pods owned by ReplicaSet will have matching labels
-      const pods = req.children['Pod.v1'] || {};
+      const pods = req.related['Pod.v1'] || {};
       const podList = Array.isArray(pods) ? pods : Object.values(pods);
       existingPod = podList.find(p => 
         p.metadata?.labels?.['app.kubernetes.io/instance'] === resourceName &&
@@ -974,7 +974,7 @@ function createTenantCompositeSync(config) {
     }).value( );
     console.log("ADDING REMAINING CHILDREN not active in current phase", remaining.length, remaining);
     response.children.push(...remaining);
-    // console.log("RESPONSE", JSON.stringify(response, null, 2));
+    console.log("RESPONSE", JSON.stringify(response, null, 2));
     res.send(response);
   }
   
