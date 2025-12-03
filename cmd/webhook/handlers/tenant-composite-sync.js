@@ -64,7 +64,7 @@ const {
 // - USE_REPLICASET=true: ReplicaSet buffer layer, InPlace updates, K8s manages Pod lifecycle
 // - USE_REPLICASET=false: Direct Pod, generateSelector=false, spec-hash triggers RollingRecreate
 // Direct Pod mode has lower resource overhead (no ReplicaSet object per tenant)
-const USE_REPLICASET = true;
+const USE_REPLICASET = false;
 
 function createTenantCompositeSync(config) {
   
@@ -232,9 +232,10 @@ function createTenantCompositeSync(config) {
     if (existingKeyfile) {
       console.log(`  Keyfile Secret ${keyfileSecretName} exists`);
       req.keyfileSecret = existingKeyfile;
+
       // CRITICAL: Clean and add to res.children to keep it in desired state
-      res.children.push(cleanResource(existingKeyfile));
-      return next();
+      // res.children.push(cleanResource(existingKeyfile));
+      // return next();
     }
     
     // Generate new keyfile Secret
@@ -252,19 +253,26 @@ function createTenantCompositeSync(config) {
           'app.kubernetes.io/name': 'mongodb-keyfile'
         }),
         annotations: {
-          'ns.mdn.io/created-at': new Date().toISOString(),
+          'ns.mdn.io/created-at': existingKeyfile ? existingKeyfile.metadata.annotations['ns.mdn.io/created-at'] : new Date().toISOString(),
           'ns.mdn.io/description': 'MongoDB replica set keyfile for member authentication'
         }
       },
+      /*
       stringData: {
         keyfile: keyfileData
       }
+      */
     };
-    
-    res.children.push(keyfileSecret);
-    req.keyfileSecret = keyfileSecret;
+    if (existingKeyfile) {
+      keyfileSecret.data = existingKeyfile.data;
+    } else {
+      keyfileSecret.stringData = { keyfile: keyfileData };
+    }
+
     console.log(`  Added keyfile Secret to children`);
-    
+    res.children.push(keyfileSecret);
+    // req.keyfileSecret = keyfileSecret;
+
     return next();
   }
   
@@ -300,7 +308,7 @@ function createTenantCompositeSync(config) {
     
     if (!existingAuth) {
       console.error(`  ERROR: mongo-auth Secret ${authSecretName} not found in related resources`);
-      res.status.phase = 'Pending';
+      res.status.phase = 'Error';
       res.status.conditions.push({
         type: 'MongoAuthSecretResolved',
         status: 'False',
@@ -360,21 +368,6 @@ function createTenantCompositeSync(config) {
     console.log(`  Storage type: ${req.storageType}`);
     console.log(`  Credentials requested: ${req.credentialsRequested}`);
     
-    // Stamp annotation on parent CR for Gen3/Gen4 decorator compatibility
-    if (!res.annotations) {
-      res.annotations = {};
-    }
-    // Only set if not already set.
-    if (!runtimeRequired) {
-      res.annotations['ns.mdn.io/runtime-required'] = initialStorageType;
-    }
-    // 
-    if (!req.credentialsRequested) {
-      res.annotations['ns.mdn.io/runtime-required'] = 'dedicated';
-    }
-    
-    console.log(`  Set runtime-required annotation: ${initialStorageType}`);
-    
     return next();
   }
   
@@ -411,7 +404,7 @@ function createTenantCompositeSync(config) {
       
       // Only set phase if not already in Error state
       if (!inErrorState) { }
-      res.status.phase = 'Pending';
+      res.status.phase = 'Error';
       
       res.status.conditions.push({
         type: 'ComputeActivated',
@@ -469,7 +462,7 @@ function createTenantCompositeSync(config) {
       res.status.conditions.push({
         type: 'ComputeActivated',
         status: 'True',
-        reason: 'ConfigMapAdopted',
+        reason: 'ConfigMapEnabled',
         message: `ConfigMap ${configMapNamespace}/${configMapName} found (compute enabled)`
       });
       
@@ -484,7 +477,7 @@ function createTenantCompositeSync(config) {
     
     // Only set phase if not already in Error state
     if (!inErrorState) {
-      res.status.phase = 'Pending';
+      res.status.phase = 'Error';
     }
     
     res.status.conditions.push({
@@ -784,7 +777,7 @@ function createTenantCompositeSync(config) {
       identityLabels,
       config
     });
-    res.status.specHash = specHash;
+    // res.status.specHash = specHash;
     
     if (USE_REPLICASET) {
       // ReplicaSet mode: Render ReplicaSet, let K8s manage Pod lifecycle
@@ -938,9 +931,9 @@ function createTenantCompositeSync(config) {
     // Add status fields
     res.status.databaseName = req.databaseName;
     res.status.connectionSecret = req.authSecret?.metadata?.name;
-    res.status.pvcName = req.pvcName;
-    res.status.podName = `${resourceName}-pod`;
-    res.status.podIP = existingPod?.status?.podIP;
+    // res.status.pvcName = req.pvcName;
+    // res.status.podName = `${resourceName}-pod`;
+    // res.status.podIP = existingPod?.status?.podIP;
     res.status.observedGeneration = req.parent.metadata.generation;
     
     return next();
@@ -951,6 +944,7 @@ function createTenantCompositeSync(config) {
    */
   function sendResponse(req, res, next) {
     const response = {
+      // status: { phase: 'Pending', observedGeneration: req.parent.metadata.generation },
       status: res.status,
       children: res.children
     };
@@ -979,15 +973,10 @@ function createTenantCompositeSync(config) {
   }
   
   /**
-   * Stage 6a: ConfigMap adoption and userdata migration
-   * Adopts ConfigMap as child whenever compute is enabled
+   * Stage 6a: ConfigMap enabled and userdata migration
+   * ConfigMap is related whenever compute is enabled
    * Handles Gen3→Gen5 migration when requested
    * 
-   * Adoption modes:
-   * 1. No migration: Adopt ConfigMap as-is (preserve all data)
-   * 2. Migration pending: Preserve ConfigMap until storage migration completes
-   * 3. Migration ready: Archive data.mongo to annotation and strip from data
-   * 4. Migration complete: Render clean ConfigMap without data.mongo
    */
   function planUserDataMigration(req, res, next) {
     if (!req.computeConfigMap) {
@@ -1080,7 +1069,7 @@ function createTenantCompositeSync(config) {
     setRuntimeRequiredAnnotation,
     ensureConfigMap,
     ensureAppCredentialsSecret,
-    planUserDataMigration,
+    // planUserDataMigration,
     assertPVCExists,
     renderChildren,
     sendResponse

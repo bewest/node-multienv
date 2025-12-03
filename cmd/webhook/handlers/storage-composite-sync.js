@@ -96,7 +96,7 @@ function createStorageCompositeSync(config) {
     req.existingKeyfile = existingKeyfile;
     if (existingKeyfile) {
       console.log(`  Keyfile Secret ${keyfileSecretName} already exists`);
-      return next();
+      // return next();
     }
     
     // Generate new keyfile Secret
@@ -122,14 +122,21 @@ function createStorageCompositeSync(config) {
         },
         annotations: {
           // 'ns.mdn.io/tier': tier,
-          'ns.mdn.io/created-at': new Date().toISOString(),
+          'ns.mdn.io/created-at': existingKeyfile ? existingKeyfile.metadata.annotations['ns.mdn.io/created-at'] : new Date().toISOString(),
           'ns.mdn.io/description': 'MongoDB replica set keyfile for member authentication'
         }
       },
+      /*
       stringData: {
         keyfile: keyfileData
       }
+      */
     };
+    if (existingKeyfile) {
+      keyfileSecret.data = existingKeyfile.data;
+    } else {
+      keyfileSecret.stringData = { keyfile: keyfileData };
+    }
     
     res.children.push(keyfileSecret);
     console.log(`  Added keyfile Secret to children`);

@@ -503,13 +503,14 @@
       // generateSelector=false prevents Metacontroller from injecting controller-uid
       // into child labels. This avoids drift detection on server-managed Pod fields
       // because the webhook controls all labels via spec-hash pattern.
-      generateSelector=true,
+      generateSelector=false,
       parentResource={
         apiVersion: crdGroup + '/' + crdVersion,
         resource: 'nightscouttenants',
         revisionHistory: {
           fieldPaths: ['spec']
-        }
+        },
+        ignoreStatusChanges: true,
       },
       childResources=[
         // ReplicaSet mode: InPlace updates - ReplicaSet controller handles Pod lifecycle
@@ -525,14 +526,14 @@
         // RollingRecreate with statusChecks ensures orderly rollouts when hash changes.
         { apiVersion: 'v1', resource: 'pods',
           updateStrategy: {
-            method: 'RollingRecreate',
-            /*
+            method: 'Recreate',
+        /*
             statusChecks: {
               conditions: [
                 { type: 'Ready', status: 'True' }
               ]
             }
-            */
+        */
           }
         },
         // Secrets for MongoDB keyfile and Nightscout config
@@ -575,7 +576,7 @@
     initializationResyncSeconds=30,
     userdataResyncSeconds=30,
   ):: {
-    storage:: $.storageComposite(
+    storage: $.storageComposite(
       webhookServiceUrl=webhookServiceUrl,
       crdGroup=crdGroup,
       crdVersion=crdVersion,
@@ -628,7 +629,7 @@
       webhookServiceUrl=webhookServiceUrl,
       resyncPeriodSeconds=initializationResyncSeconds,
     ),
-    appCredentialsInit:: $.appCredentialsInitDecorator(
+    appCredentialsInit: $.appCredentialsInitDecorator(
       webhookServiceUrl=webhookServiceUrl,
       resyncPeriodSeconds=initializationResyncSeconds,
     ),
