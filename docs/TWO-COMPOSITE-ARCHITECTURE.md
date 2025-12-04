@@ -1092,6 +1092,96 @@ status:
     mongoReady: true
 ```
 
+## Gen 5 Tenant Composite Architecture
+
+Gen5 introduces a unified **Tenant Composite** that combines storage and compute concerns into a single NightscoutTenant CRD, with direct Pod management instead of Deployments.
+
+### Design Rationale
+
+**Why unify storage and compute?**
+- Single CRD simplifies tenant lifecycle management
+- Co-located MongoDB + Nightscout in same Pod eliminates network hops
+- Two-phase provisioning allows storage-first, compute-later activation
+- Reduces control plane load (fewer resources per tenant)
+
+### Child Update Strategy: Recreate vs RollingRecreate
+
+The tenant composite uses **`Recreate`** for Pod children, not `RollingRecreate`:
+
+```yaml
+childResources:
+  - apiVersion: v1
+    resource: pods
+    updateStrategy:
+      method: Recreate  # NOT RollingRecreate
+```
+
+**Why this matters:**
+
+| Aspect | RollingRecreate | Recreate |
+|--------|-----------------|----------|
+| ControllerRevision created | Yes | No |
+| Suitable for single Pod | No | Yes |
+| Morphing children (lifecycle phases) | Problematic | Works well |
+| Race condition risk | Higher | None |
+| Debugging complexity | Higher | Lower |
+
+**Key insight**: `RollingRecreate` activates Metacontroller's ControllerRevision machinery, which tracks parent spec changes for gradual rollouts. For single-Pod-per-tenant architectures, this adds complexity without benefit and can cause transient "ControllerRevision already exists" errors during rapid parent updates.
+
+### Morphing Children Pattern
+
+Tenant composite children change based on lifecycle phase:
+
+**Phase 1: Storage Only** (no ConfigMap)
+- MongoDB Keyfile Secret
+
+**Phase 2a: Pre-Initialization** (ConfigMap present, user not initialized)
+- MongoDB Keyfile Secret
+- Pod with MongoDB container only
+- App-Credentials Secret
+
+**Phase 2b: Fully Operational** (user initialized)
+- MongoDB Keyfile Secret
+- Pod with MongoDB + Nightscout containers
+- App-Credentials Secret
+
+This morphing pattern requires `Recreate` strategy because:
+1. Children appear/disappear based on lifecycle state
+2. Pod spec changes fundamentally between phases (container count)
+3. There's no concept of "rolling" between fundamentally different configs
+
+### generateSelector=false Pattern
+
+Tenant composite uses `generateSelector=false` to prevent Metacontroller from injecting `controller-uid` labels:
+
+```yaml
+spec:
+  generateSelector: false
+  parentResource:
+    apiVersion: nightscout.io/v1alpha1
+    resource: nightscouttenants
+```
+
+**Benefits:**
+- Webhook controls all child labels via spec-hash pattern
+- Avoids drift detection on server-managed Pod fields
+- Enables idempotent Pod rendering without preservation logic
+
+**Trade-off:** Parent must provide valid `spec.selector.matchLabels` for child adoption.
+
+### Comparison with CatSet Example
+
+The Metacontroller CatSet example uses `RollingRecreate` successfully because:
+
+| CatSet | Tenant Composite |
+|--------|------------------|
+| Multiple Pods (replicas > 1) | Single Pod per tenant |
+| Stable child set after creation | Children morph during lifecycle |
+| `revisionHistory.fieldPaths: [spec.template]` | `revisionHistory.fieldPaths: [spec]` |
+| Infrequent spec changes | Frequent changes during initialization |
+
+**Lesson learned**: `RollingRecreate` is designed for StatefulSet-like multi-replica workloads, not single-instance or morphing child patterns.
+
 ## Implementation Files
 
 | Component | File |
@@ -1099,6 +1189,7 @@ status:
 | **Webhooks** | |
 | Storage Composite | `cmd/webhook/handlers/storage-composite-sync.js` |
 | Compute Composite | `cmd/webhook/handlers/compute-composite-sync.js` |
+| Tenant Composite | `cmd/webhook/handlers/tenant-composite-sync.js` |
 | Storage-Credentials Decorator | `cmd/webhook/handlers/storage-credentials-decorator-sync.js` |
 | Storage-Initialization Decorator | `cmd/webhook/handlers/storage-initialization-decorator-sync.js` |
 | Instance-Userdata Decorator | `cmd/webhook/handlers/instance-userdata-decorator-sync.js` |
@@ -1109,8 +1200,10 @@ status:
 | **CRDs** | |
 | StorageAccount CRD | `metacontroller/crds/storageaccount.yaml` |
 | ComputeInstance CRD | `metacontroller/crds/computeinstance.yaml` |
+| NightscoutTenant CRD | Generated via jsonnet in `lib-k8s-multienv/crds.libsonnet` |
 | **APIs & Tools** | |
 | Provisioner API | `k8s-deployment-controller.js` (/accounts/ endpoints) |
+| NightscoutTenant API | `lib/routes/nightscout-tenant.js` |
 | Migration Tool | `tools/gen4-migration.sh` |
 
 **Note**: Controller definitions are generated from jsonnet, not manually written YAML. See `metacontroller/controllers/README.md` for details.

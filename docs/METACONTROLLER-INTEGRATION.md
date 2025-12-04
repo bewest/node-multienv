@@ -16,6 +16,122 @@ This document describes how the webhook server integrates with Metacontroller an
 
 The `revisionHistory` field tells Metacontroller which fields to track for changes (e.g., `data` field in ConfigMaps/Secrets). Without this field, v4.x will return errors like `"CustomResourceDefinition.apiextensions.k8s.io \"configmaps.\" not found"`.
 
+## Child Update Strategies and ControllerRevision
+
+Understanding update strategies is critical for reliable reconciliation. The choice of strategy determines whether Metacontroller uses the ControllerRevision machinery, which has significant implications for performance and error handling.
+
+### Update Strategy Decision Tree
+
+| Strategy | ControllerRevision Created? | Best For | Behavior |
+|----------|---------------------------|----------|----------|
+| **OnDelete** | No | Manual control | Updates only when child is externally deleted |
+| **Recreate** | No | Single children, morphing lifecycles | Delete + recreate immediately on change |
+| **InPlace** | No | Mutable resources (Secrets, ConfigMaps) | Patch existing resource in place |
+| **RollingRecreate** | **Yes** | Multi-replica StatefulSet-like Pods | Gradual rollout, one at a time |
+| **RollingInPlace** | **Yes** | Multi-replica with in-place updates | Gradual patch, one at a time |
+
+### When ControllerRevision Machinery Activates
+
+The ControllerRevision system activates when **any** child resource uses a rolling update strategy (`RollingRecreate` or `RollingInPlace`). This is determined by the CompositeController configuration, not by the actual children returned by the webhook.
+
+```go
+// From Metacontroller source: pkg/controller/composite/controller_revision.go
+if !pc.updateStrategy.anyRolling() || ... {
+    // Skip revision machinery - direct sync
+    syncResult, err := pc.callHook(parent, observedChildren, relatedObjects)
+}
+// Otherwise, full revision tracking enabled
+```
+
+**Key insight**: Even if your webhook returns `children: []`, the ControllerRevision machinery runs if any child type is configured with rolling updates.
+
+### ControllerRevision Race Condition
+
+When rolling updates are enabled, Metacontroller creates ControllerRevision objects to track parent spec changes. A race condition can occur:
+
+1. **Sync 1** starts → creates ControllerRevision in etcd
+2. **Sync 2** starts immediately (before informer cache updates)
+3. **Sync 2** reads from stale cache → doesn't find ControllerRevision
+4. **Sync 2** tries to create → **"already exists" error**
+
+```
+Error: can't create ControllerRevision nightscouttenants.nightscout.io-38fe168c954...
+controllerrevisions.metacontroller.k8s.io "..." already exists
+```
+
+This error is transient and typically resolves once the informer cache syncs, but it can cause reconciliation failures during rapid parent updates.
+
+### Strategy Selection Guidelines
+
+**Use `Recreate` when:**
+- Managing single-instance resources (one Pod per tenant)
+- Children "morph" during lifecycle phases (e.g., Init → Storage → Compute)
+- Parent updates are frequent during initialization
+- You don't need gradual rollouts
+
+**Use `RollingRecreate` when:**
+- Managing multiple identical replicas (StatefulSet-like patterns)
+- Gradual rollout is important (one Pod at a time)
+- Parent spec changes are infrequent after initial creation
+- Children are stable (not appearing/disappearing based on lifecycle)
+
+**Use `InPlace` when:**
+- Resource supports patching (Secrets, ConfigMaps, Deployments)
+- You want to preserve Pod identity during config changes
+- Minimizing Pod restarts is important
+
+### Recommended Configuration for Tenant Composite
+
+For single-Pod-per-tenant architectures with lifecycle phases:
+
+```yaml
+childResources:
+  - apiVersion: v1
+    resource: pods
+    updateStrategy:
+      method: Recreate  # NOT RollingRecreate
+  - apiVersion: v1
+    resource: secrets
+    updateStrategy:
+      method: InPlace
+```
+
+**Why `Recreate` over `RollingRecreate`:**
+1. Single Pod has nothing to "roll" - it's all-or-nothing
+2. Avoids ControllerRevision machinery and race conditions
+3. Simpler debugging (no revision tracking to understand)
+4. Better for morphing children patterns (lifecycle phases)
+
+### revisionHistory.fieldPaths Optimization
+
+Even with non-rolling strategies, `revisionHistory.fieldPaths` affects how Metacontroller detects changes:
+
+```yaml
+parentResource:
+  apiVersion: nightscout.io/v1alpha1
+  resource: nightscouttenants
+  revisionHistory:
+    fieldPaths:
+      - spec.nightscoutImage  # Only image changes trigger child updates
+      - spec.mongodbVersion
+```
+
+**Narrower paths = fewer spurious syncs.** The CatSet example uses `spec.template` rather than the full `spec`, reducing hash changes.
+
+### Debugging ControllerRevision Issues
+
+```bash
+# List all ControllerRevisions
+kubectl get controllerrevisions.metacontroller.k8s.io -n <namespace>
+
+# Check revision ownership
+kubectl get controllerrevisions.metacontroller.k8s.io <name> -n <namespace> \
+  -o jsonpath='{.metadata.ownerReferences}'
+
+# Delete orphaned revisions (if needed)
+kubectl delete controllerrevisions.metacontroller.k8s.io -n <namespace> --all
+```
+
 ## Metacontroller Webhook Protocol
 
 Metacontroller uses a webhook-based reconciliation model. Controllers watch resources and call webhooks to determine desired state.

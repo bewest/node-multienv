@@ -258,6 +258,112 @@ if (migrationEnabled && mongoReady && !migrationComplete) {
 - Use **state machine** for strict sequential workflows with complex dependencies
 - Use **concurrent** for independent resources with simple gates
 
+### Morphing Children Pattern (cmd/webhook/handlers/tenant-composite-sync.js)
+
+The **morphing children pattern** describes resources whose child set fundamentally changes based on parent lifecycle phase, not just configuration updates.
+
+#### When Children "Morph"
+
+Traditional controllers (like Deployments) maintain a stable set of children that get updated in-place or rolled. Morphing children patterns involve:
+
+- **Appearing/disappearing children**: Pods only exist when ConfigMap is present
+- **Structural changes**: Pod gains/loses containers between phases
+- **Resource type changes**: Init Job → regular Pod → cleanup Job
+
+#### Example: Tenant Composite Lifecycle
+
+```javascript
+function getTenantChildren(parent, observed) {
+  const children = [];
+  
+  // Always present: Keyfile Secret
+  children.push(renderKeyfileSecret(parent));
+  
+  // Phase 1: No ConfigMap → No Pod (storage-only mode)
+  if (!parent.spec.configMapRef) {
+    return children;
+  }
+  
+  // Phase 2a: ConfigMap present, user not initialized → MongoDB-only Pod
+  if (!isUserInitialized(observed)) {
+    children.push(renderPod(parent, { mongoOnly: true }));
+    children.push(renderAppCredentialsSecret(parent));
+    return children;
+  }
+  
+  // Phase 2b: User initialized → Full Pod (MongoDB + Nightscout)
+  children.push(renderPod(parent, { mongoOnly: false }));
+  children.push(renderAppCredentialsSecret(parent));
+  return children;
+}
+```
+
+#### Why Recreate Strategy is Required
+
+Morphing children require **`Recreate`** update strategy:
+
+| Aspect | RollingRecreate | Recreate |
+|--------|-----------------|----------|
+| Assumes stable child count | Yes | No |
+| Tracks revision history | Yes | No |
+| Handles container count changes | Poorly | Well |
+| Good for lifecycle phases | No | Yes |
+
+**Key issue with RollingRecreate**: The ControllerRevision machinery assumes children are being gradually updated to a new version, not fundamentally restructured. When a Pod gains or loses containers, there's no meaningful "rollout" - it's a structural change.
+
+#### Design Guidelines for Morphing Children
+
+1. **Use phase detection, not state machines**
+   ```javascript
+   // Good: Detect current phase from observed state
+   const phase = getLifecyclePhase(parent, observed);
+   
+   // Bad: Track phase in parent status (can drift)
+   const phase = parent.status?.phase;
+   ```
+
+2. **Gate on observable conditions**
+   ```javascript
+   // Good: Check annotation set by decorator
+   const initialized = observed.parent.metadata?.annotations?.['ns.mdn.io/user-initialized'];
+   
+   // Bad: Check Job existence (might not be observed yet)
+   const initialized = observed.children?.['Job.batch/v1']?.['create-user']?.status?.succeeded;
+   ```
+
+3. **Handle all phases in every sync**
+   ```javascript
+   // Always compute full desired state from current observations
+   // Never assume previous state is still valid
+   ```
+
+4. **Use spec-hash for change detection**
+   ```javascript
+   // Hash significant inputs to detect when recreation is needed
+   const hash = hashPodInputs({
+     image: spec.nightscoutImage,
+     mongoVersion: spec.mongodbVersion,
+     userInitialized: isUserInitialized(observed),
+     // ... other significant fields
+   });
+   
+   pod.metadata.annotations['ns.mdn.io/spec-hash'] = hash;
+   ```
+
+#### Comparison with Other Patterns
+
+| Pattern | Child Stability | Update Strategy | Use Case |
+|---------|----------------|-----------------|----------|
+| StatefulSet-like (CatSet) | Stable replica count | RollingRecreate | Multi-replica workloads |
+| Deployment-like | Stable template | InPlace on ReplicaSet | Stateless workloads |
+| **Morphing Children** | Variable by phase | Recreate | Lifecycle-driven systems |
+
+#### Real-World Examples
+
+- **Operator patterns**: CertManager creates different resources based on certificate state
+- **Database operators**: Create init Job → StatefulSet → backup CronJob
+- **Tenant platforms**: Storage-only → compute-enabled → full-featured
+
 ## Testing Patterns
 
 ### Test Kubernetes Conditions
