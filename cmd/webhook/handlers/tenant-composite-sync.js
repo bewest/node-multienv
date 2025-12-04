@@ -57,6 +57,7 @@ const {
   renderAppCredentialsSecret,
   renderTenantPod,
   renderTenantReplicaSet,
+  hashTenantInputs,
   hashPodInputs
 } = require('./resources');
 
@@ -763,19 +764,22 @@ function createTenantCompositeSync(config) {
     let podReady = false;
     let mongoReady = false;
     // Compute spec hash for Pod inputs - embedded in Pod annotation to trigger recreation
-    const authSecretName = req.authSecret?.metadata?.name || `${resourceName}-mongo-auth`;
-    const keyfileSecretName = req.keyfileSecret?.metadata?.name || `${resourceName}-mongo-keyfile`;
-    const appCredentialsSecretName = req.appCredentialsSecret?.metadata?.name || `${resourceName}-app-credentials`;
+    const parent = req.parent;
+    const authSecret = req.authSecret;
+    const keyfileSecret = req.keyfileSecret;
+    const appCredentialsSecret = req.appCredentialsSecret;
+    const computeConfigMap = req.computeConfigMap;
       
-    const specHash = hashPodInputs({
-      resourceName,
+    const specHash = hashTenantInputs({
+      annotations: parent.annotations,
       spec,
-      authSecretName,
-      keyfileSecretName,
-      appCredentialsSecretName,
+      authSecret,
+      keyfileSecret,
+      appCredentialsSecret,
       userInitialized: userInitializedBool,
       identityLabels,
-      config
+      computeConfigMap,
+      // config
     });
     // res.status.specHash = specHash;
     
@@ -842,8 +846,9 @@ function createTenantCompositeSync(config) {
       );
       res.children.push(pod);
       
+      const podName = pod.metadata.name;
       // Check existing Pod for status
-      existingPod = findResource(req.children['Pod.v1'], `${resourceName}-pod`, req.namespace);
+      existingPod = findResource(req.children['Pod.v1'], podName, req.namespace);
       podReady = existingPod?.status?.conditions?.find(c => c.type === 'Ready' && c.status === 'True');
       mongoReady = existingPod?.status?.containerStatuses?.find(c => c.name === 'mongodb' && c.ready);
       
@@ -857,7 +862,7 @@ function createTenantCompositeSync(config) {
     // Determine phase based on initialization and Pod state
     if (userInitializedBool && podReady) {
       // Fully initialized with all containers running
-      res.status.phase = 'Running';
+      res.status.phase = 'Ready';
       res.status.conditions.push({
         type: 'Ready',
         status: 'True',
@@ -918,7 +923,7 @@ function createTenantCompositeSync(config) {
         message: `MongoDB replica set initialized at ${replicaSetInitializedFallback}`
       });
     }
-    
+
     if (userInitializedFallback) {
       res.status.conditions.push({
         type: 'UserInitialized',
@@ -927,7 +932,7 @@ function createTenantCompositeSync(config) {
         message: `MongoDB user created at ${userInitializedFallback}`
       });
     }
-    
+
     // Add status fields
     res.status.databaseName = req.databaseName;
     res.status.connectionSecret = req.authSecret?.metadata?.name;
@@ -938,40 +943,20 @@ function createTenantCompositeSync(config) {
     
     return next();
   }
-  
+
   /**
    * Final handler: send response
    */
   function sendResponse(req, res, next) {
     const response = {
-      // status: { phase: 'Pending', observedGeneration: req.parent.metadata.generation },
       status: res.status,
       children: res.children
     };
-    
-    // Include resyncAfterSeconds if set (for initialization progress)
-    if (res.resyncAfterSeconds) {
-      // response.resyncAfterSeconds = res.resyncAfterSeconds;
-    }
 
-    var remaining = _(req.children).flatMap(function (resources, kind) {
-      return _.map(resources, (resource, name) => ({
-        ...resource
-      }));
-    }).reject((child) => {
-        return _.some(response.children, (excluded) => {
-          hasSameName = excluded.metadata.name == child.metadata.name && excluded;
-          isSameKind = excluded.kind == child.kind;
-          return hasSameName && isSameKind;
-          
-        });
-    }).value( );
-    console.log("ADDING REMAINING CHILDREN not active in current phase", remaining.length, remaining);
-    response.children.push(...remaining);
     console.log("RESPONSE", JSON.stringify(response, null, 2));
     res.send(response);
   }
-  
+
   /**
    * Stage 6a: ConfigMap enabled and userdata migration
    * ConfigMap is related whenever compute is enabled

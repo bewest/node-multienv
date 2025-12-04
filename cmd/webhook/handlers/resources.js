@@ -1207,6 +1207,13 @@ function buildTenantPodMetadata(params) {
  * @param {object} params - Pod input parameters
  * @returns {string} SHA256 hash (first 12 chars) of Pod inputs
  */
+function hashTenantInputs(params) {
+  const hashString = JSON.stringify(params);
+  const hash = crypto.createHash('sha256').update(hashString).digest('hex');
+
+  return hash.substring(0, 12);
+}
+
 function hashPodInputs(params) {
   const {
     resourceName,
@@ -1282,7 +1289,7 @@ function hashPodInputs(params) {
  * @returns {object} Pod manifest
  */
 function renderTenantPod(resourceName, namespace, spec, authSecret, keyfileSecret, appCredentialsSecret, userInitialized, identityLabels, config, specHash) {
-  const podName = `${resourceName}-pod`;
+  const podName = `${resourceName}-${spec.tenant}-${specHash}-pod`;
   const pvcName = spec.pvcName || `${resourceName}-data`;
   
   // Extract auth secret name
@@ -1446,6 +1453,12 @@ function renderTenantPod(resourceName, namespace, spec, authSecret, keyfileSecre
         {
           secretRef: {
             name: appCredentialsSecretName
+          }
+        },
+        {
+          configMapRef: {
+            name: spec.configMapRef.name
+          // , optional: true
           }
         }
       ],
@@ -2077,5 +2090,6 @@ module.exports = {
   renderTenantPod,
   renderTenantReplicaSet,
   hashPodInputs,
+  hashTenantInputs,
   buildTenantPodMetadata
 };
