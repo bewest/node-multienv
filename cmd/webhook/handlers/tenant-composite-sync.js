@@ -161,10 +161,10 @@ function createTenantCompositeSync(config) {
     req.tenantSet = !!req.spec.tenant; // Track if tenant ID was explicitly set
     
     // Storage type detection (early - needed for keyfile and Pod rendering)
-    // Priority: annotation override > spec.initialStorageType > default 'shared'
-    const initialStorageType = req.spec?.initialStorageType;
+    // Priority: annotation override > spec.initStorageType > default 'shared'
+    const initStorageType = req.spec?.initStorageType;
     const runtimeRequired = parent.metadata?.annotations?.['ns.mdn.io/runtime-required'];
-    req.storageType = runtimeRequired || initialStorageType || 'shared';
+    req.storageType = runtimeRequired || initStorageType || 'shared';
     
     // Migration detection
     req.migrationRequested = parent.metadata?.annotations?.['nightscout.io/migrate-to-dedicated'] === 'true';
@@ -178,7 +178,7 @@ function createTenantCompositeSync(config) {
     console.log(`Tenant composite sync for resource: ${req.resourceName}`);
     console.log(`  Storage ID: ${req.storageId}`);
     console.log(`  Tenant ID: ${req.tenantId} (explicit: ${req.tenantSet})`);
-    console.log(`  Storage type: ${req.storageType} (initStorageType: ${initialStorageType}, override: ${runtimeRequired})`);
+    console.log(`  Storage type: ${req.storageType} (initStorageType: ${initStorageType}, override: ${runtimeRequired})`);
     console.log(`  Migration requested: ${req.migrationRequested}`);
     
     // Validate required spec.storage field
