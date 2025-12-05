@@ -1092,6 +1092,467 @@ status:
     mongoReady: true
 ```
 
+## Gen 5 Tenant Composite Architecture
+
+Gen5 introduces a unified **Tenant Composite** that combines storage and compute concerns into a single NightscoutTenant CRD, with direct Pod management instead of Deployments.
+
+### Architecture Overview
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         Gen 5 Architecture                                   │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│  Provisioner creates:                                                       │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐                       │
+│  │ PVC          │  │ mongo-auth   │  │ NightscoutTen│                       │
+│  │ (storage)    │  │ Secret       │  │ ant CR       │                       │
+│  └──────────────┘  └──────────────┘  └──────┬───────┘                       │
+│         │                 │                  │                               │
+│         │                 │                  │                               │
+│         └─────────────────┼──────────────────┘                               │
+│                           │ related resources                                │
+│                           ▼                                                  │
+│  ┌──────────────────────────────────────────────────────────────────────┐   │
+│  │ Metacontroller                                                         │   │
+│  │   Watches: nightscouttenants.nightscout.io                            │   │
+│  └───────────────────────────────┬──────────────────────────────────────┘   │
+│                                  │ HTTP POST (sync hook)                    │
+│                                  ▼                                          │
+│  ┌──────────────────────────────────────────────────────────────────────┐   │
+│  │                    Tenant Composite Controller                         │   │
+│  │  /composite/tenant/sync                                               │   │
+│  │                                                                        │   │
+│  │  Renders children based on lifecycle phase:                           │   │
+│  │                                                                        │   │
+│  │  Phase 1: No ConfigMap     Phase 2a: Initializing   Phase 2b: Ready   │   │
+│  │  ┌─────────────────┐      ┌─────────────────┐      ┌─────────────────┐│   │
+│  │  │ Keyfile Secret  │      │ Keyfile Secret  │      │ Keyfile Secret  ││   │
+│  │  │ (only)          │      │ Pod (Mongo only)│      │ Pod (Mongo+NS)  ││   │
+│  │  │                 │      │ app-credentials │      │ app-credentials ││   │
+│  │  └─────────────────┘      └─────────────────┘      └─────────────────┘│   │
+│  └──────────────────────────────────────────────────────────────────────┘   │
+│                                                                              │
+│  ┌──────────────────────────────────────────────────────────────────────┐   │
+│  │                   Secret-Watching Decorators                           │   │
+│  │  (Stamp annotations on Secrets, attach initialization Jobs)          │   │
+│  │                                                                        │   │
+│  │  ┌─────────────────────┐    ┌─────────────────────────┐              │   │
+│  │  │ mongo-auth-init     │    │ app-credentials-init    │              │   │
+│  │  │ Decorator           │    │ Decorator               │              │   │
+│  │  │                     │    │                         │              │   │
+│  │  │ Watches: mongo-auth │    │ Watches: app-credentials│              │   │
+│  │  │ Creates: init-      │    │ Creates: create-user    │              │   │
+│  │  │   replica-set Job   │    │   Job                   │              │   │
+│  │  │ Stamps: replica-set-│    │ Stamps: user-initialized│              │   │
+│  │  │   initialized       │    │                         │              │   │
+│  │  └─────────────────────┘    └─────────────────────────┘              │   │
+│  └──────────────────────────────────────────────────────────────────────┘   │
+│                                                                              │
+│  ┌──────────────────────────────────────────────────────────────────────┐   │
+│  │                      Preserved Components                              │   │
+│  │                                                                        │   │
+│  │  ┌─────────────────────┐    ┌─────────────────────────┐              │   │
+│  │  │ deployment-operator │    │ resolver                │              │   │
+│  │  │ Pod → Consul sync   │    │ Traffic routing         │              │   │
+│  │  └─────────────────────┘    └─────────────────────────┘              │   │
+│  └──────────────────────────────────────────────────────────────────────┘   │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Resource Ownership Model
+
+Gen5 uses a three-tier ownership model for blast radius protection:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    Resource Ownership Model                                  │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│  ┌───────────────────────────────────────────────────────────────────────┐  │
+│  │  COMPOSITE-OWNED (deleted when NightscoutTenant CR deleted)            │  │
+│  │                                                                         │  │
+│  │    ┌─────────────────┐    ┌─────────────────┐                          │  │
+│  │    │ Pod             │    │ Keyfile Secret  │                          │  │
+│  │    │ (MongoDB + NS)  │    │ (replica auth)  │                          │  │
+│  │    └─────────────────┘    └─────────────────┘                          │  │
+│  │                                                                         │  │
+│  │    ┌─────────────────┐                                                 │  │
+│  │    │ app-credentials │                                                 │  │
+│  │    │ Secret          │ ◄── Rendered by composite, watched by decorator │  │
+│  │    └─────────────────┘                                                 │  │
+│  └───────────────────────────────────────────────────────────────────────┘  │
+│                                                                              │
+│  ┌───────────────────────────────────────────────────────────────────────┐  │
+│  │  PROVISIONER-OWNED (survives CR deletion for recovery)                 │  │
+│  │                                                                         │  │
+│  │    ┌─────────────────┐    ┌─────────────────┐                          │  │
+│  │    │ mongo-auth      │    │ PVC             │                          │  │
+│  │    │ Secret          │    │ (data storage)  │                          │  │
+│  │    │                 │    │                 │                          │  │
+│  │    │ Root credentials│    │ MongoDB data    │                          │  │
+│  │    │ for recovery    │    │ files           │                          │  │
+│  │    └─────────────────┘    └─────────────────┘                          │  │
+│  │                                                                         │  │
+│  │    These resources are created by the provisioner API before the       │  │
+│  │    NightscoutTenant CR, and referenced via spec.mongoAuthSecretRef     │  │
+│  │    and spec.pvcName. They survive CR deletion for fast recovery.       │  │
+│  └───────────────────────────────────────────────────────────────────────┘  │
+│                                                                              │
+│  ┌───────────────────────────────────────────────────────────────────────┐  │
+│  │  DECORATOR-ATTACHED (attached to Secrets, not owned)                   │  │
+│  │                                                                         │  │
+│  │    ┌─────────────────┐    ┌─────────────────┐                          │  │
+│  │    │ init-replica-set│    │ create-user     │                          │  │
+│  │    │ Job             │    │ Job             │                          │  │
+│  │    │                 │    │                 │                          │  │
+│  │    │ Initializes     │    │ Creates app     │                          │  │
+│  │    │ MongoDB replica │    │ MongoDB user    │                          │  │
+│  │    │ set             │    │                 │                          │  │
+│  │    └─────────────────┘    └─────────────────┘                          │  │
+│  │                                                                         │  │
+│  │    Jobs are attached to mongo-auth and app-credentials Secrets.        │  │
+│  │    Decorators stamp completion annotations on Secrets, not CRs.        │  │
+│  └───────────────────────────────────────────────────────────────────────┘  │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Lifecycle Phases (Dedicated Mode)
+
+Gen5 currently implements **dedicated mode** with co-located MongoDB + Nightscout:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    Dedicated Mode Lifecycle                                  │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│  Storage-Only              Phase 2a: Initializing     Phase 2b: Ready       │
+│  (No ConfigMap)            (MongoDB only)             (Full Pod)            │
+│  phase: Error              phase: Initializing        phase: Ready          │
+│                                                                              │
+│  Provisioner creates:      User adds ConfigMap:       Decorators complete:  │
+│  - PVC                     - ConfigMap created        - init-replica-set ✓  │
+│  - mongo-auth Secret       - spec.configMapRef set    - create-user ✓       │
+│  - NightscoutTenant CR     - Compute activates                              │
+│                                                                              │
+│  ┌──────────────────┐     ┌──────────────────┐     ┌──────────────────┐    │
+│  │NightscoutTenant  │     │NightscoutTenant  │     │NightscoutTenant  │    │
+│  │CR                │ ──► │CR                │ ──► │CR                │    │
+│  │                  │     │                  │     │                  │    │
+│  │spec:             │     │spec:             │     │spec:             │    │
+│  │  configMapRef:   │     │  configMapRef:   │     │  configMapRef:   │    │
+│  │    (none)        │     │    name: cfg     │     │    name: cfg     │    │
+│  │  pvcName: data   │     │  pvcName: data   │     │  pvcName: data   │    │
+│  │  mongoAuthSecret │     │  mongoAuthSecret │     │  mongoAuthSecret │    │
+│  │    Ref: auth     │     │    Ref: auth     │     │    Ref: auth     │    │
+│  └────────┬─────────┘     └────────┬─────────┘     └────────┬─────────┘    │
+│           │                        │                        │               │
+│           ▼                        ▼                        ▼               │
+│                                                                              │
+│  Composite renders:        Composite renders:        Composite renders:     │
+│                                                                              │
+│  ┌──────────────────┐     ┌──────────────────┐     ┌──────────────────┐    │
+│  │ Keyfile Secret   │     │ Keyfile Secret   │     │ Keyfile Secret   │    │
+│  │ (only)           │     └──────────────────┘     └──────────────────┘    │
+│  └──────────────────┘     ┌──────────────────┐     ┌──────────────────┐    │
+│                           │ Pod              │     │ Pod              │    │
+│  No Pod rendered -        │ ┌──────────────┐ │     │ ┌──────────────┐ │    │
+│  waiting for ConfigMap    │ │ MongoDB      │ │     │ │ MongoDB      │ │    │
+│  to activate compute      │ │ Container    │ │     │ └──────────────┘ │    │
+│                           │ │              │ │     │ ┌──────────────┐ │    │
+│                           │ │ (waiting for │ │     │ │ Nightscout   │ │    │
+│                           │ │  init Jobs)  │ │     │ │ Container    │ │    │
+│                           │ └──────────────┘ │     │ └──────────────┘ │    │
+│                           └──────────────────┘     └──────────────────┘    │
+│                           ┌──────────────────┐     ┌──────────────────┐    │
+│                           │ app-credentials  │     │ app-credentials  │    │
+│                           │ Secret           │     │ Secret           │    │
+│                           └────────┬─────────┘     └──────────────────┘    │
+│                                    │                                        │
+│  Decorators:                       ▼                                        │
+│  (waiting for                Decorators attach:                             │
+│   mongo-auth)                                                               │
+│                           ┌──────────────────┐                              │
+│                           │ init-replica-set │                              │
+│                           │ Job (on mongo-   │──┐                           │
+│                           │ auth Secret)     │  │                           │
+│                           └──────────────────┘  │ After Jobs complete:      │
+│                           ┌──────────────────┐  │ - Annotations stamped     │
+│                           │ create-user Job  │  │ - Composite re-syncs      │
+│                           │ (on app-creds    │──┘ - Pod gets NS container   │
+│                           │ Secret)          │                              │
+│                           └──────────────────┘                              │
+│                                                                              │
+│  Status:                   Status:                   Status:                │
+│  phase: Error              phase: Initializing       phase: Ready           │
+│  conditions:               conditions:               conditions:            │
+│  - ComputeActivated:       - ComputeActivated:       - ComputeActivated:    │
+│      False                     True                      True               │
+│  - reason:                 - Ready: False            - Ready: True          │
+│      NoConfigMapRef        - reason: Initializing    - reason: PodReady     │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+NOTE: Storage-only mode intentionally surfaces as phase=Error with 
+ComputeActivated=False/NoConfigMapRef. This prompts provisioners to supply 
+the ConfigMap to activate the tenant. The Error phase is expected behavior 
+for tenants awaiting configuration, not a failure state.
+```
+
+### Two-Phase Container Gating
+
+The Pod morphs during initialization to enable safe MongoDB setup:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    Two-Phase Container Gating                                │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│  WHY: MongoDB must be initialized (replica set + user) before Nightscout    │
+│       can connect. Running both containers immediately would cause errors.  │
+│                                                                              │
+│  Phase 2a: MongoDB Only                Phase 2b: MongoDB + Nightscout       │
+│  (userInitialized: false)              (userInitialized: true)              │
+│                                                                              │
+│  ┌──────────────────────────┐         ┌──────────────────────────┐         │
+│  │ Pod                      │         │ Pod                      │         │
+│  │                          │         │                          │         │
+│  │ ┌──────────────────────┐ │         │ ┌──────────────────────┐ │         │
+│  │ │ MongoDB Container    │ │         │ │ MongoDB Container    │ │         │
+│  │ │                      │ │         │ │                      │ │         │
+│  │ │ • Listening on 27017 │ │         │ │ • Replica set init'd │ │         │
+│  │ │ • Bound to Pod IP    │ │         │ │ • App user created   │ │         │
+│  │ │ • Uses PVC           │ │         │ │ • Ready for traffic  │ │         │
+│  │ └──────────────────────┘ │         │ └──────────────────────┘ │         │
+│  │                          │         │ ┌──────────────────────┐ │         │
+│  │                          │         │ │ Nightscout Container │ │         │
+│  │                          │         │ │                      │ │         │
+│  │                          │         │ │ • Connects localhost │ │         │
+│  │                          │         │ │ • Uses app-creds     │ │         │
+│  │                          │         │ │ • Serves HTTP 1337   │ │         │
+│  │                          │   ───►  │ └──────────────────────┘ │         │
+│  └──────────────────────────┘         └──────────────────────────┘         │
+│           │                                     ▲                           │
+│           │                                     │                           │
+│           ▼                                     │                           │
+│  ┌──────────────────────────┐                  │                           │
+│  │ Initialization Jobs      │                  │                           │
+│  │                          │                  │                           │
+│  │ 1. init-replica-set Job  │                  │                           │
+│  │    - Connects via Pod IP │                  │                           │
+│  │    - Runs rs.initiate()  │                  │                           │
+│  │    - Stamps annotation   │                  │                           │
+│  │                          │                  │                           │
+│  │ 2. create-user Job       │                  │                           │
+│  │    - Waits for #1        │                  │                           │
+│  │    - Creates app user    │                  │                           │
+│  │    - Stamps annotation   │──────────────────┘                           │
+│  │      on app-credentials  │  Triggers composite re-sync                  │
+│  │      Secret              │  Pod recreated with both containers          │
+│  └──────────────────────────┘                                               │
+│                                                                              │
+│  Annotation Flow:                                                           │
+│  ┌─────────────┐     ┌─────────────┐     ┌─────────────┐                   │
+│  │ mongo-auth  │────►│ app-creds   │────►│ Composite   │                   │
+│  │ Secret      │     │ Secret      │     │ re-renders  │                   │
+│  │             │     │             │     │ Pod with    │                   │
+│  │ ns.mdn.io/  │     │ ns.mdn.io/  │     │ both        │                   │
+│  │ replica-set-│     │ user-       │     │ containers  │                   │
+│  │ initialized │     │ initialized │     │             │                   │
+│  └─────────────┘     └─────────────┘     └─────────────┘                   │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Recovery Scenario
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    Recovery: NightscoutTenant CR Deleted                     │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│  Before Deletion:                  After Deletion:                          │
+│                                                                              │
+│  ┌──────────────────┐              ┌──────────────────┐                     │
+│  │ NightscoutTenant │              │ (CR deleted)     │                     │
+│  │ CR               │  ─────────►  │                  │                     │
+│  └────────┬─────────┘              └──────────────────┘                     │
+│           │                                                                  │
+│           │ owns                                                             │
+│           ▼                                                                  │
+│  ┌──────────────────┐              ┌──────────────────┐                     │
+│  │ Pod              │  ─────────►  │ ❌ DELETED       │                     │
+│  │ Keyfile Secret   │              │ (owned children  │                     │
+│  │ app-credentials  │              │  garbage         │                     │
+│  └──────────────────┘              │  collected)      │                     │
+│                                    └──────────────────┘                     │
+│                                                                              │
+│  Provisioner-owned:                Provisioner-owned:                       │
+│  ┌──────────────────┐              ┌──────────────────┐                     │
+│  │ mongo-auth Secret│  ─────────►  │ ✅ SURVIVES      │                     │
+│  │ PVC              │              │ (not owned by CR)│                     │
+│  └──────────────────┘              └──────────────────┘                     │
+│                                                                              │
+│  Recovery Steps:                                                             │
+│  ───────────────                                                             │
+│  1. Recreate NightscoutTenant CR with same spec references                  │
+│  2. Composite renders new Pod → mounts existing PVC                         │
+│  3. MongoDB starts with existing data files                                 │
+│  4. Decorators detect mongo-auth exists, skip init if annotated             │
+│  5. App user still exists in MongoDB → create-user Job skips                │
+│  6. Nightscout container starts, connects to MongoDB                        │
+│  7. ✅ Tenant operational with original data, minimal downtime              │
+│                                                                              │
+│  Key Insight: Data survives because PVC and mongo-auth are                  │
+│  provisioner-owned, not composite-owned. Only transient resources           │
+│  (Pod, Keyfile, app-credentials) are deleted.                               │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Future: Shared Mode Migration
+
+> **Note**: Shared mode (Nightscout-only Pod with external MongoDB) is planned
+> for future implementation to enable gradual migration from shared infrastructure.
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    Planned: Shared → Dedicated Migration                     │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│  Current State:                    Target State:                            │
+│  (Shared - not yet implemented)    (Dedicated - current)                    │
+│                                                                              │
+│  ┌──────────────────┐              ┌──────────────────┐                     │
+│  │ NightscoutTenant │              │ NightscoutTenant │                     │
+│  │                  │   migrate    │                  │                     │
+│  │ spec:            │  ─────────►  │ spec:            │                     │
+│  │   storageType:   │              │   storageType:   │                     │
+│  │     shared       │              │     dedicated    │                     │
+│  │   sharedMongoUri:│              │   pvcName: data  │                     │
+│  │     mongodb://...│              │   mongoAuthSecret│                     │
+│  └────────┬─────────┘              │     Ref: auth    │                     │
+│           │                        └────────┬─────────┘                     │
+│           ▼                                 ▼                               │
+│  ┌──────────────────┐              ┌──────────────────┐                     │
+│  │ Pod              │              │ Pod              │                     │
+│  │ ┌──────────────┐ │              │ ┌──────────────┐ │                     │
+│  │ │ Nightscout   │ │              │ │ MongoDB      │ │                     │
+│  │ │ (connects to │ │              │ │ (co-located) │ │                     │
+│  │ │  shared DB)  │ │              │ └──────────────┘ │                     │
+│  │ └──────────────┘ │              │ ┌──────────────┐ │                     │
+│  └──────────────────┘              │ │ Nightscout   │ │                     │
+│           │                        │ │ (localhost)  │ │                     │
+│           ▼                        │ └──────────────┘ │                     │
+│  ┌──────────────────┐              └────────┬─────────┘                     │
+│  │ Central Shared   │                       ▼                               │
+│  │ MongoDB Cluster  │              ┌──────────────────┐                     │
+│  │ (external)       │              │ Local PVC        │                     │
+│  └──────────────────┘              └──────────────────┘                     │
+│                                                                              │
+│  Migration would involve:                                                   │
+│  1. Create PVC and mongo-auth for tenant                                    │
+│  2. Spawn Migration Job to copy data from shared → local                    │
+│  3. Update spec to dedicated mode                                           │
+│  4. Pod recreated with co-located MongoDB                                   │
+│  5. Tenant now fully independent                                            │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Design Rationale
+
+**Why unify storage and compute?**
+- Single CRD simplifies tenant lifecycle management
+- Co-located MongoDB + Nightscout in same Pod eliminates network hops
+- Two-phase provisioning allows storage-first, compute-later activation
+- Reduces control plane load (fewer resources per tenant)
+
+**Why the three-tier ownership model?**
+- Composite-owned resources can be safely recreated without data loss
+- Provisioner-owned resources (PVC, mongo-auth) survive CR deletion for recovery
+- Decorator-attached Jobs provide initialization without ownership conflicts
+
+### Child Update Strategy: Recreate vs RollingRecreate
+
+The tenant composite uses **`Recreate`** for Pod children, not `RollingRecreate`:
+
+```yaml
+childResources:
+  - apiVersion: v1
+    resource: pods
+    updateStrategy:
+      method: Recreate  # NOT RollingRecreate
+```
+
+**Why this matters:**
+
+| Aspect | RollingRecreate | Recreate |
+|--------|-----------------|----------|
+| ControllerRevision created | Yes | No |
+| Suitable for single Pod | No | Yes |
+| Morphing children (lifecycle phases) | Problematic | Works well |
+| Race condition risk | Higher | None |
+| Debugging complexity | Higher | Lower |
+
+**Key insight**: `RollingRecreate` activates Metacontroller's ControllerRevision machinery, which tracks parent spec changes for gradual rollouts. For single-Pod-per-tenant architectures, this adds complexity without benefit and can cause transient "ControllerRevision already exists" errors during rapid parent updates.
+
+### Morphing Children Pattern
+
+Tenant composite children change based on lifecycle phase:
+
+**Phase 1: Storage Only** (no ConfigMap)
+- MongoDB Keyfile Secret
+
+**Phase 2a: Pre-Initialization** (ConfigMap present, user not initialized)
+- MongoDB Keyfile Secret
+- Pod with MongoDB container only
+- App-Credentials Secret
+
+**Phase 2b: Fully Operational** (user initialized)
+- MongoDB Keyfile Secret
+- Pod with MongoDB + Nightscout containers
+- App-Credentials Secret
+
+This morphing pattern requires `Recreate` strategy because:
+1. Children appear/disappear based on lifecycle state
+2. Pod spec changes fundamentally between phases (container count)
+3. There's no concept of "rolling" between fundamentally different configs
+
+### generateSelector=false Pattern
+
+Tenant composite uses `generateSelector=false` to prevent Metacontroller from injecting `controller-uid` labels:
+
+```yaml
+spec:
+  generateSelector: false
+  parentResource:
+    apiVersion: nightscout.io/v1alpha1
+    resource: nightscouttenants
+```
+
+**Benefits:**
+- Webhook controls all child labels via spec-hash pattern
+- Avoids drift detection on server-managed Pod fields
+- Enables idempotent Pod rendering without preservation logic
+
+**Trade-off:** Parent must provide valid `spec.selector.matchLabels` for child adoption.
+
+### Comparison with CatSet Example
+
+The Metacontroller CatSet example uses `RollingRecreate` successfully because:
+
+| CatSet | Tenant Composite |
+|--------|------------------|
+| Multiple Pods (replicas > 1) | Single Pod per tenant |
+| Stable child set after creation | Children morph during lifecycle |
+| `revisionHistory.fieldPaths: [spec.template]` | `revisionHistory.fieldPaths: [spec]` |
+| Infrequent spec changes | Frequent changes during initialization |
+
+**Lesson learned**: `RollingRecreate` is designed for StatefulSet-like multi-replica workloads, not single-instance or morphing child patterns.
+
 ## Implementation Files
 
 | Component | File |
@@ -1099,6 +1560,7 @@ status:
 | **Webhooks** | |
 | Storage Composite | `cmd/webhook/handlers/storage-composite-sync.js` |
 | Compute Composite | `cmd/webhook/handlers/compute-composite-sync.js` |
+| Tenant Composite | `cmd/webhook/handlers/tenant-composite-sync.js` |
 | Storage-Credentials Decorator | `cmd/webhook/handlers/storage-credentials-decorator-sync.js` |
 | Storage-Initialization Decorator | `cmd/webhook/handlers/storage-initialization-decorator-sync.js` |
 | Instance-Userdata Decorator | `cmd/webhook/handlers/instance-userdata-decorator-sync.js` |
@@ -1109,8 +1571,10 @@ status:
 | **CRDs** | |
 | StorageAccount CRD | `metacontroller/crds/storageaccount.yaml` |
 | ComputeInstance CRD | `metacontroller/crds/computeinstance.yaml` |
+| NightscoutTenant CRD | Generated via jsonnet in `lib-k8s-multienv/crds.libsonnet` |
 | **APIs & Tools** | |
 | Provisioner API | `k8s-deployment-controller.js` (/accounts/ endpoints) |
+| NightscoutTenant API | `lib/routes/nightscout-tenant.js` |
 | Migration Tool | `tools/gen4-migration.sh` |
 
 **Note**: Controller definitions are generated from jsonnet, not manually written YAML. See `metacontroller/controllers/README.md` for details.
