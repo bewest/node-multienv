@@ -160,6 +160,16 @@ function createTenantCompositeSync(config) {
     req.tenantId = req.spec.tenant || parent.metadata.name; // Fallback to CR name if tenant not yet set
     req.tenantSet = !!req.spec.tenant; // Track if tenant ID was explicitly set
     
+    // Storage type detection (early - needed for keyfile and Pod rendering)
+    // Priority: annotation override > spec.initialStorageType > default 'shared'
+    const initialStorageType = req.spec?.initialStorageType;
+    const runtimeRequired = parent.metadata?.annotations?.['ns.mdn.io/runtime-required'];
+    req.storageType = runtimeRequired || initialStorageType || 'shared';
+    
+    // Migration detection
+    req.migrationRequested = parent.metadata?.annotations?.['nightscout.io/migrate-to-dedicated'] === 'true';
+    req.credentialsRequested = req.storageType === 'dedicated' || req.migrationRequested;
+    
     // Initialize response
     res.children = [];
     res.status = { phase: 'Pending', conditions: [] };
@@ -168,6 +178,8 @@ function createTenantCompositeSync(config) {
     console.log(`Tenant composite sync for resource: ${req.resourceName}`);
     console.log(`  Storage ID: ${req.storageId}`);
     console.log(`  Tenant ID: ${req.tenantId} (explicit: ${req.tenantSet})`);
+    console.log(`  Storage type: ${req.storageType} (initStorageType: ${initialStorageType}, override: ${runtimeRequired})`);
+    console.log(`  Migration requested: ${req.migrationRequested}`);
     
     // Validate required spec.storage field
     if (!req.storageId) {
@@ -220,11 +232,20 @@ function createTenantCompositeSync(config) {
   
   /**
    * Stage 2: Ensure MongoDB keyfile Secret exists
+   * Only required for dedicated mode (co-located MongoDB)
+   * Shared mode uses external MongoDB and doesn't need replica keyfile
    */
   function ensureMongoKeyfile(req, res, next) {
     const resourceName = req.resourceName;
     const namespace = req.namespace;
     const keyfileSecretName = `${resourceName}-mongo-keyfile`;
+    
+    // Shared mode: No keyfile needed (external MongoDB)
+    if (req.storageType === 'shared') {
+      console.log(`  Shared mode - skipping keyfile Secret (external MongoDB)`);
+      req.keyfileSecret = null;
+      return next();
+    }
     
     // Check if keyfile Secret already exists (robust lookup with namespace)
     const existingKeyfile = findResource(req.children['Secret.v1'], keyfileSecretName, namespace) || 
@@ -280,22 +301,53 @@ function createTenantCompositeSync(config) {
   /**
    * Stage 3: Read MongoDB auth Secret from spec.mongoAuthSecretRef
    * Gen5: Provisioner owns mongo-auth Secret (not controller)
+   * 
+   * Shared mode: mongo-auth Secret is optional (external MongoDB)
+   * Dedicated mode: mongo-auth Secret is required (co-located MongoDB)
    */
   function ensureMongoAuthSecret(req, res, next) {
     const resourceName = req.resourceName;
     const namespace = req.namespace;
     const spec = req.spec;
     
-    // Resolve mongo-auth Secret from spec reference
+    // Shared mode: mongo-auth Secret is optional
+    if (req.storageType === 'shared') {
+      console.log(`  Shared mode - mongo-auth Secret optional`);
+      req.authSecret = null;
+      req.databaseName = null;
+      
+      // Check if reference provided (for migration scenarios)
+      const mongoAuthSecretRef = spec.mongoAuthSecretRef;
+      if (mongoAuthSecretRef) {
+        const existingAuth = findResource(req.related['Secret.v1'], mongoAuthSecretRef, namespace);
+        if (existingAuth) {
+          console.log(`  Found mongo-auth Secret ${mongoAuthSecretRef} (optional for shared mode)`);
+          req.authSecret = existingAuth;
+          req.databaseName = Buffer.from(existingAuth.data?.MONGO_INITDB_DATABASE || '', 'base64').toString('utf-8') ||
+                            Buffer.from(existingAuth.data?.database || '', 'base64').toString('utf-8');
+        }
+      }
+      
+      res.status.conditions.push({
+        type: 'MongoAuthSecretResolved',
+        status: 'True',
+        reason: 'SharedMode',
+        message: 'Shared mode - using external MongoDB (mongo-auth Secret optional)'
+      });
+      
+      return next();
+    }
+    
+    // Dedicated mode: mongo-auth Secret is required
     const mongoAuthSecretRef = spec.mongoAuthSecretRef;
     if (!mongoAuthSecretRef) {
-      console.error(`  ERROR: spec.mongoAuthSecretRef not provided for ${resourceName}`);
+      console.error(`  ERROR: spec.mongoAuthSecretRef not provided for ${resourceName} (required for dedicated mode)`);
       res.status.phase = 'Error';
       res.status.conditions.push({
         type: 'MongoAuthSecretResolved',
         status: 'False',
         reason: 'MissingReference',
-        message: 'spec.mongoAuthSecretRef is required but not provided'
+        message: 'spec.mongoAuthSecretRef is required for dedicated mode but not provided'
       });
       req.authSecret = null;
       return next();
@@ -344,30 +396,17 @@ function createTenantCompositeSync(config) {
   }
   
   /**
-   * Stage 3a: Set runtime-required annotation and detect credential requirements
-   * Gen5: Standardized credential detection logic (shared with Gen4)
-   * 
-   * Credentials required when:
-   * 1. Storage type is 'dedicated' (from mongo-auth Secret annotation or spec)
-   * 2. Migration requested (nightscout.io/migrate-to-dedicated annotation)
+   * Stage 3a: Add storage type condition to status
+   * Gen5: Storage type already detected in initializeContext, this stage reports status
    */
-  function setRuntimeRequiredAnnotation(req, res, next) {
-    const spec = req.spec;
-    const initialStorageType = spec?.initialStorageType;
-    
-    // Check migration annotation on parent CR
-    req.migrationRequested = req.parent.metadata?.annotations?.['nightscout.io/migrate-to-dedicated'] === 'true';
-    
-    // Read runtime-required from self (set by provisioner or decorator)
-    const runtimeRequired = req.parent?.metadata?.annotations?.['ns.mdn.io/runtime-required'];
-    req.storageType = runtimeRequired || initialStorageType;
-    
-    // Standardized credential detection (matches Gen4 storage-credentials decorator)
-    req.credentialsRequested = req.storageType === 'dedicated' || req.migrationRequested;
-    
-    console.log(`  Migration requested: ${req.migrationRequested}`);
-    console.log(`  Storage type: ${req.storageType}`);
-    console.log(`  Credentials requested: ${req.credentialsRequested}`);
+  function reportStorageTypeStatus(req, res, next) {
+    // Report storage type in conditions
+    res.status.conditions.push({
+      type: 'StorageType',
+      status: 'True',
+      reason: req.storageType === 'dedicated' ? 'DedicatedMode' : 'SharedMode',
+      message: `Storage type: ${req.storageType}${req.migrationRequested ? ' (migration requested)' : ''}`
+    });
     
     return next();
   }
@@ -610,18 +649,28 @@ function createTenantCompositeSync(config) {
   /**
    * Stage 4: Assert PVC exists before rendering compute layer
    * Gen5: PVC is provisioner-owned (not a child)
+   * Shared mode: PVC not required (external MongoDB)
    */
   function assertPVCExists(req, res, next) {
+    // Shared mode: No PVC needed (external MongoDB)
+    if (req.storageType === 'shared') {
+      console.log(`  Shared mode - skipping PVC check (external MongoDB)`);
+      req.pvcExists = true; // Treat as satisfied for shared mode
+      req.pvcBound = true;
+      req.pvcName = null;
+      return next();
+    }
+    
     const spec = req.spec;
     const pvcName = spec.pvcName;
     
     if (!pvcName) {
-      console.error(`  ERROR: spec.pvcName not provided`);
+      console.error(`  ERROR: spec.pvcName not provided for dedicated mode`);
       res.status.conditions.push({
         type: 'PVCResolved',
         status: 'False',
         reason: 'MissingPVCReference',
-        message: 'spec.pvcName is required but not provided'
+        message: 'spec.pvcName is required for dedicated mode but not provided'
       });
       req.pvcExists = false;
       return next();
@@ -663,16 +712,25 @@ function createTenantCompositeSync(config) {
   }
   
   /**
-   * Stage 5: Render children based on compute activation and initialization annotations
-   * Gen5 Decorator-Driven: Read annotations set by tenant-initialization-decorator
+   * Stage 5: Render children based on compute activation and storage mode
+   * 
+   * Shared mode: Nightscout-only Pod using external MongoDB from ConfigMap
+   *   - No initialization Jobs needed (user exists in external MongoDB)
+   *   - Environment comes directly from ConfigMap envFrom
+   *   - Compatible with Gen3 deployment-operator via role: config-as-deploy label
+   * 
+   * Dedicated mode: Two-phase container gating with co-located MongoDB
    *   - ns.mdn.io/replica-set-initialized: Job orchestration complete
    *   - ns.mdn.io/user-initialized: User creation complete
+   *   - Explicit MONGO_CONNECTION env overrides any ConfigMap mongo var
    */
   function renderChildren(req, res, next) {
     const resourceName = req.resourceName;
     const spec = req.spec;
+    const storageType = req.storageType;
     
     console.log(`Stage 5: Rendering children for ${resourceName}`);
+    console.log(`  Storage type: ${storageType}`);
     console.log(`  Compute enabled: ${req.computeEnabled}`);
     console.log(`  PVC exists: ${req.pvcExists}`);
     console.log(`  Auth secret exists: ${!!req.authSecret}`);
@@ -692,12 +750,32 @@ function createTenantCompositeSync(config) {
       });
       
       // Add status fields
+      res.status.storageType = storageType;
       res.status.databaseName = req.databaseName;
       res.status.connectionSecret = req.authSecret?.metadata?.name;
       res.status.observedGeneration = req.parent.metadata.generation;
       
       return next();
     }
+    
+    // Build identity labels for Pod (shared between both modes)
+    const identityLabels = {
+      'ns.mdn.io/storage': req.storageId,
+      'role': 'config-as-deploy' // Consul registration compatibility
+    };
+    if (req.tenantSet) {
+      identityLabels['ns.mdn.io/tenant'] = req.tenantId;
+      identityLabels['tenant'] = req.tenantId;
+    }
+    
+    // ==== SHARED MODE: Nightscout-only Pod ====
+    if (storageType === 'shared') {
+      console.log(`  Shared mode - rendering Nightscout-only Pod`);
+      return renderSharedModePod(req, res, next, resourceName, spec, identityLabels);
+    }
+    
+    // ==== DEDICATED MODE: MongoDB + Nightscout Pod ====
+    console.log(`  Dedicated mode - rendering MongoDB + Nightscout Pod`);
     
     // Compute enabled but missing prerequisites (PVC or auth secret)
     if (!req.pvcExists || !req.authSecret) {
@@ -712,6 +790,7 @@ function createTenantCompositeSync(config) {
         message: `Waiting for: ${!req.pvcExists ? 'PVC ' : ''}${!req.authSecret ? 'mongo-auth secret' : ''}`
       });
       
+      res.status.storageType = storageType;
       res.status.databaseName = req.databaseName;
       res.status.connectionSecret = req.authSecret?.metadata?.name;
       res.status.observedGeneration = req.parent.metadata.generation;
@@ -744,15 +823,6 @@ function createTenantCompositeSync(config) {
     
     console.log(`  Replica set initialized: ${replicaSetInitializedFallback || 'no'} (from Secret: ${!!replicaSetInitialized})`);
     console.log(`  User initialized: ${userInitializedFallback || 'no'} (from Secret: ${!!userInitialized})`);
-    
-    // Build identity labels for Pod
-    const identityLabels = {
-      'ns.mdn.io/storage': req.storageId
-    };
-    if (req.tenantSet) {
-      identityLabels['ns.mdn.io/tenant'] = req.tenantId;
-      identityLabels['tenant'] = req.tenantId;
-    }
     
     // Two-phase container rendering:
     // Phase 1: MongoDB-only (userInitialized = false) - allows Jobs to run
@@ -934,6 +1004,7 @@ function createTenantCompositeSync(config) {
     }
 
     // Add status fields
+    res.status.storageType = req.storageType || 'shared'; // Report effective storage mode
     res.status.databaseName = req.databaseName;
     res.status.connectionSecret = req.authSecret?.metadata?.name;
     // res.status.pvcName = req.pvcName;
@@ -955,6 +1026,151 @@ function createTenantCompositeSync(config) {
 
     console.log("RESPONSE", JSON.stringify(response, null, 2));
     res.send(response);
+  }
+
+  /**
+   * Render shared mode Pod (Nightscout-only, external MongoDB)
+   * 
+   * In shared mode:
+   * - No MongoDB container (uses external MongoDB from ConfigMap)
+   * - No initialization Jobs needed (user already exists)
+   * - Environment comes directly from ConfigMap via envFrom
+   * - Compatible with Gen3 deployment-operator via role: config-as-deploy label
+   * 
+   * The ConfigMap is expected to contain MONGODB_URI or data.mongo
+   * for Nightscout to connect to the external database.
+   */
+  function renderSharedModePod(req, res, next, resourceName, spec, identityLabels) {
+    const namespace = req.namespace;
+    const computeConfigMap = req.computeConfigMap;
+    
+    // Compute spec hash for shared mode Pod
+    const specHash = hashTenantInputs({
+      annotations: req.parent.metadata?.annotations,
+      spec,
+      computeConfigMap,
+      storageType: 'shared',
+      identityLabels
+    });
+    
+    // Nightscout configuration from config
+    const nsImage = config.images?.nightscout || 'nightscout/cgm-remote-monitor:latest';
+    const nsImagePullPolicy = config.imagePullPolicies?.nightscout || 'IfNotPresent';
+    const nsCpuRequest = config.resources?.nightscout?.requests?.cpu || '50m';
+    const nsCpuLimit = config.resources?.nightscout?.limits?.cpu || '200m';
+    const nsMemRequest = config.resources?.nightscout?.requests?.memory || '128Mi';
+    const nsMemLimit = config.resources?.nightscout?.limits?.memory || '256Mi';
+    
+    const podName = `${resourceName}-${spec.tenant}-${specHash}-pod`;
+    
+    // Standard labels for the Pod
+    const standardLabels = {
+      'app.kubernetes.io/name': 'nightscout-tenant',
+      'app.kubernetes.io/component': 'tenant-pod',
+      'app.kubernetes.io/part-of': 'nightscout-tenant',
+      'app.kubernetes.io/instance': resourceName,
+      'app.kubernetes.io/managed-by': 'metacontroller',
+      'ns.mdn.io/composite': 'tenant', 
+      'ns.mdn.io/storage-type': 'shared',
+      ...identityLabels
+    };
+    
+    // Nightscout container - uses environment from ConfigMap
+    const nightscoutContainer = {
+      name: 'nightscout',
+      image: nsImage,
+      imagePullPolicy: nsImagePullPolicy,
+      ports: [
+        {
+          containerPort: 1337,
+          name: 'http'
+        }
+      ],
+      // Shared mode: envFrom only (MongoDB URI comes from ConfigMap)
+      // No explicit MONGO_CONNECTION override - use ConfigMap value
+      envFrom: [
+        {
+          configMapRef: {
+            name: spec.configMapRef.name
+          }
+        }
+      ],
+      readinessProbe: {
+        httpGet: {
+          path: '/api/v1/status.json',
+          port: 1337
+        },
+        initialDelaySeconds: 10,
+        periodSeconds: 10,
+        timeoutSeconds: 5,
+        failureThreshold: 3
+      },
+      resources: {
+        requests: {
+          cpu: nsCpuRequest,
+          memory: nsMemRequest
+        },
+        limits: {
+          cpu: nsCpuLimit,
+          memory: nsMemLimit
+        }
+      }
+    };
+    
+    const pod = {
+      apiVersion: 'v1',
+      kind: 'Pod',
+      metadata: {
+        name: podName,
+        namespace: namespace,
+        labels: standardLabels,
+        annotations: {
+          'ns.mdn.io/spec-hash': specHash,
+          'ns.mdn.io/storage-type': 'shared'
+        }
+      },
+      spec: {
+        containers: [nightscoutContainer],
+        restartPolicy: 'Always'
+      }
+    };
+    
+    res.children.push(pod);
+    
+    // Check existing Pod for status
+    const existingPod = findResource(req.children['Pod.v1'], podName, namespace);
+    const podReady = existingPod?.status?.conditions?.find(c => c.type === 'Ready' && c.status === 'True');
+    
+    console.log(`  Shared mode Pod: ${podName}, exists: ${!!existingPod}, ready: ${!!podReady}`);
+    
+    // Determine phase based on Pod state (no initialization gating for shared mode)
+    if (podReady) {
+      res.status.phase = 'Ready';
+      res.status.conditions.push({
+        type: 'Ready',
+        status: 'True',
+        reason: 'PodReady',
+        message: 'Tenant Pod is running with Nightscout container (shared MongoDB)'
+      });
+    } else {
+      res.status.phase = 'Pending';
+      res.status.conditions.push({
+        type: 'Ready',
+        status: 'False',
+        reason: 'WaitingForPod',
+        message: 'Waiting for Nightscout Pod to become ready'
+      });
+      
+      // Request requeue if not Ready
+      res.resyncAfterSeconds = 15;
+      console.log(`  Requesting requeue in 15 seconds (waiting for Pod)`);
+    }
+    
+    // Add status fields
+    res.status.storageType = 'shared';
+    res.status.observedGeneration = req.parent.metadata.generation;
+    
+    return next();
   }
 
   /**
@@ -1036,22 +1252,21 @@ function createTenantCompositeSync(config) {
     return next();
   }
   
-  // Return middleware pipeline (Gen5: two-phase provisioning)
-  // 1. Initialize context from webhook request
-  // 2. Ensure MongoDB keyfile Secret (child resource)
+  // Return middleware pipeline (Gen5: two-phase provisioning with shared/dedicated modes)
+  // 1. Initialize context from webhook request (includes storageType detection)
+  // 2. Ensure MongoDB keyfile Secret (dedicated mode only)
   // 3. Read mongo-auth Secret from spec reference (provisioner-owned)
-  // 4. Set runtime-required annotation for Gen3/Gen4 compatibility
-  // 5. Detect compute activation via ConfigMap presence
-  // 6. Ensure app-credentials Secret (THE Nightscout app Secret, conditional on compute)
-  // 6a. Plan userdata migration (Gen3 ConfigMap adoption, optional)
-  // 7. Assert PVC exists from spec reference
-  // 8. Render children (conditional compute layer)
-  // 9. Send response
+  // 3a. Report storage type in status
+  // 4. Detect compute activation via ConfigMap presence
+  // 5. Ensure app-credentials Secret (THE Nightscout app Secret, conditional on compute)
+  // 6. Assert PVC exists from spec reference (dedicated mode only)
+  // 7. Render children (shared: Nightscout-only, dedicated: MongoDB+Nightscout)
+  // 8. Send response
   return [
     initializeContext,
     ensureMongoKeyfile,
     ensureMongoAuthSecret,
-    setRuntimeRequiredAnnotation,
+    reportStorageTypeStatus,
     ensureConfigMap,
     ensureAppCredentialsSecret,
     // planUserDataMigration,
