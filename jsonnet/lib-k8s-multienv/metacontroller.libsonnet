@@ -576,7 +576,7 @@
     initializationResyncSeconds=30,
     userdataResyncSeconds=30,
   ):: {
-    storage: $.storageComposite(
+    storage:: $.storageComposite(
       webhookServiceUrl=webhookServiceUrl,
       crdGroup=crdGroup,
       crdVersion=crdVersion,
