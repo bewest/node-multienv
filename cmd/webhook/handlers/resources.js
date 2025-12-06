@@ -1282,13 +1282,13 @@ function hashPodInputs(params) {
  * @param {object} authSecret - mongo-auth Secret for root credentials
  * @param {object} keyfileSecret - MongoDB keyfile Secret
  * @param {object} appCredentialsSecret - App credentials Secret for Nightscout
- * @param {boolean} userInitialized - Whether user credentials have been created
+ * @param {object} renderOpts - compute,storage,authSecretFirst,healthCheck
  * @param {object} identityLabels - Identity labels (ns.mdn.io/storage, ns.mdn.io/tenant)
  * @param {object} config - Webhook configuration
  * @param {string} specHash - Pre-computed spec hash (from hashPodInputs)
  * @returns {object} Pod manifest
  */
-function renderTenantPod(resourceName, namespace, spec, authSecret, keyfileSecret, appCredentialsSecret, userInitialized, identityLabels, config, specHash) {
+function renderTenantPod(resourceName, namespace, spec, authSecret, keyfileSecret, appCredentialsSecret, opts, identityLabels, config, specHash) {
   const podName = `${resourceName}-${spec.tenant}-${specHash}-pod`;
   const pvcName = spec.pvcName || `${resourceName}-data`;
   
@@ -1435,10 +1435,38 @@ function renderTenantPod(resourceName, namespace, spec, authSecret, keyfileSecre
       }
     }
   };
-  containers.push(mongoContainer);
+
+  if (opts.storage) {
+    containers.push(mongoContainer);
+  }
   
   // Nightscout container (only when user initialized)
-  if (userInitialized) {
+  if (opts.compute) {
+    var envFrom = [
+      {
+        secretRef: {
+          name: appCredentialsSecretName
+        }
+      },
+      {
+        configMapRef: {
+          name: spec.configMapRef.name
+        // , optional: true
+        }
+      }
+    ];
+    var envMap = [ ];
+    if (!opts.authSecretFirst) {
+      envFrom.reverse( );
+    } else {
+      envMap.push(
+        {
+          name: 'MONGO_CONNECTION',
+          value: 'mongodb://$(MONGO_USERNAME):$(MONGO_PASSWORD)@localhost:27017/$(MONGO_DATABASE)?authSource=$(MONGO_DATABASE)'
+        }
+      );
+    }
+
     const nightscoutContainer = {
       name: 'nightscout',
       image: nsImage,
@@ -1449,25 +1477,10 @@ function renderTenantPod(resourceName, namespace, spec, authSecret, keyfileSecre
           name: 'http'
         }
       ],
-      envFrom: [
-        {
-          secretRef: {
-            name: appCredentialsSecretName
-          }
-        },
-        {
-          configMapRef: {
-            name: spec.configMapRef.name
-          // , optional: true
-          }
-        }
-      ],
-      env: [
-        {
-          name: 'MONGO_CONNECTION',
-          value: 'mongodb://$(MONGO_USERNAME):$(MONGO_PASSWORD)@localhost:27017/$(MONGO_DATABASE)?authSource=$(MONGO_DATABASE)'
-        }
-      ],
+      envFrom,
+      /*
+      */
+      env: [ ...envMap ],
       readinessProbe: {
         httpGet: {
           path: '/api/v1/status.json',
@@ -1491,6 +1504,86 @@ function renderTenantPod(resourceName, namespace, spec, authSecret, keyfileSecre
     };
     containers.push(nightscoutContainer);
   }
+  if (opts.healthCheck) {
+    const healthCheckImage = config.images.podHealthcheck;
+    const healthCheckCommand = config.commands.podHealthcheck;
+    const healthCheckImagePullPolicy = config.imagePullPolicies.podHealthcheck;
+    const healthCheckPort = parseInt(String(config.podHealthcheck.port));
+    const healthCheckCpuRequest = config.resources.podHealthcheck.requests.cpu;
+    const healthCheckCpuLimit = config.resources.podHealthcheck.limits.cpu;
+    const healthCheckMemRequest = config.resources.podHealthcheck.requests.memory;
+    const healthCheckMemLimit = config.resources.podHealthcheck.limits.memory;
+  
+    containers.push({
+      name: 'pod-healthcheck',
+      image: healthCheckImage,
+      args: [healthCheckCommand],
+      imagePullPolicy: healthCheckImagePullPolicy,
+      ports: [
+        {
+          containerPort: healthCheckPort,
+          name: 'healthcheck'
+        }
+      ],
+      env: [
+        {
+          name: 'PORT',
+          value: String(healthCheckPort)
+        },
+        {
+          name: 'POD_UID',
+          valueFrom: {
+            fieldRef: {
+              fieldPath: 'metadata.uid'
+            }
+          }
+        },
+        {
+          name: 'POD_IP',
+          valueFrom: {
+            fieldRef: {
+              fieldPath: 'status.podIP'
+            }
+          }
+        },
+        {
+          name: 'POD_NAME',
+          valueFrom: {
+            fieldRef: {
+              fieldPath: 'metadata.name'
+            }
+          }
+        },
+        {
+          name: 'POD_NAMESPACE',
+          valueFrom: {
+            fieldRef: {
+              fieldPath: 'metadata.namespace'
+            }
+          }
+        },
+        {
+          name: 'NODE_NAME',
+          valueFrom: {
+            fieldRef: {
+              fieldPath: 'spec.nodeName'
+            }
+          }
+        }
+      ],
+      resources: {
+        requests: {
+          cpu: healthCheckCpuRequest,
+          memory: healthCheckMemRequest
+        },
+        limits: {
+          cpu: healthCheckCpuLimit,
+          memory: healthCheckMemLimit
+        }
+      }
+    });
+  }
+
   
   // Init container to prepare keyfile
   const initContainers = [
@@ -1575,7 +1668,7 @@ function renderTenantPod(resourceName, namespace, spec, authSecret, keyfileSecre
       namespace: namespace,
       labels: standardLabels,
       annotations: {
-        'ns.mdn.io/user-initialized': userInitialized ? 'true' : 'false',
+        // 'ns.mdn.io/user-initialized': userInitialized ? 'true' : 'false',
         'ns.mdn.io/container-count': String(containers.length),
         'ns.mdn.io/spec-hash': specHash
       }
@@ -1583,7 +1676,7 @@ function renderTenantPod(resourceName, namespace, spec, authSecret, keyfileSecre
     spec: withPodDefaults(podSpec)
   };
   
-  console.log(`  Rendered Pod ${podName} with ${containers.length} containers (userInitialized: ${userInitialized})`);
+  console.log(`  Rendered Pod ${podName} with ${containers.length} containers`, opts);
   
   return pod;
 }

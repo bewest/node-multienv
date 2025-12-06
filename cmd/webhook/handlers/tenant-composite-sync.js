@@ -161,10 +161,10 @@ function createTenantCompositeSync(config) {
     req.tenantSet = !!req.spec.tenant; // Track if tenant ID was explicitly set
     
     // Storage type detection (early - needed for keyfile and Pod rendering)
-    // Priority: annotation override > spec.initStorageType > default 'shared'
-    const initStorageType = req.spec?.initStorageType;
+    // Priority: annotation override > spec.initStorageType > default 'dedicated'
+    const initStorageType = req.spec?.initialStorageType;
     const runtimeRequired = parent.metadata?.annotations?.['ns.mdn.io/runtime-required'];
-    req.storageType = runtimeRequired || initStorageType || 'shared';
+    req.storageType = runtimeRequired || initStorageType || 'dedicated';
     
     // Migration detection
     req.migrationRequested = parent.metadata?.annotations?.['nightscout.io/migrate-to-dedicated'] === 'true';
@@ -254,16 +254,12 @@ function createTenantCompositeSync(config) {
     if (existingKeyfile) {
       console.log(`  Keyfile Secret ${keyfileSecretName} exists`);
       req.keyfileSecret = existingKeyfile;
-
-      // CRITICAL: Clean and add to res.children to keep it in desired state
-      // res.children.push(cleanResource(existingKeyfile));
-      // return next();
     }
-    
+
     // Generate new keyfile Secret
     console.log(`  Generating keyfile Secret for ${resourceName}`);
     const keyfileData = crypto.randomBytes(64).toString('base64');
-    
+
     const keyfileSecret = {
       apiVersion: 'v1',
       kind: 'Secret',
@@ -293,11 +289,10 @@ function createTenantCompositeSync(config) {
 
     console.log(`  Added keyfile Secret to children`);
     res.children.push(keyfileSecret);
-    // req.keyfileSecret = keyfileSecret;
 
     return next();
   }
-  
+
   /**
    * Stage 3: Read MongoDB auth Secret from spec.mongoAuthSecretRef
    * Gen5: Provisioner owns mongo-auth Secret (not controller)
@@ -309,59 +304,41 @@ function createTenantCompositeSync(config) {
     const resourceName = req.resourceName;
     const namespace = req.namespace;
     const spec = req.spec;
-    
+
     // Shared mode: mongo-auth Secret is optional
-    if (req.storageType === 'shared') {
-      console.log(`  Shared mode - mongo-auth Secret optional`);
-      req.authSecret = null;
-      req.databaseName = null;
-      
-      // Check if reference provided (for migration scenarios)
-      const mongoAuthSecretRef = spec.mongoAuthSecretRef;
-      if (mongoAuthSecretRef) {
-        const existingAuth = findResource(req.related['Secret.v1'], mongoAuthSecretRef, namespace);
-        if (existingAuth) {
-          console.log(`  Found mongo-auth Secret ${mongoAuthSecretRef} (optional for shared mode)`);
-          req.authSecret = existingAuth;
-          req.databaseName = Buffer.from(existingAuth.data?.MONGO_INITDB_DATABASE || '', 'base64').toString('utf-8') ||
-                            Buffer.from(existingAuth.data?.database || '', 'base64').toString('utf-8');
-        }
-      }
-      
-      res.status.conditions.push({
-        type: 'MongoAuthSecretResolved',
-        status: 'True',
-        reason: 'SharedMode',
-        message: 'Shared mode - using external MongoDB (mongo-auth Secret optional)'
-      });
-      
-      return next();
-    }
-    
     // Dedicated mode: mongo-auth Secret is required
     const mongoAuthSecretRef = spec.mongoAuthSecretRef;
     if (!mongoAuthSecretRef) {
       console.error(`  ERROR: spec.mongoAuthSecretRef not provided for ${resourceName} (required for dedicated mode)`);
-      res.status.phase = 'Error';
+      var message = 'spec.mongoAuthSecretRef is required for dedicated mode but not provided';
+      if (req.storageType == 'shared') {
+        message = 'spec.mongoAuthSecretRef is recommended but not required for shared mode';
+      } else {
+        res.status.phase = 'Error';
+      }
       res.status.conditions.push({
         type: 'MongoAuthSecretResolved',
         status: 'False',
         reason: 'MissingReference',
-        message: 'spec.mongoAuthSecretRef is required for dedicated mode but not provided'
+        message
       });
       req.authSecret = null;
+      req.databaseName = null;
       return next();
     }
-    
+
     const authSecretName = mongoAuthSecretRef;
     console.log(`  Looking up mongo-auth Secret: ${authSecretName}`);
-    
+
     // Find Secret in related resources (provisioner-owned, not a child)
     const existingAuth = findResource(req.related['Secret.v1'], authSecretName, namespace);
-    
+
     if (!existingAuth) {
       console.error(`  ERROR: mongo-auth Secret ${authSecretName} not found in related resources`);
-      res.status.phase = 'Error';
+      if (req.storageType == 'shared') {
+      } else {
+        res.status.phase = 'Error';
+      }
       res.status.conditions.push({
         type: 'MongoAuthSecretResolved',
         status: 'False',
@@ -369,32 +346,30 @@ function createTenantCompositeSync(config) {
         message: `mongo-auth Secret ${authSecretName} not found (provisioner must create it)`
       });
       req.authSecret = null;
+      req.databaseName = null;
       return next();
     }
-    
+
     console.log(`  Found mongo-auth Secret ${authSecretName}`);
-    
+
     // Hydrate derived values from Secret data (base64-encoded)
     req.authSecret = existingAuth;
     req.databaseName = Buffer.from(existingAuth.data?.MONGO_INITDB_DATABASE || '', 'base64').toString('utf-8') ||
-                      Buffer.from(existingAuth.data?.database || '', 'base64').toString('utf-8');
-    // req.mongoUsername = Buffer.from(existingAuth.data?.username || '', 'base64').toString('utf-8');
-    // req.mongoPassword = Buffer.from(existingAuth.data?.password || '', 'base64').toString('utf-8');
-    
+                       Buffer.from(existingAuth.data?.database || '', 'base64').toString('utf-8');
+
     console.log(`  Hydrated: database=${req.databaseName}`);
-    
+
     // DO NOT add to res.children (provisioner owns it, not Metacontroller)
-    
     res.status.conditions.push({
       type: 'MongoAuthSecretResolved',
       status: 'True',
       reason: 'SecretFound',
       message: `mongo-auth Secret ${authSecretName} resolved successfully`
     });
-    
+
     return next();
   }
-  
+
   /**
    * Stage 3a: Add storage type condition to status
    * Gen5: Storage type already detected in initializeContext, this stage reports status
@@ -407,10 +382,10 @@ function createTenantCompositeSync(config) {
       reason: req.storageType === 'dedicated' ? 'DedicatedMode' : 'SharedMode',
       message: `Storage type: ${req.storageType}${req.migrationRequested ? ' (migration requested)' : ''}`
     });
-    
+
     return next();
   }
-  
+
   /**
    * Stage 3b: Ensure ConfigMap exists (adopt from provisioner if referenced)
    * Gen5: ConfigMap activates compute layer
@@ -428,10 +403,10 @@ function createTenantCompositeSync(config) {
     const namespace = req.namespace;
     const spec = req.spec;
     const configMapRef = spec.configMapRef;
-    
+
     console.log(`Stage 3b: Ensuring ConfigMap for ${resourceName}`);
     console.log(`  configMapRef: ${configMapRef}`);
-    
+
     // Preserve existing Error phase (don't override)
     const currentPhase = res.status.phase;
     const inErrorState = currentPhase === 'Error';
@@ -445,7 +420,7 @@ function createTenantCompositeSync(config) {
       // Only set phase if not already in Error state
       if (!inErrorState) { }
       res.status.phase = 'Error';
-      
+
       res.status.conditions.push({
         type: 'ComputeActivated',
         status: 'False',
@@ -454,13 +429,13 @@ function createTenantCompositeSync(config) {
       });
       return next();
     }
-    
-    // Explicit configMapRef - adopt provisioner-managed ConfigMap
+
+    // Explicit configMapRef - provisioner-managed ConfigMap
     const configMapName = configMapRef.name;
     const configMapNamespace = configMapRef.namespace || namespace;
-    
+
     console.log(`  Looking for referenced ConfigMap: ${configMapNamespace}/${configMapName}`);
-    
+
     // Look for referenced ConfigMap in children (owned) or related (actual cluster state)
     // After first reconcile, adopted ConfigMap moves from related to children
     let existingConfigMap = findResource(
@@ -469,64 +444,40 @@ function createTenantCompositeSync(config) {
       configMapNamespace
     );
     
-    /*
-    // If not in children, check related resources (first reconcile)
-    if (!existingConfigMap) {
-      existingConfigMap = findResource(
-        req.related['ConfigMap.v1'],
-        configMapName,
-        configMapNamespace
-      );
-    }
-    */
-    
     if (existingConfigMap) {
       console.log(`  Found existing ConfigMap`);
-      /*
-      console.log(`  Found existing ConfigMap - adopting for compute activation`);
-      
-      // Adopt existing ConfigMap (preserves name/namespace, adds management labels)
-      const adoptedConfigMap = cleanResource(existingConfigMap);
-      
-      // Add management and identity labels
-      if (!adoptedConfigMap.metadata.labels) {
-        adoptedConfigMap.metadata.labels = {};
-      }
-      Object.assign(adoptedConfigMap.metadata.labels, buildStandardLabels(req, 'userdata'));
-      
-      res.children.push(adoptedConfigMap);
-      */
+
       req.computeEnabled = true;
       req.computeConfigMap = existingConfigMap;
-      
+
       res.status.conditions.push({
         type: 'ComputeActivated',
         status: 'True',
         reason: 'ConfigMapEnabled',
         message: `ConfigMap ${configMapNamespace}/${configMapName} found (compute enabled)`
       });
-      
+
       return next();
     }
-    
+
     // ConfigMap referenced but not found - storage-only mode (compute disabled)
     // This happens when ConfigMap deleted via environs API to stop tenant
     console.log(`  ConfigMap ${configMapNamespace}/${configMapName} not found - storage-only mode`);
     req.computeEnabled = false;
     req.computeConfigMap = null;
-    
+
     // Only set phase if not already in Error state
     if (!inErrorState) {
       res.status.phase = 'Error';
     }
-    
+
     res.status.conditions.push({
       type: 'ComputeActivated',
       status: 'False',
       reason: 'ConfigMapNotFound',
       message: `ConfigMap ${configMapNamespace}/${configMapName} not found (storage-only mode)`
     });
-    
+
     return next();
   }
   
@@ -580,72 +531,7 @@ function createTenantCompositeSync(config) {
 
     return next();
   }
-  
-  /**
-   * Stage 4: Check initialization status and determine phase
-   * Uses durable parent status for replica set initialization state
-   */
-  function detectPhase(req, res, next) {
-    const resourceName = req.resourceName;
-    const pvcName = `data-${resourceName}-0`;
-    const initJobName = `${resourceName}-init-rs`;
-    
-    // Helper: Find PVC in children or related (with namespace matching)
-    function findPVC() {
-      return findResource(req.children['PersistentVolumeClaim.v1'], pvcName, req.namespace) ||
-             findResource(req.related['PersistentVolumeClaim.v1'], pvcName, req.namespace);
-    }
-    
-    // Helper: Find init Job in children (with namespace matching)
-    function findInitJob() {
-      return findResource(req.children['Job.batch/v1'], initJobName, req.namespace);
-    }
-    
-    // Check for existing PVC
-    const existingPVC = findPVC();
-    const pvcBound = existingPVC?.status?.phase === 'Bound';
-    
-    // Check for durable PVC bound marker (persisted once observed)
-    const pvcBoundCondition = req.parent.status?.conditions?.find(
-      c => c.type === 'PVCBound' && c.status === 'True'
-    );
-    const pvcBoundDurable = !!pvcBoundCondition || pvcBound;
-    
-    // Check for durable replica set initialization marker
-    const replicaSetInitCondition = req.parent.status?.conditions?.find(
-      c => c.type === 'ReplicaSetInitialized' && c.status === 'True'
-    );
-    
-    // Check if init Job just completed (if not already marked)
-    const initJob = findInitJob();
-    const jobJustSucceeded = initJob?.status?.succeeded > 0;
-    const replicaSetInitialized = !!replicaSetInitCondition || jobJustSucceeded;
-    
-    // Store state for use in other middleware
-    req.pvcExists = !!existingPVC;
-    req.pvcBound = pvcBoundDurable;
-    req.pvcName = pvcName;
-    req.replicaSetInitialized = replicaSetInitialized;
-    req.jobJustSucceeded = jobJustSucceeded;
-    req.pvcJustBound = pvcBound && !pvcBoundCondition;
-    
-    // Log current state for debugging
-    console.log(`  Resource state:`);
-    console.log(`    - PVC: ${existingPVC ? 'exists' : 'missing'}, bound: ${pvcBound} (durable: ${pvcBoundDurable})`);
-    console.log(`    - Job: ${initJob ? 'exists' : 'missing'}, succeeded: ${jobJustSucceeded} (durable: ${!!replicaSetInitCondition})`);
-    
-    // Transition to Ready phase when BOTH conditions are durably true
-    if (pvcBoundDurable && replicaSetInitialized) {
-      console.log(`  Phase: Ready (all prerequisites met)`);
-      req.targetPhase = 'Ready';
-    } else {
-      console.log(`  Phase: Initializing (waiting for: ${!pvcBoundDurable ? 'PVC' : ''} ${!replicaSetInitialized ? 'Job' : ''})`);
-      req.targetPhase = 'Initializing';
-    }
-    
-    return next();
-  }
-  
+
   /**
    * Stage 4: Assert PVC exists before rendering compute layer
    * Gen5: PVC is provisioner-owned (not a child)
@@ -761,6 +647,7 @@ function createTenantCompositeSync(config) {
     // Build identity labels for Pod (shared between both modes)
     const identityLabels = {
       'ns.mdn.io/storage': req.storageId,
+      'managed': 'multienv',
       'role': 'config-as-deploy' // Consul registration compatibility
     };
     if (req.tenantSet) {
@@ -768,14 +655,13 @@ function createTenantCompositeSync(config) {
       identityLabels['tenant'] = req.tenantId;
     }
     
-    // ==== SHARED MODE: Nightscout-only Pod ====
     if (storageType === 'shared') {
-      console.log(`  Shared mode - rendering Nightscout-only Pod`);
-      return renderSharedModePod(req, res, next, resourceName, spec, identityLabels);
+      // ==== SHARED MODE: Nightscout-only Pod ====
+      console.log(`  Shared mode - rendering Nightscout-only Pod ${req.storageType}${req.migrationRequested ? ' (migration requested)' : ''}`);
+    } else {
+      // ==== DEDICATED MODE: MongoDB + Nightscout Pod ====
+      console.log(`   mode - rendering MongoDB + Nightscout Pod`);
     }
-    
-    // ==== DEDICATED MODE: MongoDB + Nightscout Pod ====
-    console.log(`  Dedicated mode - rendering MongoDB + Nightscout Pod`);
     
     // Compute enabled but missing prerequisites (PVC or auth secret)
     if (!req.pvcExists || !req.authSecret) {
@@ -795,9 +681,12 @@ function createTenantCompositeSync(config) {
       res.status.connectionSecret = req.authSecret?.metadata?.name;
       res.status.observedGeneration = req.parent.metadata.generation;
       
-      return next();
+      if (storageType == 'dedicated') {
+        console.log("MISSING PVC in dedicated mode, skipping");
+        return next();
+      }
     }
-    
+
     // Read initialization state from Secrets (set by decorators)
     // - mongo-auth Secret: ns.mdn.io/replica-set-initialized annotation
     // - app-credentials Secret: ns.mdn.io/user-initialized annotation
@@ -807,13 +696,9 @@ function createTenantCompositeSync(config) {
     // Check mongo-auth Secret for replica set initialization
     const mongoAuthAnnotations = req.authSecret?.metadata?.annotations || {};
     const replicaSetInitialized = mongoAuthAnnotations['ns.mdn.io/replica-set-initialized'];
-    
+
     // Check app-credentials Secret for user initialization
-    // First check existing children, then related (for first sync cycle)
-    const appCredentialsSecretNameLocal = `${resourceName}-app-credentials`;
-    const existingAppCreds = findResource(req.children['Secret.v1'], appCredentialsSecretNameLocal, req.namespace) ||
-                             findResource(req.related['Secret.v1'], appCredentialsSecretNameLocal, req.namespace);
-    const appCredsAnnotations = existingAppCreds?.metadata?.annotations || {};
+    const appCredsAnnotations = req.appCredentialsSecret?.metadata?.annotations || {};
     const userInitialized = appCredsAnnotations['ns.mdn.io/user-initialized'];
     
     // Fallback: Also check parent CR annotations for backwards compatibility
@@ -851,7 +736,7 @@ function createTenantCompositeSync(config) {
       computeConfigMap,
       // config
     });
-    // res.status.specHash = specHash;
+    res.status.specHash = specHash;
     
     if (USE_REPLICASET) {
       // ReplicaSet mode: Render ReplicaSet, let K8s manage Pod lifecycle
@@ -897,8 +782,23 @@ function createTenantCompositeSync(config) {
       // so we can render a clean Pod without preservation logic. The spec-hash annotation
       // in the Pod spec triggers Pod recreation when inputs change (RollingRecreate strategy).
       console.log(`  Rendering Pod with userInitialized=${userInitializedBool}`);
-      
-      
+
+
+      var migrationComplete = req.parent.metadata.annotations['ns.mdn.io/migration-phase'] == 'complete';
+      /*
+      * In shared mode, we always want a compute/Nightscout container.
+      * In dedicated mode, it's ok to delay creating a Nightscout container
+      * until the authentication details have been bootstrapped.
+      */
+      var dedicatedReady = spec.initialStorageType == 'dedicated' && userInitializedBool;
+      var skipDedicatedMongoString = spec.initialStorageType == 'shared' && !migrationComplete;
+      var render_opts = {
+        healthCheck: true,
+        storage: req.storageType == 'dedicated' || req.migrationRequested,
+        compute: spec.initialStorageType == 'shared' || dedicatedReady,
+        authSecretFirst: spec.initialStorageType == 'shared' && (req.migrationRequested && !migrationComplete),
+        skipDedicatedMongoString
+      };
       // Always render fresh Pod - generateSelector=false ensures no drift from controller-uid
       // The spec-hash annotation changes when inputs change, triggering RollingRecreate
       console.log(`  Rendering Pod with spec-hash: ${specHash}`);
@@ -909,26 +809,26 @@ function createTenantCompositeSync(config) {
         req.authSecret,
         req.keyfileSecret,
         req.appCredentialsSecret,
-        userInitializedBool,
+        // userInitializedBool,
+        render_opts,
         identityLabels,
         config,
         specHash
       );
       res.children.push(pod);
-      
+
       const podName = pod.metadata.name;
       // Check existing Pod for status
       existingPod = findResource(req.children['Pod.v1'], podName, req.namespace);
       podReady = existingPod?.status?.conditions?.find(c => c.type === 'Ready' && c.status === 'True');
       mongoReady = existingPod?.status?.containerStatuses?.find(c => c.name === 'mongodb' && c.ready);
-      
+
       console.log("DIFF POD", existingPod, pod);
       console.log(`  Existing Pod: ${!!existingPod}, Pod ready: ${!!podReady}, MongoDB ready: ${!!mongoReady}`);
     }
-    
+
     console.log(`  Pod exists: ${!!existingPod}, Pod ready: ${!!podReady}, MongoDB ready: ${!!mongoReady}`);
-    
-    
+
     // Determine phase based on initialization and Pod state
     if (userInitializedBool && podReady) {
       // Fully initialized with all containers running
