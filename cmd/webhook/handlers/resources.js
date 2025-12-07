@@ -2168,6 +2168,143 @@ function renderCreateUserJob(adminRefName, secretName, tenantId, namespace, stor
   };
 }
 
+/**
+ * Render migration Job (shared → dedicated storage transition)
+ * Migrates data from shared MongoDB (ConfigMap-based) to dedicated storage
+ * 
+ * Uses stable job name for audit trail: {tenantId}-migrate-data
+ * 
+ * Source: ConfigMap data.mongo field (Gen3 legacy tenant ConfigMap with MongoDB URI)
+ * Target: app-credentials Secret MONGODB_URI field (dedicated storage)
+ * 
+ * @param {Object} params - Migration job parameters
+ * @param {string} params.tenantId - Tenant identifier
+ * @param {string} params.namespace - Kubernetes namespace
+ * @param {string} params.configMapName - Source ConfigMap name (usually same as tenantId)
+ * @param {string} params.appCredentialsSecretName - Target Secret name
+ * @param {string} params.podIP - Target MongoDB Pod IP address
+ * @param {Object} params.labels - Standard labels to apply
+ * @param {Object} config - Webhook configuration
+ * @returns {Object} Kubernetes Job manifest
+ */
+function renderMigrationJob(params, config) {
+  const {
+    tenantId,
+    namespace,
+    configMapName,
+    appCredentialsSecretName,
+    podIP,
+    labels = {}
+  } = params;
+  
+  const jobName = `${tenantId}-migrate-data`;
+  const migrationMethod = 'mongodump-restore';
+  
+  return {
+    apiVersion: 'batch/v1',
+    kind: 'Job',
+    metadata: {
+      name: jobName,
+      namespace: namespace,
+      labels: {
+        ...labels,
+        'app.kubernetes.io/name': 'migration',
+        'app.kubernetes.io/component': 'migration',
+        'app.kubernetes.io/managed-by': 'metacontroller',
+        'ns.mdn.io/decorator': 'tenant-migration',
+        'ns.mdn.io/migration-type': 'shared-to-dedicated',
+        tenant: tenantId
+      },
+      annotations: {
+        'ns.mdn.io/tenant': tenantId,
+        'ns.mdn.io/migration-method': migrationMethod,
+        'ns.mdn.io/source-config': configMapName,
+        'ns.mdn.io/target-pod-ip': podIP
+      }
+    },
+    spec: {
+      ttlSecondsAfterFinished: config.jobs?.ttlSecondsAfterFinished || 86400,
+      backoffLimit: config.jobs?.backoffLimit || 3,
+      template: {
+        metadata: {
+          labels: {
+            ...labels,
+            'app.kubernetes.io/name': 'migration',
+            'app.kubernetes.io/component': 'migration',
+            'ns.mdn.io/decorator': 'tenant-migration',
+            tenant: tenantId
+          }
+        },
+        spec: {
+          ...(config.jobs?.imagePullSecrets?.length > 0 
+            ? { imagePullSecrets: config.jobs.imagePullSecrets } 
+            : {}),
+          restartPolicy: 'OnFailure',
+          containers: [{
+            name: 'migration',
+            image: config.images?.nsUtility || 'nightscout/ns-utility:latest',
+            imagePullPolicy: config.imagePullPolicies?.nsUtility || 'IfNotPresent',
+            env: [
+              {
+                name: 'MIGRATION_SOURCE_URI',
+                valueFrom: {
+                  configMapKeyRef: {
+                    name: configMapName,
+                    key: 'mongo'
+                  }
+                }
+              },
+              {
+                name: 'MONGO_COLLECTION',
+                valueFrom: {
+                  configMapKeyRef: {
+                    name: configMapName,
+                    key: 'MONGO_COLLECTION',
+                    optional: true
+                  }
+                }
+              },
+              {
+                name: 'MONGO_TREATMENTS_COLLECTION',
+                valueFrom: {
+                  configMapKeyRef: {
+                    name: configMapName,
+                    key: 'MONGO_TREATMENTS_COLLECTION',
+                    optional: true
+                  }
+                }
+              },
+              {
+                name: 'MIGRATION_TARGET_URI',
+                valueFrom: {
+                  secretKeyRef: {
+                    name: appCredentialsSecretName,
+                    key: 'MONGODB_URI'
+                  }
+                }
+              },
+              { name: 'MIGRATION_METHOD', value: migrationMethod },
+              { name: 'TENANT_ID', value: tenantId },
+              { name: 'TARGET_POD_IP', value: podIP }
+            ],
+            command: config.commands?.migration || ['/app/multienvctl/entrypoints/migrate-database.sh'],
+            resources: {
+              requests: {
+                cpu: config.resources?.nsUtility?.cpuRequest || '100m',
+                memory: config.resources?.nsUtility?.memRequest || '256Mi'
+              },
+              limits: {
+                cpu: config.resources?.nsUtility?.cpuLimit || '500m',
+                memory: config.resources?.nsUtility?.memLimit || '512Mi'
+              }
+            }
+          }]
+        }
+      }
+    }
+  };
+}
+
 module.exports = {
   renderMongoDB,
   renderNightscout,
@@ -2184,5 +2321,6 @@ module.exports = {
   renderTenantReplicaSet,
   hashPodInputs,
   hashTenantInputs,
-  buildTenantPodMetadata
+  buildTenantPodMetadata,
+  renderMigrationJob
 };
