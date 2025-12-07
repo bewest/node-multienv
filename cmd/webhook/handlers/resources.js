@@ -2042,10 +2042,10 @@ function renderTenantReplicaSet(resourceName, namespace, spec, authSecret, keyfi
 /**
  * Render create-user Job to create MongoDB user with NS app credentials
  */
-function renderCreateUserJob(adminRefName, secretName, tenantId, namespace, storageAccount, mongoHostname, config) {
+function renderCreateUserJob(adminRefName, secretName, tenantId, namespace, storageAccount, mongoHostname, specHash, config) {
   // const namespace = secret.metadata.namespace;
   // const secretName = secret.metadata.name;
-  const jobName = `${storageAccount}-${tenantId}-create-user`;
+  const jobName = `${storageAccount}-${tenantId}-${specHash}-create-user`;
   const forceCreate = true;
   const utilityImagePullSecret = config.imagePullSecrets;
   

@@ -188,41 +188,9 @@ function createAppCredentialsInitDecoratorSync(config) {
   }
   
   function planCreateUserJob(req, res, next) {
-    if (req.alreadyInitialized) {
-      console.log('  Already initialized - no Job needed');
-      return next();
-    }
-    
+
     if (!req.mongoAuthSecret) {
       console.log('  mongo-auth Secret not found - cannot create user');
-      return next();
-    }
-    
-    const tenantIdForJob = req.tenantId || req.resourceName;
-    const createUserJobName = `${req.storageId}-${tenantIdForJob}-create-user`;
-    
-    // First, check for existing Job in attachments OR related (preserve existing Jobs)
-    const existingJobsAttachments = req.attachments['Job.batch/v1'] || {};
-    const existingJob = existingJobsAttachments[createUserJobName] || 
-                        findResource(req.related['Job.batch/v1'], j => j.metadata?.name === createUserJobName);
-    
-    if (existingJob && jobSucceeded(existingJob)) {
-      console.log('  Create-user Job succeeded - marking user initialized');
-      res.annotations['ns.mdn.io/user-initialized'] = new Date().toISOString();
-      // Preserve the completed Job (K8s TTL controller will clean it up)
-      res.attachments.push(cleanForAttachment(existingJob));
-      return next();
-    }
-    
-    if (existingJob) {
-      console.log('  Create-user Job exists but not succeeded - preserving');
-      res.attachments.push(cleanForAttachment(existingJob));
-      return next();
-    }
-    
-    // Gate on replica set initialized (either actually initialized, or not required)
-    if (!req.replicaSetInitialized) {
-      console.log('  Replica set not initialized yet - waiting before creating user');
       return next();
     }
     
@@ -232,9 +200,14 @@ function createAppCredentialsInitDecoratorSync(config) {
       return next();
     }
     
+    const tenantIdForJob = req.tenantId || req.resourceName;
+
     console.log(`  Rendering create-user Job → Pod IP: ${req.podIP}`);
-    
+
     const mongoHostname = req.podIP;
+    // const mongoHostname = `${req.tenantId}.backends.service.consul`;
+    var specHash = req.tenantPod.metadata.annotations?.['ns.mdn.io/spec-hash'];
+    req.specHash = specHash;
     
     const createUserJob = renderCreateUserJob(
       req.mongoAuthSecret.metadata.name,
@@ -243,6 +216,7 @@ function createAppCredentialsInitDecoratorSync(config) {
       req.namespace,
       req.storageId,
       mongoHostname,
+      specHash,
       config
     );
     
@@ -252,7 +226,38 @@ function createAppCredentialsInitDecoratorSync(config) {
       'ns.mdn.io/storage': req.storageId,
       ...(req.tenantId ? { 'ns.mdn.io/tenant': req.tenantId } : {})
     };
+    const createUserJobName = createUserJob.metadata.name;
     
+    // First, check for existing Job in attachments OR related (preserve existing Jobs)
+    const existingJobsAttachments = req.attachments['Job.batch/v1'] || {};
+    const existingJob = existingJobsAttachments[createUserJobName] || 
+                        findResource(req.related['Job.batch/v1'], j => j.metadata?.name === createUserJobName);
+    
+    if (!req.alreadyInitialized && existingJob && jobSucceeded(existingJob)) {
+      console.log('  Create-user Job succeeded - marking user initialized');
+      res.annotations['ns.mdn.io/user-initialized'] = new Date().toISOString();
+      // Preserve the completed Job (K8s TTL controller will clean it up)
+      // res.attachments.push(cleanForAttachment(existingJob));
+      // return next();
+    }
+    
+    if (existingJob) {
+      console.log('  Create-user Job exists but not succeeded - preserving');
+      // res.attachments.push(cleanForAttachment(existingJob));
+      // return next();
+    }
+
+    if (!existingJob && req.alreadyInitialized) {
+      console.log('  Already initialized - no Job needed');
+      return next();
+    }
+    
+    // Gate on replica set initialized (either actually initialized, or not required)
+    if (!req.replicaSetInitialized) {
+      console.log('  Replica set not initialized yet - waiting before creating user');
+      return next();
+    }
+
     res.attachments.push(createUserJob);
     return next();
   }
