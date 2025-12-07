@@ -1660,6 +1660,7 @@ function renderTenantPod(resourceName, namespace, spec, authSecret, keyfileSecre
     terminationGracePeriodSeconds: 30
   };
   
+  var userInitialized = appCredentialsSecret.metadata?.annotations?.['ns.mdn.io/user-initialized'];
   const pod = {
     apiVersion: 'v1',
     kind: 'Pod',
@@ -1669,6 +1670,7 @@ function renderTenantPod(resourceName, namespace, spec, authSecret, keyfileSecre
       labels: standardLabels,
       annotations: {
         // 'ns.mdn.io/user-initialized': userInitialized ? 'true' : 'false',
+        'ns.mdn.io/user-initialized': userInitialized,
         'ns.mdn.io/container-count': String(containers.length),
         'ns.mdn.io/spec-hash': specHash
       }

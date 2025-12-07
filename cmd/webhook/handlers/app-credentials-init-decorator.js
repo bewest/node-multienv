@@ -100,10 +100,7 @@ function createAppCredentialsInitDecoratorSync(config) {
   }
   
   function discoverMongoAuthSecret(req, res, next) {
-    if (req.alreadyInitialized) {
-      return next();
-    }
-    
+
     const secrets = req.related['Secret.v1'] || {};
     
     const mongoAuthSecret = findResource(secrets, s => 
@@ -150,17 +147,16 @@ function createAppCredentialsInitDecoratorSync(config) {
   }
   
   function discoverPod(req, res, next) {
-    if (req.alreadyInitialized) {
-      return next();
-    }
-    
+
     const pods = req.related['Pod.v1'] || {};
     
     const tenantPod = findResource(pods, p => 
       (p.metadata?.labels?.['ns.mdn.io/storage'] === req.storageId ||
        p.metadata?.labels?.['storage.nightscout.org/account'] === req.storageId) &&
       (p.metadata?.labels?.['app.kubernetes.io/component'] === 'tenant-pod' ||
-       p.metadata?.labels?.['app.kubernetes.io/component'] === 'database')
+       p.metadata?.labels?.['app.kubernetes.io/component'] === 'database') &&
+      (p.metadata?.annotations?.['ns.mdn.io/user-initialized'] ? false : true) && 
+      (p.status.phase == 'Running')
     );
     
     if (tenantPod) {
@@ -170,7 +166,7 @@ function createAppCredentialsInitDecoratorSync(config) {
         c.name === 'mongodb' && c.ready
       );
       
-      console.log(`  Pod found: ${tenantPod.metadata.name}`);
+      console.log(`  Pod found: ${tenantPod.metadata.name}, ${Object.keys(pods).length}`);
       console.log(`    Phase: ${podPhase}, IP: ${podIP || '(pending)'}`);
       console.log(`    MongoDB ready: ${!!containerReady}`);
       
@@ -186,20 +182,20 @@ function createAppCredentialsInitDecoratorSync(config) {
     
     return next();
   }
-  
+
   function planCreateUserJob(req, res, next) {
 
     if (!req.mongoAuthSecret) {
       console.log('  mongo-auth Secret not found - cannot create user');
       return next();
     }
-    
+
     // Only create new Job if Pod is ready
     if (!req.podReady || !req.podIP) {
       console.log(`  Pod not ready (ready: ${req.podReady}, IP: ${req.podIP}) - waiting`);
       return next();
     }
-    
+
     const tenantIdForJob = req.tenantId || req.resourceName;
 
     console.log(`  Rendering create-user Job → Pod IP: ${req.podIP}`);
@@ -208,7 +204,7 @@ function createAppCredentialsInitDecoratorSync(config) {
     // const mongoHostname = `${req.tenantId}.backends.service.consul`;
     var specHash = req.tenantPod.metadata.annotations?.['ns.mdn.io/spec-hash'];
     req.specHash = specHash;
-    
+
     const createUserJob = renderCreateUserJob(
       req.mongoAuthSecret.metadata.name,
       req.secret.metadata.name,

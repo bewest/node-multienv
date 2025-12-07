@@ -636,7 +636,7 @@ function createTenantCompositeSync(config) {
       });
       
       // Add status fields
-      res.status.storageType = storageType;
+      // res.status.storageType = storageType;
       res.status.databaseName = req.databaseName;
       res.status.connectionSecret = req.authSecret?.metadata?.name;
       res.status.observedGeneration = req.parent.metadata.generation;
@@ -664,7 +664,7 @@ function createTenantCompositeSync(config) {
     }
     
     // Compute enabled but missing prerequisites (PVC or auth secret)
-    if (!req.pvcExists || !req.authSecret) {
+    if (!req.pvcExists || !req.authSecret || !req.appCredentialsSecret) {
       console.log(`  Compute enabled but missing prerequisites`);
       console.log(`    PVC exists: ${req.pvcExists}, Auth secret: ${!!req.authSecret}`);
       
@@ -676,13 +676,13 @@ function createTenantCompositeSync(config) {
         message: `Waiting for: ${!req.pvcExists ? 'PVC ' : ''}${!req.authSecret ? 'mongo-auth secret' : ''}`
       });
       
-      res.status.storageType = storageType;
+      // res.status.storageType = storageType;
       res.status.databaseName = req.databaseName;
       res.status.connectionSecret = req.authSecret?.metadata?.name;
       res.status.observedGeneration = req.parent.metadata.generation;
       
       if (storageType == 'dedicated') {
-        console.log("MISSING PVC in dedicated mode, skipping");
+        console.log("MISSING one of the hashed inputs in dedicated mode, skipping for pod stability");
         return next();
       }
     }
@@ -904,7 +904,7 @@ function createTenantCompositeSync(config) {
     }
 
     // Add status fields
-    res.status.storageType = req.storageType || 'shared'; // Report effective storage mode
+    // res.status.storageType = req.storageType || 'shared'; // Report effective storage mode
     res.status.databaseName = req.databaseName;
     res.status.connectionSecret = req.authSecret?.metadata?.name;
     // res.status.pvcName = req.pvcName;
@@ -928,230 +928,6 @@ function createTenantCompositeSync(config) {
     res.send(response);
   }
 
-  /**
-   * Render shared mode Pod (Nightscout-only, external MongoDB)
-   * 
-   * In shared mode:
-   * - No MongoDB container (uses external MongoDB from ConfigMap)
-   * - No initialization Jobs needed (user already exists)
-   * - Environment comes directly from ConfigMap via envFrom
-   * - Compatible with Gen3 deployment-operator via role: config-as-deploy label
-   * 
-   * The ConfigMap is expected to contain MONGODB_URI or data.mongo
-   * for Nightscout to connect to the external database.
-   */
-  function renderSharedModePod(req, res, next, resourceName, spec, identityLabels) {
-    const namespace = req.namespace;
-    const computeConfigMap = req.computeConfigMap;
-    
-    // Compute spec hash for shared mode Pod
-    const specHash = hashTenantInputs({
-      annotations: req.parent.metadata?.annotations,
-      spec,
-      computeConfigMap,
-      storageType: 'shared',
-      identityLabels
-    });
-    
-    // Nightscout configuration from config
-    const nsImage = config.images?.nightscout || 'nightscout/cgm-remote-monitor:latest';
-    const nsImagePullPolicy = config.imagePullPolicies?.nightscout || 'IfNotPresent';
-    const nsCpuRequest = config.resources?.nightscout?.requests?.cpu || '50m';
-    const nsCpuLimit = config.resources?.nightscout?.limits?.cpu || '200m';
-    const nsMemRequest = config.resources?.nightscout?.requests?.memory || '128Mi';
-    const nsMemLimit = config.resources?.nightscout?.limits?.memory || '256Mi';
-    
-    const podName = `${resourceName}-${spec.tenant}-${specHash}-pod`;
-    
-    // Standard labels for the Pod
-    const standardLabels = {
-      'app.kubernetes.io/name': 'nightscout-tenant',
-      'app.kubernetes.io/component': 'tenant-pod',
-      'app.kubernetes.io/part-of': 'nightscout-tenant',
-      'app.kubernetes.io/instance': resourceName,
-      'app.kubernetes.io/managed-by': 'metacontroller',
-      'ns.mdn.io/composite': 'tenant', 
-      'ns.mdn.io/storage-type': 'shared',
-      ...identityLabels
-    };
-    
-    // Nightscout container - uses environment from ConfigMap
-    const nightscoutContainer = {
-      name: 'nightscout',
-      image: nsImage,
-      imagePullPolicy: nsImagePullPolicy,
-      ports: [
-        {
-          containerPort: 1337,
-          name: 'http'
-        }
-      ],
-      // Shared mode: envFrom only (MongoDB URI comes from ConfigMap)
-      // No explicit MONGO_CONNECTION override - use ConfigMap value
-      envFrom: [
-        {
-          configMapRef: {
-            name: spec.configMapRef.name
-          }
-        }
-      ],
-      readinessProbe: {
-        httpGet: {
-          path: '/api/v1/status.json',
-          port: 1337
-        },
-        initialDelaySeconds: 10,
-        periodSeconds: 10,
-        timeoutSeconds: 5,
-        failureThreshold: 3
-      },
-      resources: {
-        requests: {
-          cpu: nsCpuRequest,
-          memory: nsMemRequest
-        },
-        limits: {
-          cpu: nsCpuLimit,
-          memory: nsMemLimit
-        }
-      }
-    };
-    
-    const pod = {
-      apiVersion: 'v1',
-      kind: 'Pod',
-      metadata: {
-        name: podName,
-        namespace: namespace,
-        labels: standardLabels,
-        annotations: {
-          'ns.mdn.io/spec-hash': specHash,
-          'ns.mdn.io/storage-type': 'shared'
-        }
-      },
-      spec: {
-        containers: [nightscoutContainer],
-        restartPolicy: 'Always'
-      }
-    };
-    
-    res.children.push(pod);
-    
-    // Check existing Pod for status
-    const existingPod = findResource(req.children['Pod.v1'], podName, namespace);
-    const podReady = existingPod?.status?.conditions?.find(c => c.type === 'Ready' && c.status === 'True');
-    
-    console.log(`  Shared mode Pod: ${podName}, exists: ${!!existingPod}, ready: ${!!podReady}`);
-    
-    // Determine phase based on Pod state (no initialization gating for shared mode)
-    if (podReady) {
-      res.status.phase = 'Ready';
-      res.status.conditions.push({
-        type: 'Ready',
-        status: 'True',
-        reason: 'PodReady',
-        message: 'Tenant Pod is running with Nightscout container (shared MongoDB)'
-      });
-    } else {
-      res.status.phase = 'Pending';
-      res.status.conditions.push({
-        type: 'Ready',
-        status: 'False',
-        reason: 'WaitingForPod',
-        message: 'Waiting for Nightscout Pod to become ready'
-      });
-      
-      // Request requeue if not Ready
-      res.resyncAfterSeconds = 15;
-      console.log(`  Requesting requeue in 15 seconds (waiting for Pod)`);
-    }
-    
-    // Add status fields
-    res.status.storageType = 'shared';
-    res.status.observedGeneration = req.parent.metadata.generation;
-    
-    return next();
-  }
-
-  /**
-   * Stage 6a: ConfigMap enabled and userdata migration
-   * ConfigMap is related whenever compute is enabled
-   * Handles Gen3→Gen5 migration when requested
-   * 
-   */
-  function planUserDataMigration(req, res, next) {
-    if (!req.computeConfigMap) {
-      return next();
-    }
-    // No adoption at all.
-    return next();
-    
-    const resourceName = req.resourceName;
-    const namespace = req.namespace;
-    const configMap = req.computeConfigMap;
-    
-    // Non-migration case: Adopt ConfigMap as-is (normal operation)
-    if (!req.migrationRequested) {
-      console.log(`  Adopting ConfigMap as child (no migration)`);
-      const preservedConfigMap = renderPreservedConfigMap(configMap, resourceName, namespace);
-      res.children.push(preservedConfigMap);
-      return next();
-    }
-    
-    // Migration case: Handle Gen3→Gen5 userdata migration
-    console.log(`  Migration mode: handling ConfigMap adoption with userdata migration`);
-    
-    // Check if userdata migration already completed
-    const userDataMigrationCompleted = configMap.metadata?.annotations?.['nightscout.io/userdata-migration-completed'];
-    if (userDataMigrationCompleted) {
-      console.log(`  Userdata migration already completed at ${userDataMigrationCompleted} - rendering clean ConfigMap`);
-      
-      // Render clean ConfigMap without data.mongo (child of composite)
-      const cleanConfigMap = renderCleanConfigMap(configMap, resourceName, namespace);
-      res.children.push(cleanConfigMap);
-      return next();
-    }
-    
-    // Check if storage migration completed (annotation on mongo-auth Secret, not parent CR)
-    const storageMigrationCompleted = req.authSecret?.metadata?.annotations?.['nightscout.io/migration-completed'];
-    
-    if (!storageMigrationCompleted) {
-      console.log(`  Storage migration not yet completed - preserving Gen3 ConfigMap as-is`);
-      
-      // Preserve ConfigMap without modifications until storage migration completes (child of composite)
-      const preservedConfigMap = renderPreservedConfigMap(configMap, resourceName, namespace);
-      res.children.push(preservedConfigMap);
-      return next();
-    }
-    
-    console.log(`  Storage migration completed at ${storageMigrationCompleted} - executing userdata migration`);
-    
-    // Extract data.mongo URI before stripping
-    const mongoUri = extractMongoUri(configMap);
-    
-    if (mongoUri) {
-      console.log(`  Archiving data.mongo URI to annotation (length: ${mongoUri.length})`);
-      
-      // Archive mongo URI to ConfigMap annotation (child of composite)
-      const migratedConfigMap = renderMigratedConfigMap(
-        configMap,
-        resourceName,
-        namespace,
-        mongoUri
-      );
-      
-      res.children.push(migratedConfigMap);
-    } else {
-      console.log(`  WARNING: No data.mongo field found in Gen3 ConfigMap - marking migration complete anyway`);
-      
-      // No mongo URI to archive, just mark complete (child of composite)
-      const cleanConfigMap = renderCleanConfigMap(configMap, resourceName, namespace);
-      res.children.push(cleanConfigMap);
-    }
-    
-    return next();
-  }
-  
   // Return middleware pipeline (Gen5: two-phase provisioning with shared/dedicated modes)
   // 1. Initialize context from webhook request (includes storageType detection)
   // 2. Ensure MongoDB keyfile Secret (dedicated mode only)
@@ -1169,7 +945,6 @@ function createTenantCompositeSync(config) {
     reportStorageTypeStatus,
     ensureConfigMap,
     ensureAppCredentialsSecret,
-    // planUserDataMigration,
     assertPVCExists,
     renderChildren,
     sendResponse
