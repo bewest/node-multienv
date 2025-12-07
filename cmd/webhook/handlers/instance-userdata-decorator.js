@@ -1,56 +1,93 @@
 /**
- * Instance Userdata Decorator Controller
+ * Tenant Migration Decorator Controller
  * 
- * Orchestrates Gen 3 → Gen 4 userdata migration (Phase 2 of two-phase migration)
+ * Orchestrates shared → dedicated MongoDB data migration for Gen5 NightscoutTenants.
+ * Watches ConfigMaps (tenant configuration) and manages migration Jobs.
  * 
- * Target: ConfigMap with role=config-as-deploy label (Gen 3 user config)
+ * Target: ConfigMap with role=config-as-deploy label (tenant config)
  * Related Resources:
- *   - Deployments (Gen 4) - verify Gen 4 deployment health
- *   - ComputeInstance - storage migration status tracking
+ *   - Pods (for target MongoDB IP)
+ *   - Jobs (migration job tracking)
+ *   - Secrets (app-credentials for target MongoDB URI)
  * 
- * Two-Phase Migration Architecture:
- *   Phase 1 (Storage): Storage-Credentials decorator migrates MongoDB data
- *                      Sets nightscout.io/migration-completed on ComputeInstance
- *   Phase 2 (Userdata): Instance-Userdata decorator (this controller)
- *                       - Discovers ComputeInstance via customize hook
- *                       - Waits for storage migration completion annotation
- *                       - Archives ConfigMap (WITH mongo URI for rollback)
- *                       - Strips mongo URI from active ConfigMap
- *                       - Sets nightscout.io/userdata-migration-completed
+ * Migration Flow:
+ *   1. Tenant starts in shared mode (ConfigMap points to external MongoDB)
+ *   2. Operator requests migration via annotation: ns.mdn.io/migration-policy=auto
+ *   3. Provisioner creates dedicated infrastructure (mongo-auth Secret, PVC)
+ *   4. Tenant composite renders Pod with MongoDB container
+ *   5. This decorator detects ready Pod + app-credentials Secret
+ *   6. Renders migration Job to copy data from ConfigMap.data.mongo → dedicated MongoDB
+ *   7. On Job success, stamps ns.mdn.io/data-migrated on ConfigMap
+ *   8. Tenant composite reads annotation and switches to dedicated mode
  * 
- * Responsibilities:
- *   1. Watch Gen 3 ConfigMaps (role=config-as-deploy)
- *   2. Discover related ComputeInstance via customize hook
- *   3. Check storage migration completion (nightscout.io/migration-completed annotation)
- *   4. Guard against duplicate migrations (nightscout.io/userdata-migration-completed)
- *   5. Verify Gen 4 deployment health (readyReplicas > 0)
- *   6. When ready:
- *      - Archive complete ConfigMap to archive namespace (rollback capability)
- *      - Strip mongo URI from active ConfigMap (Gen4 uses Secret)
- *      - Set completion annotation on ConfigMap
+ * Annotation Schema (on ConfigMap):
+ *   ns.mdn.io/migration-policy:
+ *     - "auto": Migration runs automatically when prerequisites are met
+ *     - "manual": Migration waits for explicit trigger (ns.mdn.io/migration-phase=copying)
+ *     - "disabled": No migration (opt-out, stays on shared)
+ *     - (absent): No migration requested
+ *   
+ *   ns.mdn.io/migration-phase:
+ *     - "pending": Migration requested but prerequisites not met
+ *     - "copying": Migration Job running
+ *     - "completed": Migration succeeded
+ *     - "failed": Migration failed (check Job logs)
+ *   
+ *   ns.mdn.io/data-migrated: ISO timestamp when migration completed successfully
+ *   ns.mdn.io/migration-job-name: Name of the migration Job for audit
  * 
  * Key Design Points:
- *   - ConfigMap is parent resource (modify annotations without ownership changes)
- *   - Archive preserves mongo URI (data.mongo field) for rollback scenarios
- *   - Active ConfigMap becomes Compute Composite child (lifecycle-managed)
- *   - Idempotent (safe to reconcile multiple times)
- *   - Loosely coupled from Storage-Credentials via annotation signaling
+ *   - ConfigMap is the parent resource (annotations on ConfigMap, not CR)
+ *   - Stable Job name ({tenantId}-migrate-data) for audit trail
+ *   - Independent from init-replica-set and app-credentials-init decorators
+ *   - Idempotent: safe to reconcile multiple times
+ *   - Rollback capability: modify migration-policy to "disabled" to stay on shared
  */
 
-const { ANNOTATIONS, LABELS } = require('./constants');
+const { renderMigrationJob } = require('./resources');
 
-/**
- * Create instance userdata decorator with pipeline pattern
- */
 function createDecoratorSync(config) {
-  const ARCHIVE_NAMESPACE = config.archive?.namespace || 'archived-configs';
-  const GEN3_ROLE_LABEL = 'config-as-deploy';
+  
+  function findResource(collection, predicate) {
+    if (!collection) return null;
+    if (Array.isArray(collection)) {
+      return collection.find(predicate);
+    }
+    return Object.values(collection).find(predicate);
+  }
+  
+  function jobSucceeded(job) {
+    if (!job) return false;
+    const status = job.status || {};
+    return (status.succeeded || 0) > 0;
+  }
+  
+  function jobFailed(job) {
+    if (!job) return false;
+    const status = job.status || {};
+    const backoffLimit = job.spec?.backoffLimit || 3;
+    return (status.failed || 0) > backoffLimit;
+  }
+  
+  function cleanForAttachment(resource) {
+    if (!resource) return null;
+    const cleaned = JSON.parse(JSON.stringify(resource));
+    if (cleaned.metadata) {
+      delete cleaned.metadata.resourceVersion;
+      delete cleaned.metadata.uid;
+      delete cleaned.metadata.creationTimestamp;
+      delete cleaned.metadata.generation;
+      delete cleaned.metadata.managedFields;
+      delete cleaned.metadata.selfLink;
+    }
+    delete cleaned.status;
+    return cleaned;
+  }
   
   /**
    * Stage 1: Initialize context from webhook request
-   * Extracts ConfigMap parent, related resources, and tenant ID
    */
-  function initializeContext(req, res, next) {
+  function initialize(req, res, next) {
     const { object: configMap, related, attachments } = req.body;
     
     req.configMap = configMap;
@@ -59,17 +96,15 @@ function createDecoratorSync(config) {
     req.tenantId = configMap.metadata.labels?.tenant;
     req.namespace = configMap.metadata.namespace;
     
-    // Initialize response
     res.attachments = [];
-    res.labels = null;  // Will be set if label modification needed
-    res.annotations = null;  // Will be set if annotation modification needed
+    res.annotations = {};
     
-    console.log('Instance userdata decorator sync for ConfigMap:', configMap.metadata.name);
+    console.log('Tenant Migration Decorator: ConfigMap', configMap.metadata.name);
     console.log('  Tenant ID:', req.tenantId);
+    console.log('  Namespace:', req.namespace);
     
     if (!req.tenantId) {
-      console.log('  WARNING: No tenant label - cannot discover related resources');
-      // Skip pipeline - return empty response
+      console.log('  No tenant label - skipping');
       res.send({ attachments: [] });
       return;
     }
@@ -78,253 +113,254 @@ function createDecoratorSync(config) {
   }
   
   /**
-   * Stage 2: Parse related resources
-   * Find Gen 3 deployment, Gen 4 deployment, and ComputeInstance
+   * Stage 2: Check migration policy annotation
+   * Gates entire pipeline based on policy value
    */
-  function parseRelatedResources(req, res, next) {
-    // Extract deployments
-    const deployments = req.related['Deployment.apps/v1'] || {};
-    const deploymentList = Object.values(deployments);
+  function checkMigrationPolicy(req, res, next) {
+    const annotations = req.configMap.metadata?.annotations || {};
     
-    // Distinguish Gen 3 vs Gen 4 by presence of role=config-as-deploy label
-    req.gen3Deployment = deploymentList.find(d => 
-      d.metadata?.labels?.role === GEN3_ROLE_LABEL
-    );
+    req.migrationPolicy = annotations['ns.mdn.io/migration-policy'];
+    req.migrationPhase = annotations['ns.mdn.io/migration-phase'];
+    req.dataMigrated = annotations['ns.mdn.io/data-migrated'];
     
-    req.gen4Deployment = deploymentList.find(d => 
-      d.metadata?.labels?.role !== GEN3_ROLE_LABEL &&
-      d.metadata?.labels?.internal_name === req.tenantId
-    );
+    console.log('  Migration policy:', req.migrationPolicy || '(none)');
+    console.log('  Migration phase:', req.migrationPhase || '(none)');
+    console.log('  Data migrated:', req.dataMigrated || '(no)');
     
-    // Extract ComputeInstance
-    const computeInstances = req.related['ComputeInstance.nightscout.io/v1alpha1'] || {};
-    req.computeInstance = Object.values(computeInstances).find(ci =>
-      ci.metadata?.labels?.['compute.nightscout.org/instance'] === req.tenantId ||
-      ci.metadata?.name === req.tenantId
-    );
-    
-    console.log('  Gen 3 deployment:', req.gen3Deployment?.metadata?.name || 'not found');
-    console.log('  Gen 4 deployment:', req.gen4Deployment?.metadata?.name || 'not found');
-    console.log('  ComputeInstance:', req.computeInstance?.metadata?.name || 'not found');
-    
-    return next();
-  }
-  
-  /**
-   * Stage 3: Evaluate migration readiness
-   * Check if storage migration completed and userdata migration not yet done
-   */
-  function evaluateReadiness(req, res, next) {
-    req.ready = false;
-    
-    // Guard: Check if userdata migration already completed
-    const userdataMigrationCompleted = req.configMap?.metadata?.annotations?.['nightscout.io/userdata-migration-completed'];
-    
-    if (userdataMigrationCompleted) {
-      console.log('  Userdata migration already completed at:', userdataMigrationCompleted);
-      console.log('  Skipping pipeline');
+    if (req.dataMigrated) {
+      console.log('  Migration already completed - no-op');
       res.send({ attachments: [] });
       return;
     }
     
-    // Check storage migration completed via annotation
-    const storageMigrationCompleted = req.computeInstance?.metadata?.annotations?.['nightscout.io/migration-completed'];
-    
-    if (!storageMigrationCompleted) {
-      console.log('  Storage migration not completed - skipping userdata migration');
-      console.log('  ComputeInstance annotations:', req.computeInstance?.metadata?.annotations || 'none');
-      return next();
+    if (!req.migrationPolicy) {
+      console.log('  No migration policy set - skipping');
+      res.send({ attachments: [] });
+      return;
     }
     
-    // Check Gen 4 deployment health (must be healthy before proceeding)
-    const gen4Healthy = req.gen4Deployment?.status?.readyReplicas > 0;
+    if (req.migrationPolicy === 'disabled') {
+      console.log('  Migration disabled - skipping');
+      res.send({ attachments: [] });
+      return;
+    }
     
-    console.log('  Readiness checks:');
-    console.log('    Storage migration completed:', storageMigrationCompleted);
-    console.log('    Userdata migration completed:', userdataMigrationCompleted);
-    console.log('    Gen 4 healthy:', gen4Healthy, `(${req.gen4Deployment?.status?.readyReplicas || 0} replicas)`);
-    
-    // Ready if storage migration done and Gen 4 is healthy
-    req.ready = storageMigrationCompleted && gen4Healthy;
-    
-    console.log('  Ready for userdata migration:', req.ready);
+    if (req.migrationPolicy !== 'auto' && req.migrationPolicy !== 'manual') {
+      console.log(`  Unknown migration policy: ${req.migrationPolicy} - skipping`);
+      res.send({ attachments: [] });
+      return;
+    }
     
     return next();
   }
   
   /**
-   * Stage 4: Plan ConfigMap archive and mongo URI cleanup (if ready)
-   * Creates archived copy (WITH mongo URI for rollback) and strips mongo URI from active ConfigMap
+   * Stage 3: Discover related resources
+   * Find tenant Pod (for MongoDB IP) and app-credentials Secret
    */
-  function planArchiveConfigMap(req, res, next) {
-    if (!req.ready) {
-      console.log('  Skipping archive - not ready');
-      return next();
+  function discoverResources(req, res, next) {
+    const pods = req.related['Pod.v1'] || {};
+    const secrets = req.related['Secret.v1'] || {};
+    const jobs = req.attachments['Job.batch/v1'] || {};
+    
+    req.tenantPod = findResource(pods, p =>
+      p.metadata?.labels?.tenant === req.tenantId &&
+      (p.metadata?.labels?.['app.kubernetes.io/component'] === 'tenant-pod' ||
+       p.metadata?.labels?.['ns.mdn.io/storage'] === req.tenantId)
+    );
+    
+    const appCredentialsName = `${req.tenantId}-app-credentials`;
+    req.appCredentialsSecret = findResource(secrets, s =>
+      s.metadata?.name === appCredentialsName
+    );
+    
+    const migrationJobName = `${req.tenantId}-migrate-data`;
+    req.existingMigrationJob = jobs[migrationJobName] || 
+      findResource(req.related['Job.batch/v1'], j => j.metadata?.name === migrationJobName);
+    
+    console.log('  Tenant Pod:', req.tenantPod?.metadata?.name || '(not found)');
+    console.log('  App-credentials Secret:', req.appCredentialsSecret?.metadata?.name || '(not found)');
+    console.log('  Existing migration Job:', req.existingMigrationJob?.metadata?.name || '(none)');
+    
+    if (req.tenantPod) {
+      req.podIP = req.tenantPod.status?.podIP;
+      req.podPhase = req.tenantPod.status?.phase;
+      const mongoReady = req.tenantPod.status?.containerStatuses?.find(c =>
+        c.name === 'mongodb' && c.ready
+      );
+      req.mongoReady = !!mongoReady;
+      
+      console.log('    Pod phase:', req.podPhase);
+      console.log('    Pod IP:', req.podIP || '(pending)');
+      console.log('    MongoDB container ready:', req.mongoReady);
     }
-    
-    console.log('  Planning ConfigMap archival and mongo URI cleanup');
-    
-    // Guard against missing data field
-    const sourceData = req.configMap.data || {};
-    
-    // Create archived copy in archive namespace (preserves mongo URI for rollback)
-    const archiveName = `${req.tenantId}-gen3-backup`;
-    const archivedConfigMap = {
-      apiVersion: 'v1',
-      kind: 'ConfigMap',
-      metadata: {
-        name: archiveName,
-        namespace: ARCHIVE_NAMESPACE,
-        labels: {
-          'tenant': req.tenantId,
-          'nightscout.io/tenant': req.tenantId,
-          'ns.mdn.io/archived': 'true',
-          'ns.mdn.io/archived-from': 'gen3'
-        },
-        annotations: {
-          'ns.mdn.io/archived-at': new Date().toISOString(),
-          'ns.mdn.io/original-namespace': req.namespace,
-          'ns.mdn.io/original-name': req.configMap.metadata.name
-        }
-      },
-      data: { ...sourceData }  // Full copy including MONGODB_URI
-    };
-    
-    res.attachments.push(archivedConfigMap);
-    console.log(`  Created archived ConfigMap: ${ARCHIVE_NAMESPACE}/${archiveName}`);
-    
-    // Return modified ConfigMap with MONGODB_URI stripped (Gen4 uses Secret for credentials)
-    const strippedConfigMap = {
-      apiVersion: 'v1',
-      kind: 'ConfigMap',
-      metadata: {
-        name: req.configMap.metadata.name,
-        namespace: req.namespace,
-        labels: { ...(req.configMap.metadata.labels || {}) },
-        annotations: { ...(req.configMap.metadata.annotations || {}) }
-      },
-      data: { ...sourceData }
-    };
-    
-    // Remove sensitive MongoDB URI (Gen4 uses app-credentials Secret instead)
-    // Gen3 ConfigMaps store the URI under the 'mongo' key
-    delete strippedConfigMap.data.mongo;
-    
-    res.attachments.push(strippedConfigMap);
-    console.log('  Stripped mongo URI from active ConfigMap');
-    
-    // Set completion annotation on ConfigMap (signals userdata migration done)
-    res.annotations = res.annotations || {};
-    res.annotations['nightscout.io/userdata-migration-completed'] = new Date().toISOString();
-    console.log('  Set userdata-migration-completed annotation');
     
     return next();
   }
   
   /**
-   * Stage 5: Plan label adjustment (if ready)
-   * Remove role=config-as-deploy label to retire Gen 3
+   * Stage 4: Evaluate prerequisites for migration
    */
-  function planLabelAdjustment(req, res, next) {
-    if (!req.ready) {
-      console.log('  Skipping label adjustment - not ready');
-      return next();
-    }
-    
-    // Check if already migrated (label already removed)
-    const currentRole = req.configMap.metadata.labels?.role;
-    if (currentRole !== GEN3_ROLE_LABEL) {
-      console.log(`  Already migrated - role label is "${currentRole}"`);
-      return next();
-    }
-    
-    // Plan label removal
-    res.labels = {
-      role: 'dedicated',  // Remove config-as-deploy label
-      // 'nightscout.io/migrated-at': new Date().toISOString()
+  function evaluatePrerequisites(req, res, next) {
+    req.prerequisites = {
+      hasPod: !!req.tenantPod,
+      podRunning: req.podPhase === 'Running',
+      hasPodIP: !!req.podIP,
+      mongoReady: req.mongoReady,
+      hasAppCredentials: !!req.appCredentialsSecret,
+      hasSourceMongo: !!req.configMap.data?.mongo
     };
     
-    console.log('  Planned label removal: role=config-as-deploy → null');
+    req.prerequisitesMet = Object.values(req.prerequisites).every(v => v);
+    
+    console.log('  Prerequisites:', JSON.stringify(req.prerequisites));
+    console.log('  All prerequisites met:', req.prerequisitesMet);
+    
+    if (!req.prerequisitesMet) {
+      if (!req.migrationPhase || req.migrationPhase !== 'pending') {
+        res.annotations['ns.mdn.io/migration-phase'] = 'pending';
+      }
+    }
     
     return next();
   }
   
   /**
-   * Stage 6: Assemble final response
-   * Return attachments, annotations, and label modifications to Metacontroller
+   * Stage 5: Plan migration Job
+   * Renders or preserves migration Job based on state
    */
-  function assembleResponse(req, res, next) {
+  function planMigrationJob(req, res, next) {
+    const migrationJobName = `${req.tenantId}-migrate-data`;
+    
+    if (req.existingMigrationJob) {
+      if (jobSucceeded(req.existingMigrationJob)) {
+        console.log('  Migration Job succeeded - marking data migrated');
+        res.annotations['ns.mdn.io/data-migrated'] = new Date().toISOString();
+        res.annotations['ns.mdn.io/migration-phase'] = 'completed';
+        res.annotations['ns.mdn.io/migration-job-name'] = migrationJobName;
+        res.attachments.push(cleanForAttachment(req.existingMigrationJob));
+        return next();
+      }
+      
+      if (jobFailed(req.existingMigrationJob)) {
+        console.log('  Migration Job failed - marking phase failed');
+        res.annotations['ns.mdn.io/migration-phase'] = 'failed';
+        res.attachments.push(cleanForAttachment(req.existingMigrationJob));
+        return next();
+      }
+      
+      console.log('  Migration Job in progress - preserving');
+      res.annotations['ns.mdn.io/migration-phase'] = 'copying';
+      res.attachments.push(cleanForAttachment(req.existingMigrationJob));
+      return next();
+    }
+    
+    if (!req.prerequisitesMet) {
+      console.log('  Prerequisites not met - cannot render migration Job');
+      return next();
+    }
+    
+    if (req.migrationPolicy === 'manual' && req.migrationPhase !== 'copying') {
+      console.log('  Manual policy requires explicit phase=copying to start');
+      return next();
+    }
+    
+    console.log('  Rendering new migration Job');
+    console.log(`    Source: ConfigMap ${req.configMap.metadata.name} (data.mongo)`);
+    console.log(`    Target: Secret ${req.appCredentialsSecret.metadata.name} → Pod IP ${req.podIP}`);
+    
+    const migrationJob = renderMigrationJob({
+      tenantId: req.tenantId,
+      namespace: req.namespace,
+      configMapName: req.configMap.metadata.name,
+      appCredentialsSecretName: req.appCredentialsSecret.metadata.name,
+      podIP: req.podIP,
+      labels: {
+        tenant: req.tenantId,
+        'app.kubernetes.io/part-of': 'nightscout-tenant'
+      }
+    }, config);
+    
+    res.attachments.push(migrationJob);
+    res.annotations['ns.mdn.io/migration-phase'] = 'copying';
+    res.annotations['ns.mdn.io/migration-job-name'] = migrationJobName;
+    
+    console.log('  Migration Job rendered:', migrationJobName);
+    
+    return next();
+  }
+  
+  /**
+   * Stage 6: Format decorator response
+   */
+  function formatResponse(req, res, next) {
+    const hasAnnotationChanges = Object.keys(res.annotations).length > 0;
+    const hasAttachments = res.attachments.length > 0;
+    
+    if (!hasAnnotationChanges && !hasAttachments) {
+      console.log('  No changes - returning no-op');
+      res.send({ attachments: [] });
+      return;
+    }
+    
     const response = {
       attachments: res.attachments
     };
     
-    // Only include labels if modifications planned
-    if (res.labels) {
-      response.labels = res.labels;
-    }
-    
-    // Only include annotations if modifications planned
-    if (res.annotations) {
+    if (hasAnnotationChanges) {
       response.annotations = res.annotations;
     }
     
     console.log('  Response:', {
-      attachments: response.attachments.length,
-      labelModifications: res.labels ? Object.keys(res.labels).length : 0,
-      annotationModifications: res.annotations ? Object.keys(res.annotations).length : 0
+      attachments: res.attachments.length,
+      annotations: hasAnnotationChanges ? Object.keys(res.annotations) : []
     });
     
-    res.json(response);
+    res.send(response);
   }
   
-  // Define sync pipeline
   const sync = [
-    initializeContext,
-    parseRelatedResources,
-    evaluateReadiness,
-    planArchiveConfigMap,
-    planLabelAdjustment,
-    assembleResponse
+    initialize,
+    checkMigrationPolicy,
+    discoverResources,
+    evaluatePrerequisites,
+    planMigrationJob,
+    formatResponse
   ];
   
   /**
    * Customize hook: Discover related resources dynamically
-   * Returns label selectors for Deployments and ComputeInstance
+   * Returns selectors for Pods, Jobs, and Secrets
    */
-  function customize_userdata_related(req, res, next) {
+  function customizeMigrationRelated(req, res, next) {
     const { parent } = req.body;
     const tenantId = parent.metadata?.labels?.tenant;
     
-    console.log('Instance userdata decorator customize for ConfigMap:', parent.metadata?.name);
+    console.log('Tenant Migration Decorator customize: ConfigMap', parent.metadata?.name);
     console.log('  Tenant ID:', tenantId);
     
     if (!tenantId) {
-      // No tenant ID - cannot discover related resources
-      console.log('  WARNING: No tenant label - returning empty relatedResources');
+      console.log('  No tenant label - returning empty relatedResources');
       return res.json({ relatedResources: [] });
     }
     
     const relatedResources = [
-      // Both Gen 3 and Gen 4 deployments (distinguished by role label in sync)
       {
-        apiVersion: 'apps/v1',
-        resource: 'deployments',
+        apiVersion: 'v1',
+        resource: 'pods',
         labelSelector: {
           matchLabels: {
-            internal_name: tenantId,
-            app: 'deployment'
+            tenant: tenantId
           }
         }
       },
-      
-      // ComputeInstance for migration status
       {
-        apiVersion: 'nightscout.io/v1alpha1',
-        resource: 'computeinstances',
+        apiVersion: 'v1',
+        resource: 'secrets',
         labelSelector: {
           matchExpressions: [
             {
-              key: 'nightscout.io/tenant',
+              key: 'tenant',
               operator: 'In',
               values: [tenantId]
             }
@@ -338,21 +374,9 @@ function createDecoratorSync(config) {
     res.json({ relatedResources });
   }
   
-  const customize = [customize_userdata_related];
+  const customize = [customizeMigrationRelated];
   
   return { sync, customize };
-}
-
-/**
- * Helper: Check if CRD status has specific condition set to True
- */
-function hasCondition(resource, conditionType) {
-  if (!resource?.status?.conditions) {
-    return false;
-  }
-  
-  const condition = resource.status.conditions.find(c => c.type === conditionType);
-  return condition?.status === 'True';
 }
 
 module.exports = createDecoratorSync;

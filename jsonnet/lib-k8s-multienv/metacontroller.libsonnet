@@ -331,7 +331,9 @@
       resyncPeriodSeconds=resyncPeriodSeconds,
     ),
 
-  // Instance Userdata Decorator (ConfigMap Migration → Gen 3 to Gen 4 Cutover)
+  // Tenant Migration Decorator (ConfigMap → Shared to Dedicated Migration)
+  // Watches tenant ConfigMaps and orchestrates data migration Jobs
+  // Annotations on ConfigMap control migration: ns.mdn.io/migration-policy, ns.mdn.io/migration-phase
   instanceUserdataDecorator(
     webhookServiceUrl='http://webhook-service:3000',
     crdGroup='nightscout.io',
@@ -339,7 +341,7 @@
     resyncPeriodSeconds=30,
   )::
     $.decoratorController(
-      name='instance-userdata-decorator',
+      name='tenant-migration-decorator',
       webhookUrl=webhookServiceUrl + '/decorator/instance-userdata/sync',
       customizeUrl=webhookServiceUrl + '/decorator/instance-userdata/customize',
       resources=[
@@ -348,8 +350,18 @@
           resource: 'configmaps',
           labelSelector: {
             matchLabels: {
-              role: 'config-as-deploy',  // Gen 3 ConfigMaps only
+              role: 'config-as-deploy',  // Tenant ConfigMaps
             },
+          },
+        },
+      ],
+      // Migration Jobs are rendered as attachments
+      attachments=[
+        {
+          apiVersion: 'batch/v1',
+          resource: 'jobs',
+          updateStrategy: {
+            method: 'InPlace',
           },
         },
       ],
