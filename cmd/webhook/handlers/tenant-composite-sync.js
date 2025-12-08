@@ -681,10 +681,9 @@ function createTenantCompositeSync(config) {
       res.status.connectionSecret = req.authSecret?.metadata?.name;
       res.status.observedGeneration = req.parent.metadata.generation;
       
-      if (storageType == 'dedicated') {
         console.log("MISSING one of the hashed inputs in dedicated mode, skipping for pod stability");
         return next();
-      }
+      // if (storageType == 'dedicated') { }
     }
 
     // Read initialization state from Secrets (set by decorators)

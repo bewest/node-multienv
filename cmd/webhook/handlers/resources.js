@@ -1444,27 +1444,29 @@ function renderTenantPod(resourceName, namespace, spec, computeConfigMap, authSe
   if (opts.compute) {
     var envFrom = [
       {
-        secretRef: {
-          name: appCredentialsSecretName
-        }
-      },
-      {
         configMapRef: {
           name: spec.configMapRef.name
         // , optional: true
         }
       }
     ];
-    var envMap = [ ];
-    if (!opts.authSecretFirst) {
-      envFrom.reverse( );
-    } else {
+    if (!opts.skipDedicatedMongoString) {
+      envFrom.push({
+        secretRef: {
+          name: appCredentialsSecretName
+        }
+      });
       envMap.push(
         {
-          name: 'MONGO_CONNECTION',
+          name: 'mongo',
           value: 'mongodb://$(MONGO_USERNAME):$(MONGO_PASSWORD)@localhost:27017/$(MONGO_DATABASE)?authSource=$(MONGO_DATABASE)'
         }
       );
+    }
+    var envMap = [ ];
+    if (!opts.authSecretFirst) {
+      // envFrom.reverse( );
+    } else {
     }
 
     const nightscoutContainer = {
@@ -1586,7 +1588,7 @@ function renderTenantPod(resourceName, namespace, spec, computeConfigMap, authSe
 
   
   // Init container to prepare keyfile
-  const initContainers = [
+  const initContainers = !opts.storage ? null : [
     {
       name: 'prepare-keyfile',
       image: utilityImage,
@@ -1620,7 +1622,7 @@ function renderTenantPod(resourceName, namespace, spec, computeConfigMap, authSe
   ];
   
   // Volumes
-  const volumes = [
+  const volumes = !opts.storage ? null : [
     {
       name: 'data',
       persistentVolumeClaim: {
@@ -1660,7 +1662,7 @@ function renderTenantPod(resourceName, namespace, spec, computeConfigMap, authSe
     terminationGracePeriodSeconds: 30
   };
   
-  var userInitialized = appCredentialsSecret.metadata?.annotations?.['ns.mdn.io/user-initialized'];
+  var userInitialized = appCredentialsSecret?.metadata?.annotations?.['ns.mdn.io/user-initialized'];
   var migrationPhase = computeConfigMap.metadata?.annotations?.['ns.mdn.io/migration-phase'];
   const pod = {
     apiVersion: 'v1',
