@@ -774,13 +774,7 @@ function configure (opts) {
       validPodCheckUrl = url.format({ protocol: healthCheckService.protocol, hostname: host, port: healthCheckService.port,  pathname: ('/healthchecks/pod/' + tenantName + '/assigned/POD_UID/' + id)});
     }
     var port = 1337;
-    var insert = {
-      name: 'backends',
-      address: host,
-      port: port,
-      id: id,
-      tags: [ tenantName, serviceID, 'tenant', 'backend' ],
-      checks: [ {
+    var checks = [ {
         name: "EndpointAvailable",
         ttl: '30s',
         interval: '10s',
@@ -795,7 +789,38 @@ function configure (opts) {
         failures_before_critical: 1,
         deregister_critical_service_after: '5s'
       },
-      ]
+    ];
+    if (serviceData.metadata?.annotations?.['ns.mdn.io/healthCheck'] == 'pod') {
+      checks = [{
+        name: "ValidPodName",
+        ttl: '10s',
+        interval: '5s',
+        http: validPodCheckUrl,
+        failures_before_critical: 1,
+        deregister_critical_service_after: '5s'
+      }];
+      if (serviceData.metadata?.annotations?.['ns.mdn.io/compute-runtime'] == 'enabled') {
+        checks.push({
+        name: "EndpointAvailable",
+        ttl: '30s',
+        interval: '10s',
+        http: url.format({protocol: 'http', hostname: host, port: port,  pathname: '/api/v1/status.txt'}),
+        deregister_critical_service_after: '20s'
+      }
+        );
+      }
+      if (serviceData.metadata?.annotations?.['ns.mdn.io/storage-runtime'] == 'enabled') {
+        // checks.push();
+      }
+    }
+
+    var insert = {
+      name: 'backends',
+      address: host,
+      port: port,
+      id: id,
+      tags: [ tenantName, serviceID, 'tenant', 'backend' ],
+      checks
     };
     consul.agent.service.register(insert, function (err, body, resp) {
       console.log("CREATED BACKEND SITE IN CONSUL", err, insert);
