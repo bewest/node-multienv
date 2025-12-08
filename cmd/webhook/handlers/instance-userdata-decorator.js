@@ -119,7 +119,7 @@ function createDecoratorSync(config) {
   function checkMigrationPolicy(req, res, next) {
     const annotations = req.configMap.metadata?.annotations || {};
     
-    req.migrationPolicy = annotations['ns.mdn.io/migration-policy'];
+    req.migrationPolicy = annotations['ns.mdn.io/migration-policy'] || config.migration.default_migration_policy;
     req.migrationPhase = annotations['ns.mdn.io/migration-phase'];
     req.dataMigrated = annotations['ns.mdn.io/data-migrated'];
     
@@ -166,7 +166,9 @@ function createDecoratorSync(config) {
     req.tenantPod = findResource(pods, p =>
       p.metadata?.labels?.tenant === req.tenantId &&
       (p.metadata?.labels?.['app.kubernetes.io/component'] === 'tenant-pod' ||
-       p.metadata?.labels?.['ns.mdn.io/storage'] === req.tenantId)
+       p.metadata?.labels?.['ns.mdn.io/storage'] === req.tenantId) &&
+       (p.metadata?.annotations?.['ns.mdn.io/migration-phase'] === 'copying' ) &&
+       (p.status.phase === 'Running')
     );
     
     const appCredentialsName = `${req.tenantId}-app-credentials`;
@@ -216,12 +218,6 @@ function createDecoratorSync(config) {
     console.log('  Prerequisites:', JSON.stringify(req.prerequisites));
     console.log('  All prerequisites met:', req.prerequisitesMet);
     
-    if (!req.prerequisitesMet) {
-      if (!req.migrationPhase || req.migrationPhase !== 'pending') {
-        res.annotations['ns.mdn.io/migration-phase'] = 'pending';
-      }
-    }
-    
     return next();
   }
   
@@ -237,7 +233,8 @@ function createDecoratorSync(config) {
         console.log('  Migration Job succeeded - marking data migrated');
         res.annotations['ns.mdn.io/data-migrated'] = new Date().toISOString();
         res.annotations['ns.mdn.io/migration-phase'] = 'completed';
-        res.annotations['ns.mdn.io/migration-job-name'] = migrationJobName;
+        res.labels['role'] = 'dedicated';
+        // res.annotations['ns.mdn.io/migration-job-name'] = migrationJobName;
         res.attachments.push(cleanForAttachment(req.existingMigrationJob));
         return next();
       }
@@ -250,7 +247,7 @@ function createDecoratorSync(config) {
       }
       
       console.log('  Migration Job in progress - preserving');
-      res.annotations['ns.mdn.io/migration-phase'] = 'copying';
+      // res.annotations['ns.mdn.io/migration-phase'] = 'copying';
       res.attachments.push(cleanForAttachment(req.existingMigrationJob));
       return next();
     }
@@ -260,7 +257,13 @@ function createDecoratorSync(config) {
       return next();
     }
     
+    if (req.migrationPolicy === 'auto' && config.migration.auto_migrate_role && req.migrationPhase !== 'copying') {
+      if (req.configMap.metadata.labels.role == config.migration.auto_migrate_role) {
+        res.annotations['ns.mdn.io/migration-phase'] = 'copying';
+      }
+    }
     if (req.migrationPolicy === 'manual' && req.migrationPhase !== 'copying') {
+      res.annotations['ns.mdn.io/migration-phase'] = 'copying';
       console.log('  Manual policy requires explicit phase=copying to start');
       return next();
     }
@@ -282,8 +285,8 @@ function createDecoratorSync(config) {
     }, config);
     
     res.attachments.push(migrationJob);
-    res.annotations['ns.mdn.io/migration-phase'] = 'copying';
-    res.annotations['ns.mdn.io/migration-job-name'] = migrationJobName;
+    // res.annotations['ns.mdn.io/migration-phase'] = 'copying';
+    // res.annotations['ns.mdn.io/migration-job-name'] = migrationJobName;
     
     console.log('  Migration Job rendered:', migrationJobName);
     
@@ -350,6 +353,7 @@ function createDecoratorSync(config) {
         resource: 'pods',
         labelSelector: {
           matchLabels: {
+            'ns.mdn.io/composite': 'tenant',
             tenant: tenantId
           }
         }
@@ -360,7 +364,17 @@ function createDecoratorSync(config) {
         labelSelector: {
           matchExpressions: [
             {
-              key: 'tenant',
+              key: 'ns.mdn.io/credential-type',
+              operator: 'In',
+              values: ['application']
+            },
+            {
+              key: 'ns.mdn.io/composite',
+              operator: 'In',
+              values: ['tenant']
+            },
+            {
+              key: 'ns.mdn.io/tenant',
               operator: 'In',
               values: [tenantId]
             }

@@ -361,7 +361,7 @@
           apiVersion: 'batch/v1',
           resource: 'jobs',
           updateStrategy: {
-            method: 'InPlace',
+            method: 'Recreate',
           },
         },
       ],
@@ -622,7 +622,7 @@
       crdVersion=crdVersion,
       resyncPeriodSeconds=initializationResyncSeconds,
     ),
-    instanceUserdata:: $.instanceUserdataDecorator(
+    instanceUserdata: $.instanceUserdataDecorator(
       webhookServiceUrl=webhookServiceUrl,
       crdGroup=crdGroup,
       crdVersion=crdVersion,

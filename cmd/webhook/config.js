@@ -209,6 +209,8 @@ const config = {
 
   // Migration configuration
   migration: {
+    default_migration_policy: process.env.DEFAULT_MIGRATION_POLICY || 'auto',
+    auto_migrate_role: process.env.AUTO_MIGRATE_ROLE || 'config-as-deploy',
     timeout: parseInt(process.env.MIGRATION_TIMEOUT || '3600', 10), // seconds
     backoffLimit: parseInt(process.env.MIGRATION_BACKOFF_LIMIT || '3', 10),
   },

@@ -1288,7 +1288,7 @@ function hashPodInputs(params) {
  * @param {string} specHash - Pre-computed spec hash (from hashPodInputs)
  * @returns {object} Pod manifest
  */
-function renderTenantPod(resourceName, namespace, spec, authSecret, keyfileSecret, appCredentialsSecret, opts, identityLabels, config, specHash) {
+function renderTenantPod(resourceName, namespace, spec, computeConfigMap, authSecret, keyfileSecret, appCredentialsSecret, opts, identityLabels, config, specHash) {
   const podName = `${resourceName}-${spec.tenant}-${specHash}-pod`;
   const pvcName = spec.pvcName || `${resourceName}-data`;
   
@@ -1661,6 +1661,7 @@ function renderTenantPod(resourceName, namespace, spec, authSecret, keyfileSecre
   };
   
   var userInitialized = appCredentialsSecret.metadata?.annotations?.['ns.mdn.io/user-initialized'];
+  var migrationPhase = computeConfigMap.metadata?.annotations?.['ns.mdn.io/migration-phase'];
   const pod = {
     apiVersion: 'v1',
     kind: 'Pod',
@@ -1671,6 +1672,12 @@ function renderTenantPod(resourceName, namespace, spec, authSecret, keyfileSecre
       annotations: {
         // 'ns.mdn.io/user-initialized': userInitialized ? 'true' : 'false',
         'ns.mdn.io/user-initialized': userInitialized,
+        'ns.mdn.io/migration-phase': migrationPhase,
+        'ns.mdn.io/compute-runtime': opts.compute ? 'enabled' : 'disabled',
+        'ns.mdn.io/storage-runtime': opts.storage ? 'enabled' : 'disabled',
+        'ns.mdn.io/healthCheck': opts.healthCheck ? 'pod' : 'fixed',
+        'ns.mdn.io/initialStorageType': spec.initialStorageType,
+        'ns.mdn.io/storageType': opts.storageType,
         'ns.mdn.io/container-count': String(containers.length),
         'ns.mdn.io/spec-hash': specHash
       }

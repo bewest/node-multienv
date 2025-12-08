@@ -794,6 +794,7 @@ function createTenantCompositeSync(config) {
       var skipDedicatedMongoString = spec.initialStorageType == 'shared' && !migrationComplete;
       var render_opts = {
         healthCheck: true,
+        storageType: req.storageType,
         storage: req.storageType == 'dedicated' || req.migrationRequested,
         compute: spec.initialStorageType == 'shared' || dedicatedReady,
         authSecretFirst: spec.initialStorageType == 'shared' && (req.migrationRequested && !migrationComplete),
@@ -806,6 +807,7 @@ function createTenantCompositeSync(config) {
         resourceName,
         req.namespace,
         spec,
+        req.computeConfigMap,
         req.authSecret,
         req.keyfileSecret,
         req.appCredentialsSecret,
