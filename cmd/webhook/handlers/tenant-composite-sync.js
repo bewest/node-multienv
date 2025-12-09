@@ -160,26 +160,16 @@ function createTenantCompositeSync(config) {
     req.tenantId = req.spec.tenant || parent.metadata.name; // Fallback to CR name if tenant not yet set
     req.tenantSet = !!req.spec.tenant; // Track if tenant ID was explicitly set
     
-    // Storage type detection (early - needed for keyfile and Pod rendering)
-    // Priority: annotation override > spec.initStorageType > default 'dedicated'
-    const initStorageType = req.spec?.initialStorageType;
-    const runtimeRequired = parent.metadata?.annotations?.['ns.mdn.io/runtime-required'];
-    req.storageType = runtimeRequired || initStorageType || 'dedicated';
-    
-    // Migration detection
-    req.migrationRequested = parent.metadata?.annotations?.['nightscout.io/migrate-to-dedicated'] === 'true';
-    req.credentialsRequested = req.storageType === 'dedicated' || req.migrationRequested;
     
     // Initialize response
     res.children = [];
     res.status = { phase: 'Pending', conditions: [] };
     
+    const initStorageType = req.spec?.initialStorageType;
     console.log("INCOMING CONTEXT", JSON.stringify(req.body, null, 2));
     console.log(`Tenant composite sync for resource: ${req.resourceName}`);
     console.log(`  Storage ID: ${req.storageId}`);
     console.log(`  Tenant ID: ${req.tenantId} (explicit: ${req.tenantSet})`);
-    console.log(`  Storage type: ${req.storageType} (initStorageType: ${initStorageType}, override: ${runtimeRequired})`);
-    console.log(`  Migration requested: ${req.migrationRequested}`);
     
     // Validate required spec.storage field
     if (!req.storageId) {
@@ -444,6 +434,19 @@ function createTenantCompositeSync(config) {
       configMapNamespace
     );
     
+    // Migration detection
+    req.migrationRequested = existingConfigMap?.metadata?.annotations?.['ns.mdn.io/migration-phase'] === 'copying';
+    req.migrationCompleted = existingConfigMap?.metadata?.annotations?.['ns.mdn.io/data-migrated'];
+    // Storage type detection (early - needed for keyfile and Pod rendering)
+    // Priority: annotation override > spec.initStorageType > default 'dedicated'
+    const initStorageType = req.spec?.initialStorageType;
+    // const runtimeRequired = parent.metadata?.annotations?.['ns.mdn.io/runtime-required'];
+    const runtimeRequired = (req.migrationCompleted || req.migrationRequested) && initStorageType == 'shared' ? 'dedicated' : initStorageType;
+    req.storageType = runtimeRequired || initStorageType;
+    console.log(`  Storage type: ${req.storageType} (initStorageType: ${initStorageType}, override: ${runtimeRequired})`);
+    console.log(`  Migration requested: ${req.migrationRequested}`);
+    
+    req.credentialsRequested = req.storageType === 'dedicated' || req.migrationRequested;
     if (existingConfigMap) {
       console.log(`  Found existing ConfigMap`);
 
@@ -783,7 +786,7 @@ function createTenantCompositeSync(config) {
       console.log(`  Rendering Pod with userInitialized=${userInitializedBool}`);
 
 
-      var migrationComplete = req.parent.metadata.annotations['ns.mdn.io/migration-phase'] == 'complete';
+      var migrationComplete = req.computeConfigMap?.metadata?.annotations?.['ns.mdn.io/migration-phase'] == 'completed';
       /*
       * In shared mode, we always want a compute/Nightscout container.
       * In dedicated mode, it's ok to delay creating a Nightscout container
@@ -941,10 +944,10 @@ function createTenantCompositeSync(config) {
   // 8. Send response
   return [
     initializeContext,
+    ensureConfigMap,
     ensureMongoKeyfile,
     ensureMongoAuthSecret,
     reportStorageTypeStatus,
-    ensureConfigMap,
     ensureAppCredentialsSecret,
     assertPVCExists,
     renderChildren,

@@ -1450,6 +1450,7 @@ function renderTenantPod(resourceName, namespace, spec, computeConfigMap, authSe
         }
       }
     ];
+    var envMap = [ ];
     if (!opts.skipDedicatedMongoString) {
       envFrom.push({
         secretRef: {
@@ -1463,7 +1464,6 @@ function renderTenantPod(resourceName, namespace, spec, computeConfigMap, authSe
         }
       );
     }
-    var envMap = [ ];
     if (!opts.authSecretFirst) {
       // envFrom.reverse( );
     } else {
@@ -2255,6 +2255,13 @@ function renderMigrationJob(params, config) {
             name: 'migration',
             image: config.images?.nsUtility || 'nightscout/ns-utility:latest',
             imagePullPolicy: config.imagePullPolicies?.nsUtility || 'IfNotPresent',
+            envFrom: [
+              {
+                secretRef: {
+                  name: appCredentialsSecretName,
+                }
+              }
+            ],
             env: [
               {
                 name: 'MIGRATION_SOURCE_URI',
@@ -2265,26 +2272,7 @@ function renderMigrationJob(params, config) {
                   }
                 }
               },
-              {
-                name: 'MONGO_COLLECTION',
-                valueFrom: {
-                  configMapKeyRef: {
-                    name: configMapName,
-                    key: 'MONGO_COLLECTION',
-                    optional: true
-                  }
-                }
-              },
-              {
-                name: 'MONGO_TREATMENTS_COLLECTION',
-                valueFrom: {
-                  configMapKeyRef: {
-                    name: configMapName,
-                    key: 'MONGO_TREATMENTS_COLLECTION',
-                    optional: true
-                  }
-                }
-              },
+              /*
               {
                 name: 'MIGRATION_TARGET_URI',
                 valueFrom: {
@@ -2294,9 +2282,13 @@ function renderMigrationJob(params, config) {
                   }
                 }
               },
+              */
               { name: 'MIGRATION_METHOD', value: migrationMethod },
+              { name: 'TARGET_POD_IP', value: podIP },
+              { name: 'MIGRATION_TARGET_URI',
+                value: 'mongodb://$(MONGO_USERNAME):$(MONGO_PASSWORD)@$(TARGET_POD_IP):27017/$(MONGO_DATABASE)?authSource=$(MONGO_DATABASE)'
+              },
               { name: 'TENANT_ID', value: tenantId },
-              { name: 'TARGET_POD_IP', value: podIP }
             ],
             command: config.commands?.migration || ['/app/multienvctl/entrypoints/migrate-database.sh'],
             resources: {

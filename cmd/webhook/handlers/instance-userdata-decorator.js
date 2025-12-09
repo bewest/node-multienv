@@ -98,6 +98,7 @@ function createDecoratorSync(config) {
     
     res.attachments = [];
     res.annotations = {};
+    res.labels = {};
     
     console.log('Tenant Migration Decorator: ConfigMap', configMap.metadata.name);
     console.log('  Tenant ID:', req.tenantId);
@@ -161,8 +162,9 @@ function createDecoratorSync(config) {
   function discoverResources(req, res, next) {
     const pods = req.related['Pod.v1'] || {};
     const secrets = req.related['Secret.v1'] || {};
+    const tenants = req.related['NightscoutTenant.nightscout.io/v1alpha1'] || {};
     const jobs = req.attachments['Job.batch/v1'] || {};
-    
+
     req.tenantPod = findResource(pods, p =>
       p.metadata?.labels?.tenant === req.tenantId &&
       (p.metadata?.labels?.['app.kubernetes.io/component'] === 'tenant-pod' ||
@@ -170,10 +172,14 @@ function createDecoratorSync(config) {
        (p.metadata?.annotations?.['ns.mdn.io/migration-phase'] === 'copying' ) &&
        (p.status.phase === 'Running')
     );
-    
-    const appCredentialsName = `${req.tenantId}-app-credentials`;
+
+    req.tenantCR = findResource(tenants, p =>
+      p.metadata?.labels?.['ns.mdn.io/tenant'] === req.tenantId
+    );
+
     req.appCredentialsSecret = findResource(secrets, s =>
-      s.metadata?.name === appCredentialsName
+      s.metadata?.labels?.['ns.mdn.io/credential-type'] === 'application' &&
+      s.metadata?.labels?.['ns.mdn.io/tenant'] === req.tenantId
     );
     
     const migrationJobName = `${req.tenantId}-migrate-data`;
@@ -205,6 +211,7 @@ function createDecoratorSync(config) {
    */
   function evaluatePrerequisites(req, res, next) {
     req.prerequisites = {
+      isTenant: req.tenantCR && req.tenantCR.spec.configMapRef.name == req.configMap.metadata.name,
       hasPod: !!req.tenantPod,
       podRunning: req.podPhase === 'Running',
       hasPodIP: !!req.podIP,
@@ -215,7 +222,7 @@ function createDecoratorSync(config) {
     
     req.prerequisitesMet = Object.values(req.prerequisites).every(v => v);
     
-    console.log('  Prerequisites:', JSON.stringify(req.prerequisites));
+    console.log('  ', req.tenantId, ' Prerequisites:', JSON.stringify(req.prerequisites));
     console.log('  All prerequisites met:', req.prerequisitesMet);
     
     return next();
@@ -238,7 +245,7 @@ function createDecoratorSync(config) {
         res.attachments.push(cleanForAttachment(req.existingMigrationJob));
         return next();
       }
-      
+
       if (jobFailed(req.existingMigrationJob)) {
         console.log('  Migration Job failed - marking phase failed');
         res.annotations['ns.mdn.io/migration-phase'] = 'failed';
@@ -248,27 +255,35 @@ function createDecoratorSync(config) {
       
       console.log('  Migration Job in progress - preserving');
       // res.annotations['ns.mdn.io/migration-phase'] = 'copying';
-      res.attachments.push(cleanForAttachment(req.existingMigrationJob));
-      return next();
+      // res.attachments.push(cleanForAttachment(req.existingMigrationJob));
+      // return next();
     }
-    
+
+    var isAutomaticPolicyApplicable = req.configMap.metadata.labels.role == config.migration.auto_migrate_role;
+    var isAutomatic = req.migrationPolicy == 'auto';
+    var isTenant = req.prerequisites.isTenant;
+    var isNotStarted = req.migrationPhase !== 'copying';
+    var autoPolicy = { isAutomaticPolicyApplicable, isAutomatic, isTenant, isNotStarted };
+    console.log('  START MIGRATION PROCESS?', req.tenantId, Object.values(autoPolicy).every(v => v), autoPolicy);
+    if (isAutomaticPolicyApplicable && isAutomatic && isTenant && isNotStarted) {
+      console.log("  Automatic stamping annotating as migration-phase");
+      res.annotations['ns.mdn.io/migration-phase'] = 'copying';
+      return next( );
+    }
+
     if (!req.prerequisitesMet) {
       console.log('  Prerequisites not met - cannot render migration Job');
       return next();
     }
-    
-    if (req.migrationPolicy === 'auto' && config.migration.auto_migrate_role && req.migrationPhase !== 'copying') {
-      if (req.configMap.metadata.labels.role == config.migration.auto_migrate_role) {
-        res.annotations['ns.mdn.io/migration-phase'] = 'copying';
-      }
-    }
+
+
     if (req.migrationPolicy === 'manual' && req.migrationPhase !== 'copying') {
       res.annotations['ns.mdn.io/migration-phase'] = 'copying';
       console.log('  Manual policy requires explicit phase=copying to start');
       return next();
     }
-    
-    console.log('  Rendering new migration Job');
+
+    console.log('  Rendering migration Job');
     console.log(`    Source: ConfigMap ${req.configMap.metadata.name} (data.mongo)`);
     console.log(`    Target: Secret ${req.appCredentialsSecret.metadata.name} → Pod IP ${req.podIP}`);
     
@@ -298,6 +313,7 @@ function createDecoratorSync(config) {
    */
   function formatResponse(req, res, next) {
     const hasAnnotationChanges = Object.keys(res.annotations).length > 0;
+    const hasLabelChanges = Object.keys(res.labels).length > 0;
     const hasAttachments = res.attachments.length > 0;
     
     if (!hasAnnotationChanges && !hasAttachments) {
@@ -314,10 +330,11 @@ function createDecoratorSync(config) {
       response.annotations = res.annotations;
     }
     
-    console.log('  Response:', {
-      attachments: res.attachments.length,
-      annotations: hasAnnotationChanges ? Object.keys(res.annotations) : []
-    });
+    if (hasLabelChanges) {
+      response.labels = res.labels;
+    }
+    
+    console.log('  Response:', response);
     
     res.send(response);
   }
@@ -348,6 +365,18 @@ function createDecoratorSync(config) {
     }
     
     const relatedResources = [
+      /*
+      */
+      {
+        apiVersion: 'nightscout.io/v1alpha1',
+        resource: 'nightscouttenants',
+        labelSelector: {
+          matchLabels: {
+            'app.kubernetes.io/name': 'nightscout-tenant',
+            'ns.mdn.io/tenant': tenantId
+          }
+        }
+      },
       {
         apiVersion: 'v1',
         resource: 'pods',
