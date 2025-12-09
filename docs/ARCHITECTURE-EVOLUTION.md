@@ -407,8 +407,8 @@ function elect_runner(runners) {
 │             v                                               │
 │  ┌─────────────────────────────────────────┐                │
 │  │     Per-Tenant Deployment               │                │
-│  │  - Deployment (Nightscout + MongoDB)    │                │
-│  │  - PVC (MongoDB data)                   │                │
+│  │  - Deployment (Nightscout only)         │                │
+│  │    (Health check sidecar)                │                │
 │  └──────────┬──────────────────────────────┘                │
 │             │ pod becomes Running                           │
 │             v                                               │
@@ -441,6 +441,13 @@ are scaled down and no longer used.
 
 - **Configuration:** ConfigMaps trigger Deployment creation via dispatcher
 - **Orchestration:** Per-tenant Deployments (one Deployment per tenant) - **direct k8s API control**
+- **Nightscout-Only Deployments:** Each Deployment runs Nightscout only (no MongoDB colocated)
+- **MongoDB Provisioning:** Out-of-band via provisioner microservice (`/accounts/...` endpoint) that maintains shared MongoDB cluster
+  - Provisioner assigns MongoDB URI and stores in ConfigMap via `/environs/` API
+  - Dispatcher reads URI from ConfigMap and passes to Deployment
+- **Health Check Evolution:** Nightscout Deployment includes pod tenant health check sidecar
+  - **Gen 3a/before:** DNS-based health checks (significant cluster DNS workload)
+  - **Gen 3b/onward:** IP-based health check sidecar performing simple Boolean memory match (reduces DNS load)
 - **Watch Architecture:** Kept ConfigMap watches, added pod watches (more declarative than Gen 3a)
   - Dispatcher watches ConfigMaps → creates Deployments via k8s API
   - deployment-operator watches pods → updates Consul

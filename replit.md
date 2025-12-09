@@ -19,6 +19,7 @@ All tenants are deployed within a single `hosted-tenants` namespace, using tenan
 
 ### Custom Resource Definitions (CRDs)
 - **NightscoutTenant CRD** (`nightscout.io/v1alpha1`): Unified tenant resource with a two-phase provisioning model (Gen5). Older CRDs like `StorageAccount` and `ComputeInstance` are part of Gen4 architecture.
+- **Out-of-Band MongoDB Provisioning**: A provisioner microservice (`/accounts/...` endpoint) manages the shared MongoDB cluster and assigns connection URIs. These URIs are stored in tenant ConfigMaps and passed to Nightscout Pods.
 
 ### Controllers (Metacontroller)
 The platform uses Metacontroller with both Gen4 (Composite and Decorator) and Gen5 (Decorator-Driven) architectures.
@@ -58,7 +59,7 @@ The platform uses Gen5 as the production architecture, with Gen3→Gen5 as the m
 - **Provisioner API Facade**: A REST API (`POST /accounts/`) for external systems to create CRDs and mongo-auth Secrets.
 - **Decorator-Based Blast Radius Protection**: `mongo-auth` Secrets persist on CRD deletion for fast recovery.
 - **Resolver Interface**: Routes Nightscout traffic using Consul.
-- **Pod Health Check Sidecar**: Lightweight sidecar for localhost-based health validation.
+- **Pod Health Check Sidecar**: Lightweight sidecar replacing DNS-based health checks with IP-based validation, reducing cluster DNS workload. Performs simple Boolean memory match against localhost health endpoint.
 - **Single Nightscout Secret Architecture**: Each tenant uses one `app-credentials` Secret.
 - **URI-Based Authentication**: MongoDB utility Jobs use complete connection URIs.
 - **Keyfile-Based Replica Authentication**: MongoDB replica sets use shared keyfile Secrets.
