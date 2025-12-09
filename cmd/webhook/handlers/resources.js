@@ -1289,7 +1289,7 @@ function hashPodInputs(params) {
  * @returns {object} Pod manifest
  */
 function renderTenantPod(resourceName, namespace, spec, computeConfigMap, authSecret, keyfileSecret, appCredentialsSecret, opts, identityLabels, config, specHash) {
-  const podName = `${resourceName}-${spec.tenant}-${specHash}-pod`;
+  const podName = `${spec.tenant}-${specHash}-${resourceName}-pod`;
   const pvcName = spec.pvcName || `${resourceName}-data`;
   
   // Extract auth secret name
@@ -2056,7 +2056,7 @@ function renderTenantReplicaSet(resourceName, namespace, spec, authSecret, keyfi
 function renderCreateUserJob(adminRefName, secretName, tenantId, namespace, storageAccount, mongoHostname, specHash, config) {
   // const namespace = secret.metadata.namespace;
   // const secretName = secret.metadata.name;
-  const jobName = `${storageAccount}-${tenantId}-${specHash}-create-user`;
+  const jobName = `${tenantId}-${specHash}-${storageAccount}-create-user`;
   const forceCreate = true;
   const utilityImagePullSecret = config.imagePullSecrets;
   

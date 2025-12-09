@@ -170,7 +170,7 @@ function createDecoratorSync(config) {
       (p.metadata?.labels?.['app.kubernetes.io/component'] === 'tenant-pod' ||
        p.metadata?.labels?.['ns.mdn.io/storage'] === req.tenantId) &&
        (p.metadata?.annotations?.['ns.mdn.io/migration-phase'] === 'copying' ) &&
-       (p.status.phase === 'Running')
+       (p.status.phase === 'Running') && p.metadata?.annotations?.['ns.mdn.io/user-initialized']
     );
 
     req.tenantCR = findResource(tenants, p =>
