@@ -2,13 +2,15 @@
 
 ## Overview
 
-This project demonstrates a textbook implementation of the **Facade Pattern** across five architectural generations (Gen 1, Gen 2, Gen 3a, Gen 3b, Gen 4). Each generation improved on the previous implementation while maintaining compatibility where possible, allowing the platform to evolve from a simple process-based system to a fully declarative Kubernetes-native orchestration platform.
+This project demonstrates a textbook implementation of the **Facade Pattern** across six architectural generations (Gen 1, Gen 2, Gen 3a, Gen 3b, Gen 4, Gen 5). Each generation improved on the previous implementation while maintaining compatibility where possible, allowing the platform to evolve from a simple process-based system to a fully declarative Kubernetes-native orchestration platform.
 
 **Key Insight:** By wisely configuring components and maintaining interface compatibility, the project stayed flexible and evolved over time without breaking existing integrations.
 
 **Current State:**
-- **Gen 3b** is the current production implementation
-- **Gen 4** (Metacontroller-based) is work-in-progress
+- **Gen 3b** is the current production baseline
+- **Gen 4** (Two-Composite Architecture) was primarily educational for learning Kubernetes and Metacontroller patterns
+- **Gen 5** (Pod-Based Decorator-Driven Architecture) is the production target
+- **Migration Path:** Gen 3b → Gen 5 (direct, skipping Gen 4)
 
 ## The Generations
 
@@ -17,8 +19,9 @@ This project demonstrates a textbook implementation of the **Facade Pattern** ac
 | **Gen 1** | Process-based | `.env` files | Node.js cluster | REST | Legacy |
 | **Gen 2** | StatefulSet + demuxer | Kubernetes ConfigMaps | Demuxer routes admin changes to runners | REST (compatible) | Legacy |
 | **Gen 3a** | StatefulSet + ConfigMap watch | ConfigMaps (watched) | Demuxer propagates changes to runners | REST | Legacy |
-| **Gen 3b** | Deployment controller | ConfigMaps (watched) + pods (watched) | ConfigMap → k8s API → Deployments (tenant per deployment) | k8s API | **Current** |
-| **Gen 4** | Metacontroller webhooks | ConfigMaps (declarative) | Metacontroller webhooks | Webhooks only | **WIP** |
+| **Gen 3b** | Deployment controller | ConfigMaps (watched) + pods (watched) | ConfigMap → k8s API → Deployments (tenant per deployment) | k8s API | **Baseline** |
+| **Gen 4** | Metacontroller (two-composite) | CRDs (StorageAccount + ComputeInstance) | Metacontroller webhooks | Webhooks only | Educational |
+| **Gen 5** | Metacontroller (pod-based) | NightscoutTenant CRD + ConfigMaps | Metacontroller webhooks (direct Pod) | Webhooks only | **Production** |
 
 ---
 
@@ -1739,6 +1742,138 @@ annotations:
 - Testing: Must test both code paths
 
 **Impact:** The annotation-driven pattern enables safe Gen 4 deployment with 1300 existing tenants. Critical for production rollout.
+
+---
+
+## Generation 5: Pod-Based Decorator-Driven Architecture (Production Target)
+
+**Implementation:** Metacontroller webhooks with direct Pod management  
+**Configuration:** NightscoutTenant CRD + tenant ConfigMaps  
+**Status:** Production target (Gen 3b → Gen 5 migration path)
+
+### Architecture
+
+```
+┌──────────────────────────────────────────────────────────────────────────┐
+│                    Gen 5: Pod-Based Decorator-Driven                      │
+├──────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│  ┌────────────────┐                                                      │
+│  │ NightscoutTenant│──────────────┐                                      │
+│  │      CRD       │              │                                      │
+│  └────────────────┘              v                                      │
+│                        ┌─────────────────────┐                          │
+│                        │  Tenant Composite   │                          │
+│                        │     Controller      │                          │
+│                        └──────────┬──────────┘                          │
+│                                   │ renders                             │
+│                                   v                                     │
+│                        ┌─────────────────────┐                          │
+│                        │   Tenant Pod        │                          │
+│                        │ (MongoDB+Nightscout)│                          │
+│                        └─────────────────────┘                          │
+│                                   │                                     │
+│  Decorator Pipeline:              v                                     │
+│  ┌─────────────────────────────────────────────────────────────┐       │
+│  │ mongo-auth Secret  →  Mongo-Auth Init Decorator             │       │
+│  │                       (creates init-replica-set Job)        │       │
+│  │                       (stamps replica-set-initialized)      │       │
+│  ├─────────────────────────────────────────────────────────────┤       │
+│  │ app-credentials    →  App-Credentials Init Decorator        │       │
+│  │      Secret           (creates create-user Job)             │       │
+│  │                       (stamps user-initialized)             │       │
+│  ├─────────────────────────────────────────────────────────────┤       │
+│  │ tenant ConfigMap   →  Tenant Migration Decorator            │       │
+│  │                       (creates migrate-data Job)            │       │
+│  │                       (orchestrates shared→dedicated)       │       │
+│  └─────────────────────────────────────────────────────────────┘       │
+│                                                                          │
+└──────────────────────────────────────────────────────────────────────────┘
+```
+
+### Key Characteristics
+
+- **Direct Pod Management**: Composite renders Pods directly (no ReplicaSet/Deployment layer)
+- **Minimal Control Plane Load**: One Pod object per tenant vs StatefulSet + Pod
+- **Two-Phase Container Gating**: Pod starts with MongoDB only; Nightscout added after initialization
+- **Shared vs Dedicated Storage**: Supports both modes with migration between them
+- **Secret-Watching Decorators**: Init decorators watch Secrets (not CRDs) to avoid drift
+- **Annotation-Based Coordination**: Decorators stamp completion annotations on Secrets
+- **ConfigMap-Based Migration**: Migration decorator watches tenant ConfigMaps, renders Jobs
+
+### Storage Modes
+
+**Shared Mode** (`storageType=shared`):
+- Nightscout-only Pod connects to external MongoDB (Atlas, shared cluster)
+- No co-located MongoDB container, no PVC
+- Uses `envFrom` ConfigMap pattern for MongoDB URI
+- Ideal for new tenants starting with shared infrastructure
+
+**Dedicated Mode** (`storageType=dedicated`):
+- Co-located MongoDB + Nightscout Pod
+- Two-phase container gating (MongoDB first, then Nightscout)
+- Requires keyfile Secret, mongo-auth Secret, PVC
+- Explicit `MONGO_CONNECTION` env overrides ConfigMap
+
+### Migration: Shared → Dedicated
+
+The Tenant Migration Decorator orchestrates data migration:
+
+```yaml
+# Annotations on tenant ConfigMap
+metadata:
+  annotations:
+    ns.mdn.io/migration-policy: auto    # auto|manual|disabled
+    ns.mdn.io/migration-phase: pending  # pending|copying|completed|failed
+    ns.mdn.io/data-migrated: "2024-..."  # ISO timestamp on completion
+```
+
+**Migration Flow:**
+1. Set `migration-policy=auto` on ConfigMap
+2. Decorator waits for Pod ready + app-credentials Secret
+3. Renders `{tenantId}-migrate-data` Job
+4. Job copies data from ConfigMap `data.mongo` → dedicated MongoDB
+5. On success, stamps `ns.mdn.io/data-migrated` annotation
+
+### Why Gen 5 Instead of Gen 4?
+
+| Aspect | Gen 4 (Two-Composite) | Gen 5 (Pod-Based) |
+|--------|----------------------|-------------------|
+| **Object Count** | CRD + StatefulSet + Pod | CRD + Pod |
+| **Control Plane Load** | Higher (more objects) | Lower (minimal objects) |
+| **Pod Recovery** | StatefulSet recreates | Metacontroller watch-driven |
+| **Complexity** | Two composites + coordination | One composite + decorators |
+| **Migration** | Data + userdata phases | Single migration Job |
+
+**Key Insight:** Gen 4's two-composite architecture (Storage + Compute) was valuable for learning Metacontroller patterns but added complexity without proportional benefit. Gen 5's decorator-driven approach achieves the same goals with simpler coordination.
+
+### Production Migration Path: Gen 3b → Gen 5
+
+```bash
+# Step 1: Create NightscoutTenant CRD pointing to existing ConfigMap
+curl -X POST -d initialStorageType=shared $CONTROLLER/tenants/$storageId
+
+# Step 2: Create site reference  
+curl -X POST -d internal_name=$computeId $CONTROLLER/tenants/$storageId/sites/$computeId
+
+# Step 3: (Optional) Migrate to dedicated storage
+# Set migration-policy=auto annotation on ConfigMap
+```
+
+The migration decorator handles the shared→dedicated transition when needed, copying data from the Gen3 MongoDB URI to the new dedicated MongoDB instance.
+
+### Trade-offs
+
+✅ **Gained:**
+- Minimal object count (scales to 10k+ tenants)
+- Simple migration path (single Job per tenant)
+- Flexible storage modes (start shared, migrate later)
+- Clear separation (composite for infra, decorators for lifecycle)
+
+❌ **Lost:**
+- No ReplicaSet buffer (Metacontroller directly manages Pods)
+- More decorator coordination (three decorators vs two composites)
+- Pod IP instability (Jobs must handle Pod restart)
 
 ---
 
