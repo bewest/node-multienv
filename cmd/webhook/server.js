@@ -91,7 +91,8 @@ server.post('/decorator/storage-credentials/sync', storageCredentialsDecoratorSy
 server.post('/decorator/storage-initialization/customize', storageInitializationDecoratorCustomize);
 server.post('/decorator/storage-initialization/sync', ...storageInitializationDecoratorSync);
 
-// Decorator: Instance userdata migration (ConfigMap → Gen 3 to Gen 4 cutover)
+// Decorator: Tenant migration (ConfigMap → Shared to Dedicated MongoDB migration)
+// Gen5: Watches tenant ConfigMaps, orchestrates data migration Jobs
 server.post('/decorator/instance-userdata/customize', ...instanceUserdataDecoratorCustomize);
 server.post('/decorator/instance-userdata/sync', ...instanceUserdataDecoratorSync);
 
@@ -127,8 +128,8 @@ server.listen(port, '0.0.0.0', () => {
   console.log(`  POST /decorator/storage-credentials/sync - Credentials: ComputeInstance → App Creds + User Init`);
   console.log(`  POST /decorator/storage-initialization/customize - Initialization: mongo-auth Secret state tracking`);
   console.log(`  POST /decorator/storage-initialization/sync - Initialization: Replica set init marker`);
-  console.log(`  POST /decorator/instance-userdata/customize - ConfigMap migration: Related resource discovery`);
-  console.log(`  POST /decorator/instance-userdata/sync - ConfigMap migration: Gen 3 → Gen 4 cutover`);
+  console.log(`  POST /decorator/instance-userdata/customize - Tenant Migration: Pod/Secret discovery`);
+  console.log(`  POST /decorator/instance-userdata/sync - Tenant Migration: Shared → Dedicated MongoDB`);
   console.log(`  POST /decorator/tenant-initialization/customize - Tenant Init: Job orchestration discovery`);
   console.log(`  POST /decorator/tenant-initialization/sync - Tenant Init: MongoDB Jobs (init-rs, create-user)`);
   console.log(`  POST /decorator/mongo-auth-init/customize - Shared: mongo-auth Secret discovery`);

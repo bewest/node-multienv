@@ -334,7 +334,7 @@
   // Tenant Migration Decorator (ConfigMap → Shared to Dedicated Migration)
   // Watches tenant ConfigMaps and orchestrates data migration Jobs
   // Annotations on ConfigMap control migration: ns.mdn.io/migration-policy, ns.mdn.io/migration-phase
-  instanceUserdataDecorator(
+  tenantMigrationDecorator(
     webhookServiceUrl='http://webhook-service:3000',
     crdGroup='nightscout.io',
     crdVersion='v1alpha1',
@@ -622,7 +622,7 @@
       crdVersion=crdVersion,
       resyncPeriodSeconds=initializationResyncSeconds,
     ),
-    instanceUserdata: $.instanceUserdataDecorator(
+    tenantMigration: $.tenantMigrationDecorator(
       webhookServiceUrl=webhookServiceUrl,
       crdGroup=crdGroup,
       crdVersion=crdVersion,

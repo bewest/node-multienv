@@ -53,7 +53,7 @@ The platform uses Metacontroller with both Gen4 (Composite and Decorator) and Ge
 - **Two-Interface Design**: Separate administration and resolver interfaces.
 
 ### System Design Choices
-The platform supports Gen4 and Gen5 architectures, offering a Kubernetes-native API.
+The platform uses Gen5 as the production architecture, with Gen3→Gen5 as the migration path. Gen4 (two-composite architecture) served as an educational implementation for learning Kubernetes and Metacontroller patterns.
 - **Status Reporting**: CRD status includes phase, conditions, connectionSecret, and endpoints.
 - **Provisioner API Facade**: A REST API (`POST /accounts/`) for external systems to create CRDs and mongo-auth Secrets.
 - **Decorator-Based Blast Radius Protection**: `mongo-auth` Secrets persist on CRD deletion for fast recovery.
@@ -69,7 +69,7 @@ The platform supports Gen4 and Gen5 architectures, offering a Kubernetes-native 
 - **Migration Job Prerequisite Pattern**: Migration Jobs verify source and target credentials.
 - **Migration Job Completion Tracking**: Hybrid approach using annotations and live Job status.
 - **URI-Based Migration**: Migration Jobs use symmetric MongoDB URI format.
-- **Two-Phase Migration Architecture**: Gen3→Gen4 migration uses sequential phases for data and userdata.
+- **Production Migration Path**: Gen3→Gen5 migration uses shared→dedicated storage mode transition with annotation-gated migration Jobs.
 - **Gen5 Pod-Based Architecture**: Uses direct Pod management for minimal control plane load, with Pod recovery effectively immediate.
 - **Two-Phase Container Gating**: Tenant Pod initially renders with only MongoDB; Nightscout container is added after initialization.
 - **Pod IP Connectivity for Jobs**: Initialization Jobs connect to MongoDB via Pod IP.
