@@ -1882,6 +1882,50 @@ The migration decorator handles the shared→dedicated transition when needed, c
 - More decorator coordination (three decorators vs two composites)
 - Pod IP instability (Jobs must handle Pod restart)
 
+### Lessons Learned: Pod Identity and Job Coordination
+
+**Spec-Hash Pattern: Unique Pod Identity from Tenant Inputs**
+
+All significant tenant inputs are hashed into a `ns.mdn.io/spec-hash` annotation:
+- Container images, secret refs, PVC name, ConfigMap refs
+- Resource limits, labels, annotations
+- `userInitialized` state (controls two-phase container gating)
+
+When any input changes, the hash changes, triggering Pod recreation. This ensures the Pod always reflects the complete desired state - there's no ambiguity about what configuration a running Pod represents.
+
+```yaml
+metadata:
+  annotations:
+    ns.mdn.io/spec-hash: "a1b2c3d4..."  # Hash of all tenant inputs
+    ns.mdn.io/user-initialized: "true"   # State carried on Pod
+    ns.mdn.io/replica-set-initialized: "true"
+```
+
+**State in Pod Annotations: Job Prerequisite Matching**
+
+Since Jobs use IP-based lookup to connect to tenant Pods, it's critical they find a Pod matching the expected state before executing. State annotations on Pods serve as prerequisites:
+
+1. **Jobs wait for matching Pod state** - Before rendering a Job, decorators verify the target Pod has the required annotations (e.g., `replica-set-initialized=true` before creating `create-user` Job)
+
+2. **Pod IP stability** - Jobs connect via `status.podIP`. If Pod recreates mid-Job, the Job fails safely rather than corrupting state
+
+3. **Reduces churn** - Waiting for Pod to reach stable state before firing Jobs prevents:
+   - Jobs targeting wrong Pod version
+   - Race conditions during Pod transitions
+   - Wasted Job runs against Pods about to be replaced
+
+**Pattern: Gate Jobs on Pod Annotations**
+```javascript
+// Don't render Job until Pod has required state
+const podReady = pod?.status?.phase === 'Running';
+const podHasState = pod?.metadata?.annotations?.['ns.mdn.io/user-initialized'] === 'true';
+if (!podReady || !podHasState) {
+  return { attachments: [] };  // Wait for next sync
+}
+```
+
+This "wait for stable target" pattern is essential for reducing churn in a system where Pods may be recreated frequently due to spec-hash changes.
+
 ---
 
 ## Future Architectural Decisions

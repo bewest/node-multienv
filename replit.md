@@ -73,11 +73,11 @@ The platform uses Gen5 as the production architecture, with Gen3→Gen5 as the m
 - **Production Migration Path**: Gen3→Gen5 migration uses shared→dedicated storage mode transition with annotation-gated migration Jobs.
 - **Gen5 Pod-Based Architecture**: Uses direct Pod management for minimal control plane load, with Pod recovery effectively immediate.
 - **Two-Phase Container Gating**: Tenant Pod initially renders with only MongoDB; Nightscout container is added after initialization.
-- **Pod IP Connectivity for Jobs**: Initialization Jobs connect to MongoDB via Pod IP.
+- **Pod IP Connectivity for Jobs**: Initialization Jobs connect to MongoDB via Pod IP. Jobs gate on Pod annotations to ensure target Pod matches expected state before executing, reducing churn from Jobs targeting wrong Pod versions.
 - **Empty Array Normalization**: Optional array fields are conditionally included only when non-empty to prevent drift detection.
 - **Dual Pod Management Modes**: Gen5 supports `ReplicaSet Mode` (via `USE_REPLICASET=true`) and `Direct Pod Mode` (via `USE_REPLICASET=false`) for managing Pods.
 - **`generateSelector=false` Pattern**: Prevents Metacontroller from injecting `controller-uid` labels, enabling idempotent Pod rendering with a spec-hash annotation.
-- **Spec-Hash Change Detection**: The `ns.mdn.io/spec-hash` annotation triggers Pod recreation when significant inputs change.
+- **Spec-Hash Change Detection**: The `ns.mdn.io/spec-hash` annotation captures all significant Pod inputs (container images, secret refs, PVC name, userInitialized state, resource limits, labels, annotations). When inputs change, hash changes, triggering Pod recreation.
 - **`statusChecks` with Conditions**: Used for rolling updates to gate updates until each updated Pod is Ready.
 - **Deep-Merge Pattern for K8s Defaults**: Preserves Kubernetes-added defaults in Pod/ReplicaSet children to prevent drift.
 - **Pod Update Strategy: Recreate vs RollingRecreate**: Gen5 tenant composite uses `Recreate` strategy for single-Pod scenarios to avoid ControllerRevision complexities and race conditions.
