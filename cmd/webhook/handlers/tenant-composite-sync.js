@@ -789,7 +789,7 @@ function createTenantCompositeSync(config) {
       console.log(`  Rendering Pod with userInitialized=${userInitializedBool}`);
 
 
-      var migrationComplete = req.computeConfigMap?.metadata?.annotations?.['ns.mdn.io/migration-phase'] == 'completed';
+      var migrationComplete = req.computeConfigMap?.metadata?.annotations?.['ns.mdn.io/migration-phase'] == 'completed' && req.migrationCompleted;
       /*
       * In shared mode, we always want a compute/Nightscout container.
       * In dedicated mode, it's ok to delay creating a Nightscout container
@@ -914,7 +914,7 @@ function createTenantCompositeSync(config) {
     }
 
     // Add status fields - mirrors Pod annotations for additionalPrinterColumns visibility
-    res.status.storageType = req.storageType || spec.initialStorageType || 'shared';
+    res.status.storageType = req.storageType;
     res.status.userInitialized = userInitializedFallback ? 'true' : 'false';
     res.status.migrationPhase = req.computeConfigMap?.metadata?.annotations?.['ns.mdn.io/migration-phase'] || 'n/a';
     res.status.containerCount = req.renderedContainerCount || 0;
