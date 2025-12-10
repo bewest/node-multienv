@@ -758,6 +758,9 @@ function createTenantCompositeSync(config) {
       );
       res.children.push(replicaSet);
       
+      // Track container count for status enrichment (from ReplicaSet Pod template)
+      req.renderedContainerCount = replicaSet.spec?.template?.spec?.containers?.length || 0;
+      
       // Check existing ReplicaSet for status
       const existingRS = findResource(req.children['ReplicaSet.apps/v1'], `${resourceName}-rs`, req.namespace);
       
@@ -820,6 +823,9 @@ function createTenantCompositeSync(config) {
         specHash
       );
       res.children.push(pod);
+      
+      // Track container count for status enrichment
+      req.renderedContainerCount = pod.spec?.containers?.length || 0;
 
       const podName = pod.metadata.name;
       // Check existing Pod for status
@@ -907,13 +913,13 @@ function createTenantCompositeSync(config) {
       });
     }
 
-    // Add status fields
-    // res.status.storageType = req.storageType || 'shared'; // Report effective storage mode
+    // Add status fields - mirrors Pod annotations for additionalPrinterColumns visibility
+    res.status.storageType = req.storageType || spec.initialStorageType || 'shared';
+    res.status.userInitialized = userInitializedFallback ? 'true' : 'false';
+    res.status.migrationPhase = req.computeConfigMap?.metadata?.annotations?.['ns.mdn.io/migration-phase'] || 'n/a';
+    res.status.containerCount = req.renderedContainerCount || 0;
     res.status.databaseName = req.databaseName;
     res.status.connectionSecret = req.authSecret?.metadata?.name;
-    // res.status.pvcName = req.pvcName;
-    // res.status.podName = `${resourceName}-pod`;
-    // res.status.podIP = existingPod?.status?.podIP;
     res.status.observedGeneration = req.parent.metadata.generation;
     
     return next();

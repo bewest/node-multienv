@@ -55,7 +55,7 @@ The platform uses Metacontroller with both Gen4 (Composite and Decorator) and Ge
 
 ### System Design Choices
 The platform uses Gen5 as the production architecture, with Gen3→Gen5 as the migration path. Gen4 (two-composite architecture) served as an educational implementation for learning Kubernetes and Metacontroller patterns.
-- **Status Reporting**: CRD status includes phase, conditions, connectionSecret, and endpoints.
+- **Status Reporting**: CRD status includes phase, conditions, connectionSecret, and endpoints. NightscoutTenant status mirrors key Pod annotations (storageType, userInitialized, migrationPhase, specHash, containerCount) for visibility via `kubectl get` additionalPrinterColumns.
 - **Provisioner API Facade**: A REST API (`POST /accounts/`) for external systems to create CRDs and mongo-auth Secrets.
 - **Decorator-Based Blast Radius Protection**: `mongo-auth` Secrets persist on CRD deletion for fast recovery.
 - **Resolver Interface**: Routes Nightscout traffic using Consul.
