@@ -223,7 +223,7 @@ const config = {
   // Node affinity configuration for tenant Pods and Jobs
   // When enabled, constrains Pods to specific node pools for isolation/performance
   nodeAffinity: {
-    enabled: parseBoolean(process.env.TENANT_NODEPOOL_ENABLED, false),
+    enabled: !!process.env.TENANT_NODEPOOL_KEY && !!process.env.TENANT_NODEPOOL_DEFAULT,
     // Label key to match (provider-specific, e.g., cloud.google.com/gke-nodepool)
     key: process.env.TENANT_NODEPOOL_KEY || 'cloud.google.com/gke-nodepool',
     // Default node pool when no tier-specific or per-tenant override
