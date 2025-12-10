@@ -287,12 +287,16 @@ function createDecoratorSync(config) {
     console.log(`    Source: ConfigMap ${req.configMap.metadata.name} (data.mongo)`);
     console.log(`    Target: Secret ${req.appCredentialsSecret.metadata.name} → Pod IP ${req.podIP}`);
     
+    // Get nodepool override from ConfigMap annotations for co-location
+    const nodepoolOverride = req.configMap.metadata?.annotations?.['ns.mdn.io/nodepool-override'] || null;
+    
     const migrationJob = renderMigrationJob({
       tenantId: req.tenantId,
       namespace: req.namespace,
       configMapName: req.configMap.metadata.name,
       appCredentialsSecretName: req.appCredentialsSecret.metadata.name,
       podIP: req.podIP,
+      nodepoolOverride: nodepoolOverride,
       labels: {
         tenant: req.tenantId,
         'app.kubernetes.io/part-of': 'nightscout-tenant'

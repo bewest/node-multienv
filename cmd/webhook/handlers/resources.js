@@ -1236,6 +1236,13 @@ function hashPodInputs(params) {
     // Note: specHash intentionally omitted - hash is computed BEFORE specHash is known
   });
   
+  // Node affinity config (must be in hash to trigger Pod recreation on affinity changes)
+  const nodeAffinityConfig = config.nodeAffinity?.enabled ? {
+    enabled: true,
+    key: config.nodeAffinity.key,
+    defaultPool: config.nodeAffinity.defaultPool
+  } : { enabled: false };
+  
   const hashInputs = {
     pvcName,
     authSecretName,
@@ -1252,13 +1259,51 @@ function hashPodInputs(params) {
       mongodb: config.resources?.mongodb,
       nightscout: config.resources?.nightscout
     },
-    imagePullSecrets: config.multienv?.imagePullSecrets || []
+    imagePullSecrets: config.multienv?.imagePullSecrets || [],
+    nodeAffinity: nodeAffinityConfig
   };
   
   const hashString = JSON.stringify(hashInputs);
   const hash = crypto.createHash('sha256').update(hashString).digest('hex');
   
   return hash.substring(0, 12);
+}
+
+/**
+ * Internal helper: Build Node Affinity Block
+ * 
+ * Generates a requiredDuringSchedulingIgnoredDuringExecution node affinity block
+ * for constraining Pods/Jobs to specific node pools.
+ * 
+ * @param {object} config - Webhook configuration with nodeAffinity settings
+ * @param {string} [nodepoolOverride] - Per-tenant override from ns.mdn.io/nodepool-override annotation
+ * @returns {object|null} - Affinity block for Pod spec, or null if disabled
+ */
+function buildNodeAffinityInternal(config, nodepoolOverride) {
+  if (!config.nodeAffinity?.enabled) {
+    return null;
+  }
+  
+  const labelKey = config.nodeAffinity.key || 'cloud.google.com/gke-nodepool';
+  const targetPool = nodepoolOverride || config.nodeAffinity.defaultPool || 'tenant-runners';
+  
+  return {
+    nodeAffinity: {
+      requiredDuringSchedulingIgnoredDuringExecution: {
+        nodeSelectorTerms: [
+          {
+            matchExpressions: [
+              {
+                key: labelKey,
+                operator: 'In',
+                values: [targetPool]
+              }
+            ]
+          }
+        ]
+      }
+    }
+  };
 }
 
 /**
@@ -1653,8 +1698,13 @@ function renderTenantPod(resourceName, namespace, spec, computeConfigMap, authSe
   // (Kubernetes normalizes empty arrays differently, causing Metacontroller to detect drift)
   const imagePullSecrets = config.multienv?.imagePullSecrets || [];
   
+  // Build node affinity if enabled (supports per-tenant override via annotation)
+  const nodepoolOverride = computeConfigMap?.metadata?.annotations?.['ns.mdn.io/nodepool-override'] || null;
+  const affinity = buildNodeAffinityInternal(config, nodepoolOverride);
+  
   const podSpec = {
     ...(imagePullSecrets.length > 0 ? { imagePullSecrets } : {}),
+    ...(affinity ? { affinity } : {}),
     initContainers: initContainers,
     containers: containers,
     volumes: volumes,
@@ -2188,6 +2238,9 @@ function renderCreateUserJob(adminRefName, secretName, tenantId, namespace, stor
  * Source: ConfigMap data.mongo field (Gen3 legacy tenant ConfigMap with MongoDB URI)
  * Target: app-credentials Secret MONGODB_URI field (dedicated storage)
  * 
+ * Node affinity: When enabled, migration Jobs inherit the same node affinity as tenant Pods
+ * to ensure co-location and reduce cross-node traffic during data migration.
+ * 
  * @param {Object} params - Migration job parameters
  * @param {string} params.tenantId - Tenant identifier
  * @param {string} params.namespace - Kubernetes namespace
@@ -2195,6 +2248,7 @@ function renderCreateUserJob(adminRefName, secretName, tenantId, namespace, stor
  * @param {string} params.appCredentialsSecretName - Target Secret name
  * @param {string} params.podIP - Target MongoDB Pod IP address
  * @param {Object} params.labels - Standard labels to apply
+ * @param {string} [params.nodepoolOverride] - Per-tenant nodepool override annotation value
  * @param {Object} config - Webhook configuration
  * @returns {Object} Kubernetes Job manifest
  */
@@ -2205,7 +2259,8 @@ function renderMigrationJob(params, config) {
     configMapName,
     appCredentialsSecretName,
     podIP,
-    labels = {}
+    labels = {},
+    nodepoolOverride = null
   } = params;
   
   const jobName = `${tenantId}-migrate-data`;
@@ -2250,6 +2305,7 @@ function renderMigrationJob(params, config) {
           ...(config.jobs?.imagePullSecrets?.length > 0 
             ? { imagePullSecrets: config.jobs.imagePullSecrets } 
             : {}),
+          ...(buildNodeAffinityInternal(config, nodepoolOverride) || {}),
           restartPolicy: 'OnFailure',
           containers: [{
             name: 'migration',
@@ -2308,6 +2364,59 @@ function renderMigrationJob(params, config) {
   };
 }
 
+/**
+ * Build Node Affinity Block
+ * 
+ * Generates a requiredDuringSchedulingIgnoredDuringExecution node affinity block
+ * for constraining Pods/Jobs to specific node pools.
+ * 
+ * Pattern follows Kubernetes deployment controller conventions:
+ * - Uses provider-specific label key (e.g., cloud.google.com/gke-nodepool)
+ * - Hard requirement (required) ensures scheduling only on target pool
+ * - Ignored during execution allows Pods to survive node pool changes
+ * 
+ * @param {object} config - Webhook configuration with nodeAffinity settings
+ * @param {string} [nodepoolOverride] - Per-tenant override from ns.mdn.io/nodepool-override annotation
+ * @returns {object|null} - Affinity block for Pod spec, or null if disabled
+ */
+function buildNodeAffinity(config, nodepoolOverride) {
+  // Check if node affinity is enabled
+  if (!config.nodeAffinity?.enabled) {
+    return null;
+  }
+  
+  const labelKey = config.nodeAffinity.key || 'cloud.google.com/gke-nodepool';
+  const targetPool = nodepoolOverride || config.nodeAffinity.defaultPool || 'tenant-runners';
+  
+  return {
+    nodeAffinity: {
+      requiredDuringSchedulingIgnoredDuringExecution: {
+        nodeSelectorTerms: [
+          {
+            matchExpressions: [
+              {
+                key: labelKey,
+                operator: 'In',
+                values: [targetPool]
+              }
+            ]
+          }
+        ]
+      }
+    }
+  };
+}
+
+/**
+ * Get nodepool override from annotations
+ * 
+ * @param {object} annotations - Resource annotations
+ * @returns {string|null} - Nodepool override value or null
+ */
+function getNodepoolOverride(annotations) {
+  return annotations?.['ns.mdn.io/nodepool-override'] || null;
+}
+
 module.exports = {
   renderMongoDB,
   renderNightscout,
@@ -2325,5 +2434,7 @@ module.exports = {
   hashPodInputs,
   hashTenantInputs,
   buildTenantPodMetadata,
-  renderMigrationJob
+  renderMigrationJob,
+  buildNodeAffinity,
+  getNodepoolOverride
 };

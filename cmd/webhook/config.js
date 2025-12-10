@@ -219,6 +219,16 @@ const config = {
   archive: {
     namespace: process.env.ARCHIVE_NAMESPACE || 'archived-configs',
   },
+
+  // Node affinity configuration for tenant Pods and Jobs
+  // When enabled, constrains Pods to specific node pools for isolation/performance
+  nodeAffinity: {
+    enabled: parseBoolean(process.env.TENANT_NODEPOOL_ENABLED, false),
+    // Label key to match (provider-specific, e.g., cloud.google.com/gke-nodepool)
+    key: process.env.TENANT_NODEPOOL_KEY || 'cloud.google.com/gke-nodepool',
+    // Default node pool when no tier-specific or per-tenant override
+    defaultPool: process.env.TENANT_NODEPOOL_DEFAULT || 'tenant-runners',
+  },
 };
 
 module.exports = config;
