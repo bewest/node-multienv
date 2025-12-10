@@ -799,7 +799,7 @@ function configure (opts) {
         failures_before_critical: 1,
         deregister_critical_service_after: '5s'
       }];
-      if (serviceData.metadata?.annotations?.['ns.mdn.io/compute-runtime'] == 'enabled') {
+      if (serviceData.metadata?.annotations?.['ns.mdn.io/runtime/compute'] == 'enabled') {
         checks.push({
         name: "EndpointAvailable",
         ttl: '30s',
@@ -809,7 +809,7 @@ function configure (opts) {
       }
         );
       }
-      if (serviceData.metadata?.annotations?.['ns.mdn.io/storage-runtime'] == 'enabled') {
+      if (serviceData.metadata?.annotations?.['ns.mdn.io/runtime/storage'] == 'enabled') {
         // checks.push();
       }
     }
