@@ -78,7 +78,7 @@
       port: 3000,
       tenantNodepoolEnabled: false,
       tenantNodepoolDefault: '',
-      tenantNodepoolKey: 'cloud.google.com/gke-nodepool',
+      tenantNodepoolKey: '',
       imagePullSecrets: [],
       nsUtilityImage: '',
       podHealthcheckImage: '',

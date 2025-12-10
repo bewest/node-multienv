@@ -298,6 +298,7 @@ local crds = import 'crds.libsonnet';
       requests: { cpu: '100m', memory: '128Mi' },
       limits: { cpu: '500m', memory: '512Mi' },
     },
+    webhookConfig={},
   )::
     local webhookUrl = 'http://%s.%s.svc.cluster.local:%d' % [
       webhookName,
@@ -352,7 +353,7 @@ local crds = import 'crds.libsonnet';
       storage_credentials_decorator_clusterRoleBinding:: storageCredentialsRbac.clusterRoleBinding,
       
       // Webhook Deployment and Service
-      webhook: webhook.stack(
+      webhook: webhook.stackWithConfig(
         name=webhookName,
         image=webhookImage,
         namespace=webhookNamespace,
@@ -362,6 +363,7 @@ local crds = import 'crds.libsonnet';
         serviceAccountName=webhookName,
         imagePullSecrets=imagePullSecrets,
         resources=webhookResources,
+        config=webhookConfig
       ),
       
       // Metacontroller CRDs (CompositeControllers + DecoratorControllers)
