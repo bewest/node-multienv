@@ -1287,20 +1287,23 @@ function buildNodeAffinityInternal(config, nodepoolOverride) {
   const labelKey = config.nodeAffinity.key || 'cloud.google.com/gke-nodepool';
   const targetPool = nodepoolOverride || config.nodeAffinity.defaultPool || 'tenant-runners';
   
+  // Returns { affinity: { nodeAffinity: ... } } structure for spreading into Pod spec
   return {
-    nodeAffinity: {
-      requiredDuringSchedulingIgnoredDuringExecution: {
-        nodeSelectorTerms: [
-          {
-            matchExpressions: [
-              {
-                key: labelKey,
-                operator: 'In',
-                values: [targetPool]
-              }
-            ]
-          }
-        ]
+    affinity: {
+      nodeAffinity: {
+        requiredDuringSchedulingIgnoredDuringExecution: {
+          nodeSelectorTerms: [
+            {
+              matchExpressions: [
+                {
+                  key: labelKey,
+                  operator: 'In',
+                  values: [targetPool]
+                }
+              ]
+            }
+          ]
+        }
       }
     }
   };
@@ -1704,7 +1707,7 @@ function renderTenantPod(resourceName, namespace, spec, computeConfigMap, authSe
   
   const podSpec = {
     ...(imagePullSecrets.length > 0 ? { imagePullSecrets } : {}),
-    ...(affinity ? { affinity } : {}),
+    ...(affinity || {}),
     initContainers: initContainers,
     containers: containers,
     volumes: volumes,
@@ -2388,20 +2391,23 @@ function buildNodeAffinity(config, nodepoolOverride) {
   const labelKey = config.nodeAffinity.key || 'cloud.google.com/gke-nodepool';
   const targetPool = nodepoolOverride || config.nodeAffinity.defaultPool || 'tenant-runners';
   
+  // Returns { affinity: { nodeAffinity: ... } } structure for spreading into Pod spec
   return {
-    nodeAffinity: {
-      requiredDuringSchedulingIgnoredDuringExecution: {
-        nodeSelectorTerms: [
-          {
-            matchExpressions: [
-              {
-                key: labelKey,
-                operator: 'In',
-                values: [targetPool]
-              }
-            ]
-          }
-        ]
+    affinity: {
+      nodeAffinity: {
+        requiredDuringSchedulingIgnoredDuringExecution: {
+          nodeSelectorTerms: [
+            {
+              matchExpressions: [
+                {
+                  key: labelKey,
+                  operator: 'In',
+                  values: [targetPool]
+                }
+              ]
+            }
+          ]
+        }
       }
     }
   };
