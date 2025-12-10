@@ -41,7 +41,7 @@ The platform uses Metacontroller with both Gen4 (Composite and Decorator) and Ge
 - **Messaging**: Strimzi Kafka for CDC.
 - **Database**: MongoDB (per-tenant replica sets).
 - **Webhook Implementation**: Node.js with Restify and `@kubernetes/client-node`.
-- **Deployment**: Jsonnet for Kubernetes manifest generation.
+- **Deployment**: Jsonnet for Kubernetes manifest generation. `webhook.libsonnet` provides `configMap()`, `stackWithConfig()`, and deployment helpers with `envFromConfigMaps` support for environment variable overrides.
 - **Traffic Serving**: Resolver with Consul coordination.
 
 ### Feature Specifications

@@ -19,6 +19,16 @@
 //   webhook.deployment('webhook', 'myregistry/webhook:v1.0', runtimeMode='webhook') +
 //   webhook.deployment('provisioner', 'myregistry/webhook:v1.0', runtimeMode='provisioner') +
 //   webhook.deployment('healthcheck', 'myregistry/webhook:v1.0', runtimeMode='healthcheck', replicas=10)
+//
+//   // ConfigMap for environment overrides
+//   webhook.configMap('webhook-config', {
+//     port: 5050,
+//     tenantNodepoolDefault: 'bigger-tenant-runners',
+//     tenantNodepoolKey: 'doks.digitalocean.com/node-pool',
+//     imagePullSecrets: ['staging-multienv-01', 'staging-multienv-02'],
+//     nsUtilityImage: 'registry.digitalocean.com/staget1pal0/util:latest',
+//     podHealthcheckImage: 'registry.digitalocean.com/staget1pal0/multienv',
+//   })
 
 {
   // Default configuration values
@@ -42,6 +52,91 @@
     },
   },
 
+  // ConfigMap constructor for webhook environment overrides
+  // Creates a ConfigMap that can be mounted as envFrom in the deployment
+  //
+  // Parameters:
+  //   name: ConfigMap name
+  //   namespace: Kubernetes namespace (default: 'default')
+  //   config: Object with environment configuration:
+  //     - port: Webhook server port (default: 3000)
+  //     - tenantNodepoolEnabled: Enable node affinity (default: false)
+  //     - tenantNodepoolDefault: Default node pool name for tenant scheduling
+  //     - tenantNodepoolKey: Provider-specific node pool label key
+  //     - imagePullSecrets: Array of pull secret names (comma-joined in env var)
+  //     - nsUtilityImage: MongoDB utility container image
+  //     - podHealthcheckImage: Pod healthcheck sidecar image
+  //     - tenantNamespace: Namespace for tenant resources
+  //     - useReplicaSet: Whether to use ReplicaSet mode (default: true)
+  //     - extra: Additional key-value pairs to include
+  configMap(
+    name,
+    namespace=defaults.namespace,
+    config={},
+  )::
+    local cfg = {
+      port: 3000,
+      tenantNodepoolEnabled: false,
+      tenantNodepoolDefault: '',
+      tenantNodepoolKey: 'cloud.google.com/gke-nodepool',
+      imagePullSecrets: [],
+      nsUtilityImage: '',
+      podHealthcheckImage: '',
+      tenantNamespace: 'hosted-tenants',
+      useReplicaSet: true,
+      extra: {},
+    } + config;
+
+    local data = {
+      PORT: std.toString(cfg.port),
+    } + (
+      if cfg.tenantNodepoolEnabled then {
+        TENANT_NODEPOOL_ENABLED: 'true',
+      } else {}
+    ) + (
+      if cfg.tenantNodepoolDefault != '' then {
+        TENANT_NODEPOOL_DEFAULT: cfg.tenantNodepoolDefault,
+      } else {}
+    ) + (
+      if cfg.tenantNodepoolKey != '' then {
+        TENANT_NODEPOOL_KEY: cfg.tenantNodepoolKey,
+      } else {}
+    ) + (
+      if std.length(cfg.imagePullSecrets) > 0 then {
+        MULTIENV_IMAGE_PULLSECRETS: std.join(',', cfg.imagePullSecrets),
+      } else {}
+    ) + (
+      if cfg.nsUtilityImage != '' then {
+        NS_UTILITY_IMAGE: cfg.nsUtilityImage,
+      } else {}
+    ) + (
+      if cfg.podHealthcheckImage != '' then {
+        POD_HEALTHCHECK_IMAGE: cfg.podHealthcheckImage,
+      } else {}
+    ) + (
+      if cfg.tenantNamespace != '' then {
+        TENANT_NAMESPACE: cfg.tenantNamespace,
+      } else {}
+    ) + (
+      if !cfg.useReplicaSet then {
+        USE_REPLICASET: 'false',
+      } else {}
+    ) + cfg.extra;
+
+    {
+      apiVersion: 'v1',
+      kind: 'ConfigMap',
+      metadata: {
+        name: name,
+        namespace: namespace,
+        labels: {
+          app: name,
+          'app.kubernetes.io/component': 'webhook-config',
+        },
+      },
+      data: data,
+    },
+
   // Deployment constructor
   deployment(
     name,
@@ -55,12 +150,19 @@
     resources=defaults.resources,
     labels={},
     env=[],
+    envFromConfigMaps=[],  // Array of ConfigMap names to load as env vars
   )::
     local defaultLabels = { app: name };
     local allLabels = defaultLabels + labels;
     
     local defaultEnv = [
       { name: 'PORT', value: std.toString(port) },
+    ];
+    
+    // Build envFrom array from ConfigMap names
+    local envFrom = [
+      { configMapRef: { name: cm } }
+      for cm in envFromConfigMaps
     ];
     
     // Map runtimeMode to start_container.sh args
@@ -103,6 +205,9 @@
                   },
                 ],
                 env: defaultEnv + env,
+              } + (
+                if std.length(envFrom) > 0 then { envFrom: envFrom } else {}
+              ) + {
                 livenessProbe: {
                   httpGet: {
                     path: '/health',
@@ -171,6 +276,7 @@
     resources=defaults.resources,
     labels={},
     env=[],
+    envFromConfigMaps=[],
   ):: {
     deployment: $.deployment(
       name=name,
@@ -184,6 +290,7 @@
       resources=resources,
       labels=labels,
       env=env,
+      envFromConfigMaps=envFromConfigMaps,
     ),
     service: $.service(
       name=name,
@@ -193,6 +300,52 @@
       selector=labels + { app: name },
     ),
   },
+
+  // Complete webhook stack with ConfigMap (ConfigMap + Deployment + Service)
+  // Convenience function that creates the ConfigMap and wires it to the deployment
+  stackWithConfig(
+    name,
+    image=defaults.image,
+    namespace=defaults.namespace,
+    replicas=defaults.replicas,
+    port=defaults.port,
+    runtimeMode=defaults.runtimeMode,
+    serviceAccountName=defaults.serviceAccountName,
+    imagePullSecrets=defaults.imagePullSecrets,
+    resources=defaults.resources,
+    labels={},
+    env=[],
+    config={},  // Config object for configMap() function
+  )::
+    local configMapName = name + '-config';
+    {
+      configMap: $.configMap(
+        name=configMapName,
+        namespace=namespace,
+        config=config,
+      ),
+      deployment: $.deployment(
+        name=name,
+        image=image,
+        namespace=namespace,
+        replicas=replicas,
+        port=port,
+        runtimeMode=runtimeMode,
+        serviceAccountName=serviceAccountName,
+        imagePullSecrets=imagePullSecrets,
+        resources=resources,
+        labels=labels,
+        env=env,
+        envFromConfigMaps=[configMapName],
+      ),
+      service: $.service(
+        name=name,
+        namespace=namespace,
+        port=port,
+        targetPort=port,
+        selector=labels + { app: name },
+      ),
+    },
 
   // Blue/green deployment helper
   blueGreen(
@@ -208,6 +361,7 @@
     imagePullSecrets=defaults.imagePullSecrets,
     resources=defaults.resources,
     env=[],
+    envFromConfigMaps=[],
   ):: {
     blue: $.stack(
       name=name + '-blue',
@@ -221,6 +375,7 @@
       resources=resources,
       labels={ environment: 'blue' },
       env=env,
+      envFromConfigMaps=envFromConfigMaps,
     ),
     green: $.stack(
       name=name + '-green',
@@ -234,6 +389,7 @@
       resources=resources,
       labels={ environment: 'green' },
       env=env,
+      envFromConfigMaps=envFromConfigMaps,
     ),
   },
 
@@ -252,6 +408,7 @@
     imagePullSecrets=defaults.imagePullSecrets,
     resources=defaults.resources,
     env=[],
+    envFromConfigMaps=[],
   ):: {
     webhook: $.stack(
       name=name + '-webhook',
@@ -265,6 +422,7 @@
       resources=resources,
       labels={ component: 'webhook' },
       env=env,
+      envFromConfigMaps=envFromConfigMaps,
     ),
     provisioner: $.stack(
       name=name + '-provisioner',
@@ -278,6 +436,7 @@
       resources=resources,
       labels={ component: 'provisioner' },
       env=env,
+      envFromConfigMaps=envFromConfigMaps,
     ),
     healthcheck: $.stack(
       name=name + '-healthcheck',
@@ -294,6 +453,7 @@
       },
       labels={ component: 'healthcheck' },
       env=env,
+      envFromConfigMaps=envFromConfigMaps,
     ),
   },
 }
