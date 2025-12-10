@@ -84,6 +84,7 @@ The platform uses Gen5 as the production architecture, with Gen3→Gen5 as the m
 - **Morphing Children Pattern**: Tenant composite children change based on lifecycle phase, requiring the `Recreate` strategy.
 - **Shared vs Dedicated Storage Mode**: Gen5 supports `shared` (Nightscout-only Pod connecting to external MongoDB) and `dedicated` (co-located MongoDB + Nightscout Pod) modes, with migration between them handled by the migration decorator.
 - **Consul Compatibility**: Both storage modes render `role: config-as-deploy` label for resolver/Consul registration.
+- **Node Affinity for Tenant Scheduling**: Tenant Pods and Jobs can be constrained to specific node pools via environment variables (`TENANT_NODEPOOL_ENABLED`, `TENANT_NODEPOOL_KEY`, `TENANT_NODEPOOL_DEFAULT`). Uses `requiredDuringSchedulingIgnoredDuringExecution` pattern with provider-specific labels (e.g., `cloud.google.com/gke-nodepool`). Per-tenant overrides supported via `ns.mdn.io/nodepool-override` annotation on ConfigMap. Migration Jobs inherit Pod affinity for co-location.
 
 ## External Dependencies
 - **Strimzi Kafka Operator**: Manages Kafka clusters and KafkaConnect.
