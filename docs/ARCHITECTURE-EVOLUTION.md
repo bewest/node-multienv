@@ -1968,6 +1968,13 @@ The following topics warrant deeper architectural exploration and decision docum
 - **Status**: Not implemented (manual ConfigMap/Secret management)
 - **Future Work**: Evaluate GitOps patterns, document drift handling
 
+### Ephemeral Storage & Volume Limits
+- **Question**: How to scale beyond cloud provider volume limits per node?
+- **Considerations**: emptyDir + CDC durability, object storage snapshots, data loss trade-offs
+- **Status**: Proposal documented - see [EPHEMERAL-STORAGE-PROPOSAL.md](EPHEMERAL-STORAGE-PROPOSAL.md)
+- **Blockers**: Kafka CDC not yet validated in Gen 5 colocated pod architecture
+- **Future Work**: Validate CDC end-to-end, implement warehouse consumer, test hydration workflow
+
 ---
 
 ## Related Documentation
@@ -1980,3 +1987,4 @@ The following topics warrant deeper architectural exploration and decision docum
 - [Component Relationships (Gen 3)](COMPONENT-RELATIONSHIPS.md)
 - [Container Parameters](CONTAINER-PARAMETERS.md)
 - [Utility Container Summary](../UTILITY-CONTAINER-SUMMARY.md)
+- [Ephemeral Storage Proposal](EPHEMERAL-STORAGE-PROPOSAL.md)

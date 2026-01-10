@@ -1,0 +1,142 @@
+# Example: Ephemeral Storage Mode Tenant Configuration
+#
+# This example shows how to configure a tenant to use ephemeral MongoDB storage
+# instead of PersistentVolumeClaims. Ephemeral mode uses:
+#   - emptyDir volume for MongoDB data (no PVC required)
+#   - Object storage snapshots for hydration on pod startup
+#   - Kafka CDC for real-time durability to central warehouse
+#
+# Prerequisites:
+#   - Kafka CDC infrastructure deployed and validated
+#   - Object storage bucket configured with IAM credentials
+#   - Warehouse consumer running to apply CDC events
+#
+# Trade-offs:
+#   - No volume limits: Can scale beyond cloud provider volume-per-node limits
+#   - Data loss window: 1-2 minutes of data may be lost on pod crash
+#   - Cold start delay: ~30-60 seconds for snapshot hydration
+#
+# See docs/EPHEMERAL-STORAGE-PROPOSAL.md for full architecture details.
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: tenant-ephemeral-demo
+  namespace: hosted-tenants
+  labels:
+    ns.mdn.io/enabled: "true"
+  annotations:
+    # Storage mode: "ephemeral" uses emptyDir + CDC, "persistent" uses PVC (default)
+    ns.mdn.io/storage-mode: "ephemeral"
+    # Snapshot configuration for ephemeral mode
+    ns.mdn.io/snapshot-bucket: "s3://nightscout-snapshots"
+    ns.mdn.io/snapshot-schedule: "0 */6 * * *"  # Every 6 hours
+    ns.mdn.io/snapshot-retention-days: "7"
+data:
+  # Tenant Identity
+  TENANT_ID: "ephemeral-demo"
+  
+  # Nightscout Configuration
+  NS_IMAGE: "nightscout/cgm-remote-monitor:latest"
+  NS_REPLICAS: "1"
+  NS_SERVICE_TYPE: "ClusterIP"
+  NS_CPU_REQUEST: "100m"
+  NS_CPU_LIMIT: "500m"
+  NS_MEM_REQUEST: "256Mi"
+  NS_MEM_LIMIT: "512Mi"
+  
+  # MongoDB Configuration (ephemeral mode)
+  # Note: MONGO_STORAGE_GI and MONGO_SC are ignored in ephemeral mode
+  # The emptyDir volume is sized via EPHEMERAL_STORAGE_LIMIT
+  MONGO_IMAGE: "mongo:7.0"
+  MONGO_REPLICAS: "1"
+  MONGO_CPU_REQUEST: "100m"
+  MONGO_CPU_LIMIT: "500m"
+  MONGO_MEM_REQUEST: "256Mi"
+  MONGO_MEM_LIMIT: "512Mi"
+  
+  # Ephemeral storage configuration
+  # Size limit for emptyDir volume (should accommodate database + overhead)
+  EPHEMERAL_STORAGE_LIMIT: "5Gi"
+  
+  # CDC Configuration (REQUIRED for ephemeral mode)
+  # Ephemeral mode requires CDC for durability - if not explicitly enabled,
+  # the controller will auto-enable it when storage-mode=ephemeral
+  CDC_ENABLED: "true"
+  CDC_COLLECTIONS: "entries,treatments,devicestatus"
+  CDC_PARTITIONS_ENTRIES: "3"
+  CDC_PARTITIONS_TREATMENTS: "1"
+  CDC_PARTITIONS_DEVICESTATUS: "1"
+  CDC_RETENTION_MS: "604800000"  # 7 days
+  CDC_TASKS_MAX: "1"
+  # Critical for ephemeral mode: Skip Debezium initial snapshot
+  # Historical data comes from S3 snapshot, not oplog replay
+  CDC_SNAPSHOT_MODE: "never"
+  
+  # Kafka cluster references
+  KAFKA_CLUSTER_NAME: "kafka-cluster"
+  KAFKA_CONNECT_CLUSTER_NAME: "connect-cluster"
+  KAFKA_TOPIC_REPLICAS: "3"
+
+---
+# Alternative: Using NightscoutTenant CRD with ephemeral storage
+# (When CRD-based management is preferred over ConfigMap annotations)
+
+apiVersion: nightscout.io/v1alpha1
+kind: NightscoutTenant
+metadata:
+  name: ephemeral-demo
+  namespace: hosted-tenants
+spec:
+  # Storage mode: ephemeral or persistent (default)
+  storageMode: ephemeral
+  
+  # Ephemeral-specific configuration
+  ephemeralConfig:
+    # Object storage location for snapshots
+    snapshotBucket: "s3://nightscout-snapshots"
+    # Cron schedule for periodic snapshots
+    snapshotSchedule: "0 */6 * * *"
+    # How long to keep old snapshots
+    snapshotRetentionDays: 7
+    # Size limit for ephemeral volume
+    storageSizeLimit: "5Gi"
+  
+  # CDC configuration (auto-enabled for ephemeral)
+  cdc:
+    enabled: true
+    collections:
+      - name: entries
+        partitions: 3
+      - name: treatments
+        partitions: 1
+      - name: devicestatus
+        partitions: 1
+    retentionMs: 604800000
+    snapshotMode: never  # Required for ephemeral
+  
+  # Reference to tenant configuration ConfigMap
+  configMapRef:
+    name: ephemeral-demo-config
+  
+  # Nightscout container configuration
+  nightscout:
+    image: nightscout/cgm-remote-monitor:latest
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+  
+  # MongoDB container configuration
+  mongodb:
+    image: mongo:7.0
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
