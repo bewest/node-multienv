@@ -1,0 +1,143 @@
+# Nightscout Provisioner
+
+The Nightscout Provisioner is a Node.js REST API service that manages MongoDB databases and user credentials for multitenant Nightscout deployments.
+
+## Architecture Overview
+
+This project is part of a two-component system designed to host multiple Nightscout tenants:
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                         Multitenant System                              │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│   ┌───────────────────────┐         ┌───────────────────────┐          │
+│   │     node-multienv     │         │     provisioner       │          │
+│   │   (Compute Component) │◄───────►│  (Storage Component)  │          │
+│   ├───────────────────────┤         ├───────────────────────┤          │
+│   │ • Manages Nightscout  │         │ • Manages MongoDB     │          │
+│   │   application         │         │   databases           │          │
+│   │   instances           │         │ • Creates user        │          │
+│   │ • Runs in Kubernetes  │         │   credentials         │          │
+│   │ • Handles /environs   │         │ • Assigns unique      │          │
+│   │   endpoints           │         │   collection prefixes │          │
+│   └───────────────────────┘         └───────────────────────┘          │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+### Component Roles
+
+- **provisioner** (this repo): The "storage" component that manages MongoDB resources:
+  - Creates and manages tenant accounts
+  - Provisions database users with appropriate credentials
+  - Generates unique collection name prefixes for tenant isolation
+  - Forwards site creation requests to the compute component
+
+- **node-multienv**: The "compute" component that manages application instances:
+  - Receives environment configurations from the provisioner
+  - Deploys and manages Nightscout application instances
+  - Accessible via the `MULTI_ENV_API` environment variable
+
+## Tenant Isolation Model
+
+Each tenant receives complete data isolation through:
+
+1. **Unique Database**: Each account gets its own MongoDB database
+2. **Unique Credentials**: Each site gets its own database user credentials
+3. **Unique Collection Prefixes**: Core Nightscout collections use tenant-specific prefixes:
+   - `{prefix}.entries` - Blood glucose entries
+   - `{prefix}.settings` - User settings
+   - `{prefix}.treatments` - Treatment records
+   - `{prefix}.profile` - User profiles
+   - `{prefix}.devicestatus` - Device status
+
+The prefix pattern is: `{COLLECTION_PREFIX}{internal_name}.i.{collection_name}`
+
+## Key Workflows
+
+### Creating a New Tenant Site
+
+When a site is created via `POST /accounts/:account/sites/:name`:
+
+```
+1. Account Lookup
+   └─► Validate account exists
+
+2. User Suggestion & Creation
+   ├─► Generate unique username
+   ├─► Generate secure password
+   └─► Create MongoDB user with account DB access
+
+3. Site Configuration (suggest)
+   ├─► Build MongoDB connection string with user credentials
+   ├─► Generate unique collection prefixes
+   └─► Set Nightscout-specific environment variables
+
+4. Compute Forwarding (create)
+   └─► POST to node-multienv /environs/:sitename
+       with configuration payload
+```
+
+### Mesh Routing (Multi-Cluster)
+
+The mesh router (`mesh-router.js`) enables routing tenants across multiple provisioner backends:
+
+```
+Load Balancer ──► Conductor Endpoint ──► Route Lookup ──► Backend Selection
+                                              │
+                                              ▼
+                                    ┌─────────────────┐
+                                    │  MeshedRoute    │
+                                    │  - account      │
+                                    │  - backend      │
+                                    │  - created_at   │
+                                    └─────────────────┘
+```
+
+## Quick Start
+
+### Prerequisites
+
+- Node.js 20+
+- MongoDB (or use in-memory for development)
+
+### Development Mode
+
+```bash
+npm install
+npm run dev
+```
+
+This uses `mongodb-memory-server` for local testing without external dependencies.
+
+### Production Mode
+
+Set required environment variables and run:
+
+```bash
+export MONGO_ADMIN_URI="mongodb://..."
+export KEY_PREFIX_0="your-encryption-key"
+npm start
+```
+
+## API Reference
+
+See `openapi.yaml` for the complete API specification, or check `replit.md` for endpoint summaries.
+
+### Key Endpoints
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/accounts` | POST | Create a new tenant account |
+| `/accounts/:account/users` | POST | Create database user for account |
+| `/accounts/:account/sites/:name` | POST | Create site and forward to compute |
+| `/routes/mesh/:account` | GET/POST | Manage mesh routing for account |
+
+## Environment Variables
+
+See `replit.md` for a complete list of environment variables.
+
+## License
+
+BSD 3-Clause

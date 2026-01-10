@@ -1,0 +1,54 @@
+Nightscout Multitenant MongoDB Architecture: Topology Options
+The Three Deployment Models
+1. 1:All (Global Shared)
+Single MongoDB cluster serves all tenants
+Tenant isolation via collection prefixes (e.g., {prefix}.entries, {prefix}.treatments)
+Pros: Maximum density, simplest infrastructure
+Cons: Single point of failure, operational burden on one critical cluster, limited isolation
+2. N:M (Mesh/Shared Clusters)
+Tenants distributed across multiple MongoDB clusters
+Mesh router tracks account-to-backend mappings and tells load balancer where to route
+Uses x-provisioner-* headers with NGINX auth_request for routing decisions
+Pros: Horizontal scaling, fault isolation between clusters, proven pattern
+Cons: Still managing N MongoDB clusters, mesh router DB becomes source of truth
+3. 1:1 (Colocated/Isolated)
+Each tenant gets their own MongoDB sidecar in the same pod
+Compute and storage colocated, true isolation
+Pros: Zero shared MongoDB ops, best isolation, tenant lifecycle is simple (delete pod = done)
+Cons: Worst density, blocked by cloud volume limits
+The Volume Limit Problem (1:1 Model)
+Cloud providers limit how many block volumes can attach to a single Kubernetes node:
+
+Provider	Max Volumes/Node	Notes
+AWS EKS	25-28	EC2 instance-dependent
+Azure AKS	32-64	VM SKU-dependent
+GCP GKE	128	Best for high density
+Bare metal + Longhorn	Unlimited	Self-managed
+MongoDB requires XFS or ext4 — NFS-based solutions (Azure Files, EFS) are not supported.
+
+Current State
+Running ~80-100 tenants per pod on 16-32GB nodes
+N:M mesh model with docker-compose MongoDB clusters
+Mesh router handles routing, provisioner handles tenant DB/user creation
+Operational pain point: managing MongoDB clusters
+Options for Kubernetes-Native Mesh
+Approach	Effort	Benefit
+Docker-Compose (current)	Low	Proven, but separate from K8s
+MCK (MongoDB Controllers for K8s)	Medium	K8s-native, self-healing, GitOps-ready
+1:1 Colocated on GKE	High	Eliminates shared MongoDB ops entirely
+Provider Recommendations
+For N:M Mesh Model:
+
+Any provider works; MCK automates MongoDB lifecycle
+Volume limits not a constraint (few large clusters)
+For 1:1 Colocated Model:
+
+GCP GKE — 128 volumes/node fits 80-100 tenant density ✓
+Azure AKS — 64 volumes/node, would need ~1.5x nodes
+Bare metal (Hetzner/OVH) + Longhorn — no limits, lower cost, more ops
+TL;DR
+If you want...	Go with...
+Reduce ops, keep current architecture	MCK-managed MongoDB clusters
+Eliminate shared MongoDB entirely	1:1 colocated on GCP GKE (128 vol limit)
+Maximum cost efficiency	Bare metal + Longhorn, but more DIY
+GKE's 128-volume limit is the sweet spot for matching current 80-100 tenant/node density with a fully isolated 1:1 model.

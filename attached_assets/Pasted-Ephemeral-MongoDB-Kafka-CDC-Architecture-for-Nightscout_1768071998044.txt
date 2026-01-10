@@ -1,0 +1,66 @@
+Ephemeral MongoDB + Kafka CDC Architecture for Nightscout Multitenancy
+The Problem
+Cloud Kubernetes providers limit block volumes per node (AWS: ~28, Azure: ~64), making 1:1 colocated tenant pods with persistent storage impractical at scale.
+
+The Idea
+Instead of fighting volume limits, make tenant pods stateless with ephemeral storage. Use a central data warehouse as the source of truth, with Kafka CDC to keep it synced.
+
+Why It Works for Nightscout
+Tenant databases are small: Most are <2GB even after 2 years
+Low write frequency: CGM data arrives every ~5 minutes
+Hydration is fast: ~10-30 seconds to load 2GB from object storage
+Architecture
+┌────────────────────────────────────────────────────────────────────────┐
+│                           POD STARTUP                                  │
+│                                                                        │
+│   Data Warehouse ──────► Init Container ──────► Ephemeral MongoDB     │
+│   (S3/GCS snapshot)       (mongorestore)        (emptyDir volume)     │
+└────────────────────────────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────────────────┐
+│                           RUNTIME                                      │
+│                                                                        │
+│   Nightscout App ◄──────► Ephemeral MongoDB                           │
+│                                  │                                     │
+│                                  ▼                                     │
+│                          Change Streams                                │
+│                                  │                                     │
+│                                  ▼                                     │
+│                          Kafka (CDC topic)                             │
+│                                  │                                     │
+│                                  ▼                                     │
+│                          Data Warehouse                                │
+└────────────────────────────────────────────────────────────────────────┘
+Startup Sequence
+1. Start mongod with --replSet rs0 (required for Change Streams)
+2. rs.initiate() (single-node replica set)
+3. mongorestore from warehouse snapshot
+4. Start Kafka connector (tails from "now")
+5. Ready to serve traffic
+Key Insight: No Oplog Hydration Needed
+Oplog only captures new changes after startup
+Historical data is already in the warehouse (that's where you restored from)
+Kafka connector starts fresh, watching for changes going forward
+Trade-offs
+Benefit	Cost
+No volume limits - works on any provider	Kafka cluster becomes critical infrastructure
+No MongoDB ops per tenant	1-2 min data loss window on pod crash
+Simple pod lifecycle (delete = done)	Cold start adds ~30s latency
+Provider-agnostic	Need idempotent consumers for at-least-once delivery
+When This Works
+✅ Small tenant databases (<2GB)
+✅ Low write frequency (CGM every 5 min)
+✅ Tolerant of brief data loss on crash
+✅ Want to avoid per-tenant MongoDB ops
+
+Components Needed
+Object Storage (S3/GCS): Tenant snapshots for hydration
+Kafka Cluster: 3+ brokers, CDC topics per tenant or partitioned
+MongoDB Kafka Connector or Debezium: Streams changes out
+Warehouse Consumer: Applies CDC events to central store
+Comparison to Other Models
+Model	Volume Limits	Ops Burden	Data Loss Risk
+1:All (shared cluster)	N/A	High (one critical DB)	Low
+N:M (mesh)	N/A	Medium (N clusters)	Low
+1:1 Persistent (GKE)	128/node	Low per tenant	None
+1:1 Ephemeral + CDC	None	Low + Kafka ops	1-2 min window
+Bottom line: For Nightscout's small databases and low write rates, ephemeral + CDC is a viable way to achieve 1:1 tenant isolation without being constrained by cloud volume limits or switching providers.
