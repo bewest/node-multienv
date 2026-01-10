@@ -151,7 +151,7 @@ Unlike the original proposal, this architecture uses the **warehouse as both the
 | Original Approach | Warehouse-First Approach |
 |-------------------|--------------------------|
 | CDC → Warehouse (durability) | CDC → Warehouse (durability) |
-| CronJob → S3 (snapshots) | ~~Not needed~~ |
+| CronJob → S3 (snapshots) | *Eliminated* |
 | S3 → Init Container (hydration) | Warehouse → Init Container (hydration) |
 
 This eliminates:
@@ -214,32 +214,7 @@ volumes:
 
 ### Phase 1: Hydration Init Container
 
-```bash
-#!/bin/bash
-# hydrate-from-warehouse.sh
-
-# 1. Request export from warehouse API
-log_info "Requesting database export from warehouse for tenant ${TENANT_ID}"
-EXPORT_STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
-  "${WAREHOUSE_EXPORT_URL}/api/v1/tenants/${TENANT_ID}/export/status")
-
-if [[ "$EXPORT_STATUS" == "404" ]]; then
-  log_info "No data found in warehouse for tenant ${TENANT_ID}, starting with empty database"
-  exit 0
-fi
-
-# 2. Stream export directly into mongorestore
-log_info "Streaming database restore from warehouse"
-curl -s "${WAREHOUSE_EXPORT_URL}/api/v1/tenants/${TENANT_ID}/export" | \
-  mongorestore --gzip --archive --dir=/data/db
-
-if [[ $? -ne 0 ]]; then
-  log_error "Failed to restore from warehouse"
-  exit 1
-fi
-
-log_info "Hydration complete"
-```
+The init container fetches tenant data from the warehouse and restores it to the emptyDir volume.
 
 ### Phase 2: MongoDB Startup
 
@@ -328,75 +303,679 @@ When a pod crashes:
 
 ---
 
-## Warehouse Consumer Contract
+## Warehouse Consumer: Detailed Specification
 
-The warehouse consumer is the critical component that:
-1. Applies CDC events to maintain canonical collections
-2. Exposes an export API for hydration
+The warehouse consumer is the critical component that applies CDC events to maintain canonical collections and exposes an export API for hydration.
 
-### Required Capabilities
+### Architecture Overview
 
-#### 1. CDC Event Application
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         WAREHOUSE SYSTEM                                    │
+│                                                                             │
+│  ┌─────────────────┐     ┌─────────────────┐     ┌─────────────────────┐   │
+│  │  Kafka Topics   │────►│  Warehouse      │────►│  Warehouse MongoDB  │   │
+│  │  (per-tenant)   │     │  Consumer       │     │  (per-tenant DBs)   │   │
+│  └─────────────────┘     └─────────────────┘     └─────────────────────┘   │
+│                                                            │                │
+│                                                            ▼                │
+│                                                  ┌─────────────────────┐   │
+│                                                  │  Warehouse Export   │   │
+│                                                  │  API Service        │   │
+│                                                  └─────────────────────┘   │
+│                                                            │                │
+└────────────────────────────────────────────────────────────┼────────────────┘
+                                                             │
+                                                             ▼
+                                                  ┌─────────────────────┐
+                                                  │  Tenant Pods        │
+                                                  │  (hydration)        │
+                                                  └─────────────────────┘
+```
 
-The consumer must materialize **full MongoDB documents** (not just deltas) in per-tenant collections:
+### Debezium CDC Event Format
 
-```javascript
-// Warehouse schema: one database per tenant
-// Database: nightscout_${tenantId}
-// Collections: entries, treatments, devicestatus, etc.
+Debezium MongoDB connector produces events in the following format:
 
-// CDC event handling (pseudo-code)
-function applyCDCEvent(event) {
-  const { tenantId, collection, operation, document, documentKey } = event;
-  const db = warehouse.db(`nightscout_${tenantId}`);
-  
-  switch (operation) {
-    case 'insert':
-    case 'update':
-    case 'replace':
-      db.collection(collection).replaceOne(
-        { _id: documentKey._id },
-        document,
-        { upsert: true }
-      );
-      break;
-    case 'delete':
-      db.collection(collection).deleteOne({ _id: documentKey._id });
-      break;
+```json
+{
+  "schema": { ... },
+  "payload": {
+    "before": null,
+    "after": "{\"_id\": {\"$oid\": \"...\"}, \"sgv\": 120, \"date\": 1704844800000, ...}",
+    "patch": null,
+    "filter": null,
+    "updateDescription": null,
+    "source": {
+      "version": "2.4.0.Final",
+      "connector": "mongodb",
+      "name": "tenant123",
+      "ts_ms": 1704844800000,
+      "snapshot": "false",
+      "db": "nightscout",
+      "sequence": null,
+      "rs": "rs0",
+      "collection": "entries",
+      "ord": 1,
+      "lsid": null,
+      "txnNumber": null
+    },
+    "op": "c",
+    "ts_ms": 1704844800123,
+    "transaction": null
   }
 }
 ```
 
-#### 2. Export API
+**Key fields:**
+- `payload.op`: Operation type (`c`=create, `u`=update, `r`=read/snapshot, `d`=delete)
+- `payload.after`: Full document as JSON string (for inserts/updates)
+- `payload.source.name`: Tenant ID (Kafka topic prefix)
+- `payload.source.collection`: Collection name
+- `payload.source.ts_ms`: Source timestamp
 
-REST endpoint to stream `mongodump`-compatible archive:
+### Warehouse Consumer Implementation
 
+```javascript
+// warehouse-consumer/src/consumer.js
+'use strict';
+
+const { Kafka } = require('kafkajs');
+const { MongoClient } = require('mongodb');
+const bunyan = require('bunyan');
+
+const log = bunyan.createLogger({ name: 'warehouse-consumer' });
+
+class WarehouseConsumer {
+  constructor(config) {
+    this.config = config;
+    this.kafka = new Kafka({
+      clientId: 'warehouse-consumer',
+      brokers: config.kafkaBrokers,
+    });
+    this.consumer = this.kafka.consumer({ 
+      groupId: 'warehouse-consumer-group',
+      sessionTimeout: 30000,
+      heartbeatInterval: 3000,
+    });
+    this.mongoClient = null;
+    this.warehouseDb = null;
+  }
+
+  async connect() {
+    // Connect to Kafka
+    await this.consumer.connect();
+    log.info('Connected to Kafka');
+
+    // Connect to warehouse MongoDB
+    this.mongoClient = await MongoClient.connect(this.config.warehouseMongoUri, {
+      maxPoolSize: 50,
+      writeConcern: { w: 'majority', j: true },
+    });
+    this.warehouseDb = this.mongoClient.db();
+    log.info('Connected to warehouse MongoDB');
+
+    // Subscribe to all tenant CDC topics using regex pattern
+    await this.consumer.subscribe({
+      topics: [/^[a-z0-9-]+\.(nightscout)\.(entries|treatments|devicestatus)$/],
+      fromBeginning: false,
+    });
+    log.info('Subscribed to tenant CDC topics');
+  }
+
+  async run() {
+    await this.consumer.run({
+      eachMessage: async ({ topic, partition, message }) => {
+        try {
+          await this.processMessage(topic, message);
+        } catch (err) {
+          log.error({ err, topic, partition }, 'Failed to process message');
+          // Don't throw - continue processing other messages
+          // Failed messages will be retried on consumer restart
+        }
+      },
+    });
+  }
+
+  async processMessage(topic, message) {
+    const event = JSON.parse(message.value.toString());
+    const payload = event.payload;
+
+    // Extract tenant and collection from topic name
+    // Topic format: ${tenantId}.nightscout.${collection}
+    const [tenantId, , collection] = topic.split('.');
+    
+    // Get or create per-tenant database
+    const tenantDb = this.mongoClient.db(`nightscout_${tenantId}`);
+    const coll = tenantDb.collection(collection);
+
+    const operation = payload.op;
+    const sourceTs = new Date(payload.source.ts_ms);
+
+    switch (operation) {
+      case 'c': // Create (insert)
+      case 'r': // Read (snapshot) - treat as upsert
+      case 'u': // Update
+        const doc = JSON.parse(payload.after);
+        // Parse MongoDB Extended JSON
+        const parsedDoc = this.parseExtendedJson(doc);
+        
+        await coll.replaceOne(
+          { _id: parsedDoc._id },
+          { ...parsedDoc, _warehouseUpdated: sourceTs },
+          { upsert: true }
+        );
+        log.debug({ tenantId, collection, op: operation, docId: parsedDoc._id }, 'Applied CDC event');
+        break;
+
+      case 'd': // Delete
+        const filter = JSON.parse(payload.filter || payload.before);
+        const docId = this.parseExtendedJson(filter)._id;
+        
+        await coll.deleteOne({ _id: docId });
+        log.debug({ tenantId, collection, op: operation, docId }, 'Applied delete');
+        break;
+
+      default:
+        log.warn({ operation, topic }, 'Unknown operation type');
+    }
+  }
+
+  parseExtendedJson(doc) {
+    // Convert MongoDB Extended JSON to native types
+    // Example: {"$oid": "..."} -> ObjectId("...")
+    const EJSON = require('bson').EJSON;
+    return EJSON.parse(JSON.stringify(doc), { relaxed: false });
+  }
+
+  async disconnect() {
+    await this.consumer.disconnect();
+    await this.mongoClient.close();
+    log.info('Disconnected');
+  }
+}
+
+// Main entry point
+async function main() {
+  const config = {
+    kafkaBrokers: (process.env.KAFKA_BROKERS || 'kafka-cluster-kafka-bootstrap:9092').split(','),
+    warehouseMongoUri: process.env.WAREHOUSE_MONGODB_URI || 'mongodb://localhost:27017',
+  };
+
+  const consumer = new WarehouseConsumer(config);
+  
+  // Graceful shutdown
+  process.on('SIGTERM', async () => {
+    log.info('Received SIGTERM, shutting down...');
+    await consumer.disconnect();
+    process.exit(0);
+  });
+
+  await consumer.connect();
+  await consumer.run();
+}
+
+main().catch((err) => {
+  log.fatal({ err }, 'Consumer failed');
+  process.exit(1);
+});
 ```
-GET /api/v1/tenants/{tenantId}/export
+
+### Consumer Deployment
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: warehouse-consumer
+  namespace: nightscout-system
+  labels:
+    app: warehouse-consumer
+spec:
+  replicas: 3  # Multiple replicas for HA, Kafka handles partition assignment
+  selector:
+    matchLabels:
+      app: warehouse-consumer
+  template:
+    metadata:
+      labels:
+        app: warehouse-consumer
+    spec:
+      containers:
+        - name: consumer
+          image: ${warehouseConsumerImage}
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          env:
+            - name: KAFKA_BROKERS
+              value: "kafka-cluster-kafka-bootstrap.kafka.svc.cluster.local:9092"
+            - name: WAREHOUSE_MONGODB_URI
+              valueFrom:
+                secretKeyRef:
+                  name: warehouse-credentials
+                  key: MONGODB_URI
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 5
+```
+
+### Consumer Metrics
+
+The consumer should expose Prometheus metrics:
+
+```javascript
+// Metrics endpoint
+const promClient = require('prom-client');
+
+const messagesProcessed = new promClient.Counter({
+  name: 'warehouse_consumer_messages_processed_total',
+  help: 'Total CDC messages processed',
+  labelNames: ['tenant', 'collection', 'operation'],
+});
+
+const messageLatency = new promClient.Histogram({
+  name: 'warehouse_consumer_message_latency_seconds',
+  help: 'Latency from source to warehouse apply',
+  labelNames: ['tenant', 'collection'],
+  buckets: [0.01, 0.05, 0.1, 0.5, 1, 5, 10, 30, 60],
+});
+
+const consumerLag = new promClient.Gauge({
+  name: 'warehouse_consumer_lag_messages',
+  help: 'Consumer lag in messages',
+  labelNames: ['topic', 'partition'],
+});
+```
+
+---
+
+## Warehouse Export API: Detailed Specification
+
+The export API streams tenant data as mongodump-compatible archives for pod hydration.
+
+### API Endpoints
+
+#### GET /api/v1/tenants/{tenantId}/export
+
+Stream a gzipped mongodump archive of the tenant's database.
+
+**Request:**
+```http
+GET /api/v1/tenants/demo-tenant/export HTTP/1.1
+Host: warehouse-api.nightscout-system.svc.cluster.local
+Accept: application/octet-stream
+```
+
+**Response (success):**
+```http
+HTTP/1.1 200 OK
 Content-Type: application/octet-stream
+Content-Disposition: attachment; filename="demo-tenant.archive.gz"
+X-Warehouse-Export-Size: 1048576
+X-Warehouse-Export-Collections: entries,treatments,devicestatus
+Transfer-Encoding: chunked
 
-Response: gzipped mongodump archive stream
+<binary mongodump archive data>
 ```
 
-```
-GET /api/v1/tenants/{tenantId}/export/status
+**Response (no data):**
+```http
+HTTP/1.1 404 Not Found
 Content-Type: application/json
 
-Response: { "exists": true, "lastUpdated": "2026-01-10T12:00:00Z", "sizeBytes": 1048576 }
-         or 404 if tenant has no data
+{
+  "error": "tenant_not_found",
+  "message": "No data exists for tenant demo-tenant"
+}
 ```
 
-#### 3. Implementation Options
+**Response (rate limited):**
+```http
+HTTP/1.1 503 Service Unavailable
+Content-Type: application/json
+Retry-After: 30
 
-| Option | Pros | Cons |
-|--------|------|------|
-| **MongoDB Warehouse + Custom API** | Native mongodump, simple export | Need separate API service |
-| **Kafka Connect MongoDB Sink** | Standard connector, automatic | Need API wrapper for export |
-| **Custom Kafka Streams App** | Full control | More code to maintain |
+{
+  "error": "rate_limited",
+  "message": "Export queue full, retry after 30 seconds"
+}
+```
 
-**Recommended:** MongoDB as warehouse backend with a lightweight Node.js API service that wraps `mongodump` for exports. This keeps the stack consistent (MongoDB everywhere) and uses proven tools.
+#### GET /api/v1/tenants/{tenantId}/export/status
 
-### Warehouse API Service
+Check if tenant data exists and get metadata.
+
+**Request:**
+```http
+GET /api/v1/tenants/demo-tenant/export/status HTTP/1.1
+Host: warehouse-api.nightscout-system.svc.cluster.local
+Accept: application/json
+```
+
+**Response (exists):**
+```http
+HTTP/1.1 200 OK
+Content-Type: application/json
+
+{
+  "exists": true,
+  "tenantId": "demo-tenant",
+  "database": "nightscout_demo-tenant",
+  "collections": {
+    "entries": {
+      "count": 52560,
+      "sizeBytes": 15728640,
+      "lastUpdated": "2026-01-10T12:00:00.000Z"
+    },
+    "treatments": {
+      "count": 1250,
+      "sizeBytes": 524288,
+      "lastUpdated": "2026-01-10T11:55:00.000Z"
+    },
+    "devicestatus": {
+      "count": 8760,
+      "sizeBytes": 3145728,
+      "lastUpdated": "2026-01-10T12:00:00.000Z"
+    }
+  },
+  "totalSizeBytes": 19398656,
+  "estimatedExportDuration": "15s"
+}
+```
+
+**Response (not found):**
+```http
+HTTP/1.1 404 Not Found
+Content-Type: application/json
+
+{
+  "exists": false,
+  "tenantId": "demo-tenant"
+}
+```
+
+#### GET /healthz
+
+Health check endpoint.
+
+**Response:**
+```http
+HTTP/1.1 200 OK
+Content-Type: application/json
+
+{
+  "status": "healthy",
+  "mongoConnected": true,
+  "activeExports": 3,
+  "maxConcurrentExports": 10
+}
+```
+
+### Export API Implementation
+
+```javascript
+// warehouse-api/src/server.js
+'use strict';
+
+const restify = require('restify');
+const { MongoClient } = require('mongodb');
+const { spawn } = require('child_process');
+const bunyan = require('bunyan');
+const Semaphore = require('semaphore-async-await').default;
+
+const log = bunyan.createLogger({ name: 'warehouse-api' });
+
+const MAX_CONCURRENT_EXPORTS = parseInt(process.env.MAX_CONCURRENT_EXPORTS || '10', 10);
+const EXPORT_TIMEOUT_MS = parseInt(process.env.EXPORT_TIMEOUT_MS || '300000', 10); // 5 minutes
+const exportSemaphore = new Semaphore(MAX_CONCURRENT_EXPORTS);
+
+let mongoClient = null;
+
+async function connectMongo() {
+  const uri = process.env.WAREHOUSE_MONGODB_URI;
+  mongoClient = await MongoClient.connect(uri, {
+    maxPoolSize: 20,
+    serverSelectionTimeoutMS: 5000,
+  });
+  log.info('Connected to warehouse MongoDB');
+}
+
+async function getTenantStats(tenantId) {
+  const dbName = `nightscout_${tenantId}`;
+  const db = mongoClient.db(dbName);
+  
+  // Check if database exists by listing collections
+  const collections = await db.listCollections().toArray();
+  if (collections.length === 0) {
+    return null;
+  }
+
+  const stats = {
+    exists: true,
+    tenantId,
+    database: dbName,
+    collections: {},
+    totalSizeBytes: 0,
+  };
+
+  for (const coll of collections) {
+    const collStats = await db.command({ collStats: coll.name });
+    const lastDoc = await db.collection(coll.name)
+      .findOne({}, { sort: { _warehouseUpdated: -1 }, projection: { _warehouseUpdated: 1 } });
+    
+    stats.collections[coll.name] = {
+      count: collStats.count,
+      sizeBytes: collStats.size,
+      lastUpdated: lastDoc?._warehouseUpdated || null,
+    };
+    stats.totalSizeBytes += collStats.size;
+  }
+
+  // Estimate export duration: ~1MB/s for mongodump + compression
+  const estimatedSeconds = Math.ceil(stats.totalSizeBytes / (1024 * 1024));
+  stats.estimatedExportDuration = `${Math.max(5, estimatedSeconds)}s`;
+
+  return stats;
+}
+
+async function streamExport(tenantId, res) {
+  const dbName = `nightscout_${tenantId}`;
+  const mongoUri = process.env.WAREHOUSE_MONGODB_URI;
+
+  // Spawn mongodump process
+  const mongodump = spawn('mongodump', [
+    `--uri=${mongoUri}`,
+    `--db=${dbName}`,
+    '--archive',
+    '--gzip',
+  ], {
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+
+  let exportComplete = false;
+  let bytesWritten = 0;
+
+  // Set timeout
+  const timeout = setTimeout(() => {
+    if (!exportComplete) {
+      log.warn({ tenantId }, 'Export timeout, killing mongodump');
+      mongodump.kill('SIGTERM');
+    }
+  }, EXPORT_TIMEOUT_MS);
+
+  // Pipe stdout to response
+  mongodump.stdout.on('data', (chunk) => {
+    bytesWritten += chunk.length;
+    res.write(chunk);
+  });
+
+  // Log stderr
+  mongodump.stderr.on('data', (data) => {
+    log.debug({ tenantId, stderr: data.toString() }, 'mongodump stderr');
+  });
+
+  return new Promise((resolve, reject) => {
+    mongodump.on('close', (code) => {
+      clearTimeout(timeout);
+      exportComplete = true;
+
+      if (code === 0) {
+        log.info({ tenantId, bytesWritten }, 'Export completed successfully');
+        res.end();
+        resolve();
+      } else {
+        log.error({ tenantId, exitCode: code }, 'mongodump failed');
+        reject(new Error(`mongodump exited with code ${code}`));
+      }
+    });
+
+    mongodump.on('error', (err) => {
+      clearTimeout(timeout);
+      exportComplete = true;
+      log.error({ tenantId, err }, 'mongodump error');
+      reject(err);
+    });
+  });
+}
+
+function createServer() {
+  const server = restify.createServer({
+    name: 'warehouse-api',
+    log,
+  });
+
+  server.use(restify.plugins.queryParser());
+  server.use(restify.plugins.requestLogger());
+
+  // Health check
+  server.get('/healthz', async (req, res, next) => {
+    try {
+      await mongoClient.db().admin().ping();
+      res.json({
+        status: 'healthy',
+        mongoConnected: true,
+        activeExports: MAX_CONCURRENT_EXPORTS - exportSemaphore.getPermits(),
+        maxConcurrentExports: MAX_CONCURRENT_EXPORTS,
+      });
+    } catch (err) {
+      res.status(503);
+      res.json({ status: 'unhealthy', error: err.message });
+    }
+    next();
+  });
+
+  // Ready check
+  server.get('/ready', async (req, res, next) => {
+    try {
+      await mongoClient.db().admin().ping();
+      res.json({ ready: true });
+    } catch (err) {
+      res.status(503);
+      res.json({ ready: false, error: err.message });
+    }
+    next();
+  });
+
+  // Export status
+  server.get('/api/v1/tenants/:tenantId/export/status', async (req, res, next) => {
+    try {
+      const stats = await getTenantStats(req.params.tenantId);
+      if (stats) {
+        res.json(stats);
+      } else {
+        res.status(404);
+        res.json({ exists: false, tenantId: req.params.tenantId });
+      }
+    } catch (err) {
+      log.error({ err, tenantId: req.params.tenantId }, 'Failed to get tenant stats');
+      res.status(500);
+      res.json({ error: 'internal_error', message: err.message });
+    }
+    next();
+  });
+
+  // Export stream
+  server.get('/api/v1/tenants/:tenantId/export', async (req, res, next) => {
+    const tenantId = req.params.tenantId;
+    
+    // Check if tenant exists
+    const stats = await getTenantStats(tenantId);
+    if (!stats) {
+      res.status(404);
+      res.json({ error: 'tenant_not_found', message: `No data exists for tenant ${tenantId}` });
+      return next();
+    }
+
+    // Try to acquire semaphore with timeout
+    const acquired = await exportSemaphore.tryAcquire(30000); // 30s wait
+    if (!acquired) {
+      res.status(503);
+      res.header('Retry-After', '30');
+      res.json({ error: 'rate_limited', message: 'Export queue full, retry after 30 seconds' });
+      return next();
+    }
+
+    try {
+      // Set response headers for streaming
+      res.header('Content-Type', 'application/octet-stream');
+      res.header('Content-Disposition', `attachment; filename="${tenantId}.archive.gz"`);
+      res.header('X-Warehouse-Export-Size', stats.totalSizeBytes);
+      res.header('X-Warehouse-Export-Collections', Object.keys(stats.collections).join(','));
+      res.header('Transfer-Encoding', 'chunked');
+
+      await streamExport(tenantId, res);
+    } catch (err) {
+      log.error({ err, tenantId }, 'Export failed');
+      // Response may be partially written, can't change status
+      res.end();
+    } finally {
+      exportSemaphore.release();
+    }
+    next();
+  });
+
+  return server;
+}
+
+async function main() {
+  await connectMongo();
+  
+  const server = createServer();
+  const port = parseInt(process.env.PORT || '8080', 10);
+  
+  server.listen(port, () => {
+    log.info({ port }, 'Warehouse API listening');
+  });
+
+  process.on('SIGTERM', async () => {
+    log.info('Received SIGTERM, shutting down...');
+    server.close();
+    await mongoClient.close();
+    process.exit(0);
+  });
+}
+
+main().catch((err) => {
+  log.fatal({ err }, 'Server failed to start');
+  process.exit(1);
+});
+```
+
+### Export API Deployment
 
 ```yaml
 apiVersion: apps/v1
@@ -404,21 +983,298 @@ kind: Deployment
 metadata:
   name: warehouse-api
   namespace: nightscout-system
+  labels:
+    app: warehouse-api
 spec:
   replicas: 2
+  selector:
+    matchLabels:
+      app: warehouse-api
   template:
+    metadata:
+      labels:
+        app: warehouse-api
     spec:
       containers:
         - name: api
           image: ${warehouseApiImage}
           ports:
             - containerPort: 8080
+          resources:
+            requests:
+              cpu: 200m
+              memory: 256Mi
+            limits:
+              cpu: 1000m
+              memory: 512Mi
           env:
             - name: WAREHOUSE_MONGODB_URI
               valueFrom:
                 secretKeyRef:
                   name: warehouse-credentials
                   key: MONGODB_URI
+            - name: MAX_CONCURRENT_EXPORTS
+              value: "10"
+            - name: EXPORT_TIMEOUT_MS
+              value: "300000"
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 5
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: warehouse-api
+  namespace: nightscout-system
+spec:
+  selector:
+    app: warehouse-api
+  ports:
+    - port: 80
+      targetPort: 8080
+  type: ClusterIP
+```
+
+---
+
+## Hydration Init Container: Detailed Implementation
+
+### Full Script with Error Handling
+
+```bash
+#!/bin/bash
+# hydrate-from-warehouse.sh
+#
+# Init container script that hydrates ephemeral MongoDB from the warehouse.
+# Streams mongodump archive from warehouse API and restores to local emptyDir.
+#
+# Environment Variables:
+#   WAREHOUSE_EXPORT_URL - Base URL of warehouse API (required)
+#   TENANT_ID           - Tenant identifier (required)
+#   MONGO_DATA_DIR      - MongoDB data directory (default: /data/db)
+#   MAX_RETRIES         - Maximum retry attempts (default: 5)
+#   INITIAL_RETRY_DELAY - Initial retry delay in seconds (default: 5)
+#   MAX_RETRY_DELAY     - Maximum retry delay in seconds (default: 60)
+#   HYDRATION_TIMEOUT   - Curl timeout in seconds (default: 300)
+
+set -euo pipefail
+
+# Logging functions
+log_info() {
+  echo "[$(date -Iseconds)] INFO: $*"
+}
+
+log_warn() {
+  echo "[$(date -Iseconds)] WARN: $*" >&2
+}
+
+log_error() {
+  echo "[$(date -Iseconds)] ERROR: $*" >&2
+}
+
+# Configuration with defaults
+WAREHOUSE_EXPORT_URL="${WAREHOUSE_EXPORT_URL:?WAREHOUSE_EXPORT_URL is required}"
+TENANT_ID="${TENANT_ID:?TENANT_ID is required}"
+MONGO_DATA_DIR="${MONGO_DATA_DIR:-/data/db}"
+MAX_RETRIES="${MAX_RETRIES:-5}"
+INITIAL_RETRY_DELAY="${INITIAL_RETRY_DELAY:-5}"
+MAX_RETRY_DELAY="${MAX_RETRY_DELAY:-60}"
+HYDRATION_TIMEOUT="${HYDRATION_TIMEOUT:-300}"
+
+# Derived values
+STATUS_URL="${WAREHOUSE_EXPORT_URL}/api/v1/tenants/${TENANT_ID}/export/status"
+EXPORT_URL="${WAREHOUSE_EXPORT_URL}/api/v1/tenants/${TENANT_ID}/export"
+
+log_info "Starting hydration for tenant: ${TENANT_ID}"
+log_info "Warehouse API: ${WAREHOUSE_EXPORT_URL}"
+log_info "Data directory: ${MONGO_DATA_DIR}"
+
+# Ensure data directory exists and is empty
+mkdir -p "${MONGO_DATA_DIR}"
+if [ "$(ls -A ${MONGO_DATA_DIR})" ]; then
+  log_warn "Data directory not empty, cleaning..."
+  rm -rf "${MONGO_DATA_DIR:?}"/*
+fi
+
+# Check if tenant data exists in warehouse
+check_tenant_exists() {
+  local http_code
+  http_code=$(curl -s -o /dev/null -w "%{http_code}" \
+    --connect-timeout 10 \
+    --max-time 30 \
+    "${STATUS_URL}")
+  echo "${http_code}"
+}
+
+# Perform hydration with streaming restore
+do_hydration() {
+  log_info "Streaming database restore from warehouse..."
+  
+  # Create a temporary file for mongorestore stderr
+  local restore_log
+  restore_log=$(mktemp)
+  
+  # Stream download through mongorestore
+  # Using process substitution to capture exit codes properly
+  local curl_exit=0
+  local restore_exit=0
+  
+  {
+    curl -sf \
+      --connect-timeout 30 \
+      --max-time "${HYDRATION_TIMEOUT}" \
+      --retry 0 \
+      "${EXPORT_URL}" || curl_exit=$?
+  } | {
+    mongorestore \
+      --gzip \
+      --archive \
+      --drop \
+      --dir="${MONGO_DATA_DIR}" \
+      --quiet \
+      2>"${restore_log}" || restore_exit=$?
+  }
+  
+  # Check for errors
+  if [ "${curl_exit}" -ne 0 ]; then
+    log_error "Curl failed with exit code: ${curl_exit}"
+    rm -f "${restore_log}"
+    return 1
+  fi
+  
+  if [ "${restore_exit}" -ne 0 ]; then
+    log_error "mongorestore failed with exit code: ${restore_exit}"
+    log_error "mongorestore output: $(cat ${restore_log})"
+    rm -f "${restore_log}"
+    return 1
+  fi
+  
+  # Log restore summary
+  if [ -s "${restore_log}" ]; then
+    log_info "mongorestore output: $(cat ${restore_log})"
+  fi
+  
+  rm -f "${restore_log}"
+  return 0
+}
+
+# Main execution with retry logic
+main() {
+  local retry_delay="${INITIAL_RETRY_DELAY}"
+  local attempt=1
+  
+  while [ "${attempt}" -le "${MAX_RETRIES}" ]; do
+    log_info "Hydration attempt ${attempt}/${MAX_RETRIES}"
+    
+    # Check if tenant exists
+    local status_code
+    status_code=$(check_tenant_exists)
+    
+    case "${status_code}" in
+      200)
+        log_info "Tenant data found in warehouse, proceeding with hydration..."
+        ;;
+      404)
+        log_info "No data found in warehouse for tenant ${TENANT_ID}"
+        log_info "Starting with empty database"
+        exit 0
+        ;;
+      503)
+        log_warn "Warehouse API rate limited (503), will retry..."
+        ;;
+      000)
+        log_warn "Failed to connect to warehouse API, will retry..."
+        ;;
+      *)
+        log_warn "Unexpected status code: ${status_code}, will retry..."
+        ;;
+    esac
+    
+    # Attempt hydration if we got 200
+    if [ "${status_code}" = "200" ]; then
+      if do_hydration; then
+        log_info "Hydration completed successfully"
+        
+        # Verify data directory has content
+        if [ "$(ls -A ${MONGO_DATA_DIR})" ]; then
+          log_info "Data directory populated, hydration verified"
+          exit 0
+        else
+          log_warn "Data directory empty after hydration, will retry..."
+        fi
+      else
+        log_warn "Hydration failed, will retry..."
+      fi
+    fi
+    
+    # Retry logic
+    if [ "${attempt}" -lt "${MAX_RETRIES}" ]; then
+      log_info "Waiting ${retry_delay}s before retry..."
+      sleep "${retry_delay}"
+      
+      # Exponential backoff with cap
+      retry_delay=$((retry_delay * 2))
+      if [ "${retry_delay}" -gt "${MAX_RETRY_DELAY}" ]; then
+        retry_delay="${MAX_RETRY_DELAY}"
+      fi
+    fi
+    
+    attempt=$((attempt + 1))
+  done
+  
+  log_error "Hydration failed after ${MAX_RETRIES} attempts"
+  exit 1
+}
+
+# Run main
+main
+```
+
+### Init Container Manifest
+
+```yaml
+initContainers:
+  - name: hydrate-from-warehouse
+    image: ${nsUtilityImage}
+    imagePullPolicy: IfNotPresent
+    command: ["/bin/bash", "/app/entrypoints/hydrate-from-warehouse.sh"]
+    env:
+      - name: WAREHOUSE_EXPORT_URL
+        value: "http://warehouse-api.nightscout-system.svc.cluster.local"
+      - name: TENANT_ID
+        valueFrom:
+          fieldRef:
+            fieldPath: metadata.labels['ns.mdn.io/tenant-id']
+      - name: MONGO_DATA_DIR
+        value: "/data/db"
+      - name: MAX_RETRIES
+        value: "5"
+      - name: INITIAL_RETRY_DELAY
+        value: "5"
+      - name: HYDRATION_TIMEOUT
+        value: "300"
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+    volumeMounts:
+      - name: data
+        mountPath: /data/db
+    securityContext:
+      runAsUser: 999  # mongodb user
+      runAsGroup: 999
 ```
 
 ---
@@ -444,35 +1300,30 @@ spec:
 
 ### 2. Warehouse Consumer
 
-**Not yet implemented.** This is the critical new component.
-
 **Requirements:**
 - Consume from `${tenantId}-*` Kafka topics
 - Apply changes idempotently to warehouse MongoDB
 - Handle at-least-once delivery (upsert pattern provides deduplication)
-- Expose export API for hydration
+- Expose health/metrics endpoints
 
-**Suggested Implementation:**
-- Kafka Connect MongoDB Sink connector for CDC → Warehouse
-- Lightweight API service for export endpoint
-- Or: Custom consumer service that does both
+### 3. Warehouse Export API
 
-### 3. Warehouse MongoDB Cluster
+**Requirements:**
+- Stream mongodump archives for tenant databases
+- Rate limiting for concurrent exports
+- Health and readiness endpoints
+
+### 4. Warehouse MongoDB Cluster
 
 **Required:**
 - MongoDB cluster (can be small, just needs to store aggregate of all ephemeral tenants)
 - Sizing: Sum of all ephemeral tenant databases + 20% overhead
 - Example: 100 tenants × 1GB average = ~120GB storage
 
-### 4. Utility Container Updates
+### 5. Utility Container Updates
 
 **Required scripts:**
 - `hydrate-from-warehouse.sh` - Stream restore from warehouse API
-- Updates to `mongodb-utils.sh` for ephemeral-specific logic
-
-**Not required (eliminated):**
-- ~~`snapshot-database.sh`~~ - No periodic snapshots needed
-- ~~CronJob rendering~~ - No snapshot jobs needed
 
 ---
 
@@ -559,71 +1410,207 @@ spec:
 
 ---
 
-## Operational Considerations
+## Operational Runbook
 
-### Rate Limiting for Mass Restarts
+### Monitoring Dashboard
 
-If a node fails and multiple ephemeral pods restart simultaneously, they'll all request warehouse exports at once. The export API should implement:
+Key metrics to display:
 
-```javascript
-// Rate limiting: max concurrent exports
-const MAX_CONCURRENT_EXPORTS = 10;
-const exportSemaphore = new Semaphore(MAX_CONCURRENT_EXPORTS);
+| Panel | Metric | Description |
+|-------|--------|-------------|
+| Consumer Lag | `warehouse_consumer_lag_messages` | CDC messages waiting to be processed |
+| Processing Rate | `rate(warehouse_consumer_messages_processed_total[5m])` | Messages processed per second |
+| Export Queue | `warehouse_api_active_exports` | Currently running exports |
+| Export Duration | `warehouse_api_export_duration_seconds` | Time to complete exports |
+| Hydration Failures | `ephemeral_pod_init_container_restarts` | Init container restart count |
+| Tenant Data Size | `warehouse_tenant_size_bytes` | Per-tenant database size |
 
-app.get('/api/v1/tenants/:tenantId/export', async (req, res) => {
-  if (!await exportSemaphore.tryAcquire(30000)) {  // 30s timeout
-    return res.status(503).json({ error: 'Export queue full, retry later' });
-  }
-  try {
-    await streamExport(req.params.tenantId, res);
-  } finally {
-    exportSemaphore.release();
-  }
-});
+### Alerting Rules
+
+```yaml
+groups:
+  - name: ephemeral-storage
+    rules:
+      - alert: WarehouseConsumerLagHigh
+        expr: warehouse_consumer_lag_messages > 10000
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Warehouse consumer lag is high"
+          description: "Consumer lag is {{ $value }} messages, CDC events are backing up"
+
+      - alert: WarehouseConsumerLagCritical
+        expr: warehouse_consumer_lag_messages > 100000
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Warehouse consumer lag is critical"
+          description: "Consumer lag is {{ $value }} messages, data loss risk increasing"
+
+      - alert: WarehouseExportQueueFull
+        expr: warehouse_api_active_exports >= 10
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Warehouse export queue is full"
+          description: "All export slots in use, new hydrations may be delayed"
+
+      - alert: HydrationFailureRate
+        expr: rate(ephemeral_pod_init_container_restarts[15m]) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High hydration failure rate"
+          description: "Ephemeral pods are failing to hydrate"
+
+      - alert: WarehouseAPIDown
+        expr: up{job="warehouse-api"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Warehouse API is down"
+          description: "Ephemeral pods cannot hydrate"
 ```
 
-Init containers should retry with exponential backoff:
+### Troubleshooting Guide
 
+#### Problem: Pod stuck in Init state
+
+**Symptoms:**
+- Pod shows `Init:0/1` status
+- Init container logs show repeated failures
+
+**Diagnosis:**
 ```bash
-MAX_RETRIES=5
-RETRY_DELAY=5
+# Check init container logs
+kubectl logs ${POD_NAME} -c hydrate-from-warehouse
 
-for i in $(seq 1 $MAX_RETRIES); do
-  if curl -sf "${WAREHOUSE_EXPORT_URL}/api/v1/tenants/${TENANT_ID}/export" | \
-     mongorestore --gzip --archive --dir=/data/db; then
-    log_info "Hydration complete"
-    exit 0
-  fi
-  log_warn "Hydration attempt $i failed, retrying in ${RETRY_DELAY}s"
-  sleep $RETRY_DELAY
-  RETRY_DELAY=$((RETRY_DELAY * 2))
-done
+# Check warehouse API health
+kubectl exec -n nightscout-system deploy/warehouse-api -- curl -s localhost:8080/healthz
 
-log_error "Hydration failed after $MAX_RETRIES attempts"
-exit 1
+# Check if tenant exists in warehouse
+curl http://warehouse-api.nightscout-system.svc.cluster.local/api/v1/tenants/${TENANT_ID}/export/status
 ```
 
-### Monitoring
+**Resolution:**
+1. If warehouse API is down → Restart warehouse-api deployment
+2. If rate limited → Wait for queue to clear, or scale up warehouse-api
+3. If tenant not found (404) → This is expected for new tenants, check if pod eventually starts
 
-Key metrics to track:
+#### Problem: CDC consumer lag growing
 
-| Metric | Alert Threshold | Description |
-|--------|-----------------|-------------|
-| `warehouse_consumer_lag_seconds` | > 60s | CDC consumer falling behind |
-| `warehouse_export_duration_seconds` | > 120s | Slow exports (large databases) |
-| `warehouse_export_queue_size` | > 20 | Too many concurrent restart requests |
-| `ephemeral_pod_hydration_failures` | > 0 | Init container failures |
-| `cdc_connector_status` | != RUNNING | Debezium connector health |
+**Symptoms:**
+- `warehouse_consumer_lag_messages` increasing
+- Tenant data in warehouse is stale
 
-### Fallback Behavior
+**Diagnosis:**
+```bash
+# Check consumer logs
+kubectl logs -n nightscout-system deploy/warehouse-consumer --tail=100
 
-If warehouse is unavailable during pod startup:
+# Check consumer group status
+kubectl exec -n kafka kafka-cluster-kafka-0 -- bin/kafka-consumer-groups.sh \
+  --bootstrap-server localhost:9092 \
+  --describe --group warehouse-consumer-group
+```
 
-1. **Retry with backoff** (as shown above)
-2. **After max retries**: Pod fails to start, Kubernetes restarts it
-3. **Extended outage**: Operator intervention required
+**Resolution:**
+1. If consumer is crashed → Check logs for errors, fix and restart
+2. If consumer is slow → Scale up consumer replicas or increase resources
+3. If Kafka is slow → Check Kafka cluster health
 
-The warehouse should be deployed with HA (replica set + multiple API pods) to minimize this risk.
+#### Problem: Export taking too long
+
+**Symptoms:**
+- Hydration times exceeding 60 seconds
+- `warehouse_api_export_duration_seconds` high
+
+**Diagnosis:**
+```bash
+# Check tenant database size
+kubectl exec -n nightscout-system deploy/warehouse-api -- \
+  mongosh "${WAREHOUSE_MONGODB_URI}" --eval "db.getSiblingDB('nightscout_${TENANT_ID}').stats()"
+```
+
+**Resolution:**
+1. If database is large (>2GB) → Consider data retention policy
+2. If many concurrent exports → Scale up warehouse-api replicas
+3. If network is slow → Check network policies and bandwidth
+
+### Recovery Procedures
+
+#### Recovering from warehouse MongoDB failure
+
+If the warehouse MongoDB cluster fails:
+
+1. **Kafka retains CDC events** - Default 7-day retention
+2. **Restore warehouse MongoDB** from backup or rebuild
+3. **Reset consumer offset** to replay from Kafka:
+   ```bash
+   kubectl exec -n kafka kafka-cluster-kafka-0 -- bin/kafka-consumer-groups.sh \
+     --bootstrap-server localhost:9092 \
+     --group warehouse-consumer-group \
+     --reset-offsets --to-earliest --execute --all-topics
+   ```
+4. **Consumer will replay** all retained events to rebuild warehouse
+
+#### Recovering from Kafka failure
+
+If Kafka cluster fails with data loss:
+
+1. **Ephemeral pods continue running** - No immediate impact
+2. **New CDC events are lost** until Kafka recovers
+3. **Data loss window expands** beyond normal 1-2 minutes
+4. **After Kafka recovery**, connectors will resume from last committed offset
+5. **Gap in warehouse** - Data between Kafka failure and recovery may be missing
+
+**Mitigation:** Run Kafka with replication factor ≥3 and multiple brokers
+
+---
+
+## Tenant Lifecycle Management
+
+### Creating a New Ephemeral Tenant
+
+1. **Create ConfigMap** with `ns.mdn.io/storage-mode: ephemeral` annotation
+2. **Metacontroller** renders pod with hydration init container + emptyDir
+3. **Init container** queries warehouse API, gets 404 (no data)
+4. **MongoDB starts** with empty database
+5. **Nightscout starts** and begins receiving CGM data
+6. **CDC connector** starts capturing changes to Kafka
+7. **Warehouse consumer** applies events, creating tenant database in warehouse
+
+### Migrating Persistent → Ephemeral
+
+1. **Ensure CDC is enabled** on persistent tenant and data is flowing to warehouse
+2. **Wait for consumer lag = 0** (warehouse is fully synced)
+3. **Update ConfigMap** annotation to `storage-mode: ephemeral`
+4. **Pod recreates** with emptyDir volume
+5. **Init container** hydrates from warehouse (should have all data)
+6. **Verify tenant** works correctly
+7. **Delete old PVC** (optional, after validation period)
+
+### Migrating Ephemeral → Persistent
+
+1. **Create PVC** for tenant
+2. **Update ConfigMap** annotation to `storage-mode: persistent`
+3. **Pod recreates** with PVC volume
+4. **Init container** still hydrates from warehouse (populates PVC)
+5. **CDC continues** (optional, can disable if no longer needed)
+6. **Warehouse data** can be retained or purged after migration
+
+### Deleting an Ephemeral Tenant
+
+1. **Delete tenant ConfigMap/CRD**
+2. **Pod terminates** (emptyDir is automatically cleaned up)
+3. **Debezium connector** is deleted (no more CDC events)
+4. **Warehouse data remains** for retention period (default: 30 days)
+5. **Purge job** (optional) deletes warehouse database after retention
 
 ---
 
