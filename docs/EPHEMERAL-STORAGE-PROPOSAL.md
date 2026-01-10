@@ -2,7 +2,7 @@
 
 ## Status: Draft Proposal
 
-**Date:** 2026-01-10  
+**Date:** 2026-01-10 (Updated: Warehouse-First Hydration)  
 **Authors:** Nightscout Platform Team  
 **Target:** Gen 5 Pod-Based Architecture  
 **Related Docs:** [ARCHITECTURE-EVOLUTION.md](ARCHITECTURE-EVOLUTION.md), [KAFKA-CDC-INTEGRATION.md](KAFKA-CDC-INTEGRATION.md)
@@ -14,10 +14,10 @@
 This proposal introduces an **ephemeral storage mode** for tenant MongoDB instances as an alternative to the current PVC-based persistent storage. Instead of fighting cloud provider volume limits per node, ephemeral mode makes tenant pods stateless by using:
 
 1. **emptyDir volumes** for local MongoDB storage (no PVC required)
-2. **Object storage snapshots** (S3/GCS) as the source of truth for hydration
-3. **Kafka CDC** to stream changes to a central data warehouse for durability
+2. **Kafka CDC** to stream changes to a central data warehouse for durability
+3. **Warehouse export API** to hydrate pods on startup (no separate object storage needed)
 
-This approach enables unlimited tenant density per node while accepting a 1-2 minute data loss window on pod crashes.
+This approach enables unlimited tenant density per node while accepting a 1-2 minute data loss window on pod crashes. The warehouse serves as both the durable store and the hydration source, eliminating the need for separate S3/GCS snapshots and CronJob infrastructure.
 
 ---
 
@@ -92,10 +92,10 @@ This low write rate means:
 
 ### 3. Fast Hydration
 
-With 2GB databases and modern storage:
-- **Download from S3**: ~10-20 seconds (gigabit network)
+With 2GB databases and cluster-local warehouse:
+- **Export from warehouse**: ~5-15 seconds (cluster network)
 - **mongorestore**: ~10-30 seconds
-- **Total cold start**: ~30-60 seconds
+- **Total cold start**: ~20-45 seconds
 
 ### 4. Tolerant Use Case
 
@@ -111,9 +111,9 @@ Nightscout users understand their CGM data is already stored on the pump/sensor.
 ┌────────────────────────────────────────────────────────────────────────┐
 │                           POD STARTUP                                  │
 │                                                                        │
-│   Object Storage ──────► Hydrate Init ──────► Ephemeral MongoDB       │
-│   (S3/GCS snapshot)      Container           (emptyDir volume)        │
-│                          (mongorestore)                                │
+│   Warehouse ──────────► Hydrate Init ──────► Ephemeral MongoDB        │
+│   Export API           Container            (emptyDir volume)         │
+│   (mongodump stream)   (mongorestore)                                 │
 └────────────────────────────────────────────────────────────────────────┘
 
 ┌────────────────────────────────────────────────────────────────────────┐
@@ -139,18 +139,26 @@ Nightscout users understand their CGM data is already stored on the pump/sensor.
 │                                  │                                     │
 │                                  ▼                                     │
 │                       Central Data Warehouse                           │
-│                    (MongoDB cluster / TimescaleDB)                     │
-└────────────────────────────────────────────────────────────────────────┘
-
-┌────────────────────────────────────────────────────────────────────────┐
-│                     PERIODIC SNAPSHOT (CronJob)                        │
-│                                                                        │
-│   Ephemeral MongoDB ──────► mongodump ──────► Object Storage          │
-│                              + gzip           (S3/GCS bucket)         │
-│                                                                        │
-│   Schedule: Every 6-24 hours (configurable per tenant)                 │
+│                      (MongoDB cluster with                             │
+│                       per-tenant collections)                          │
 └────────────────────────────────────────────────────────────────────────┘
 ```
+
+### Key Simplification: No Object Storage Required
+
+Unlike the original proposal, this architecture uses the **warehouse as both the durability layer and the hydration source**:
+
+| Original Approach | Warehouse-First Approach |
+|-------------------|--------------------------|
+| CDC → Warehouse (durability) | CDC → Warehouse (durability) |
+| CronJob → S3 (snapshots) | ~~Not needed~~ |
+| S3 → Init Container (hydration) | Warehouse → Init Container (hydration) |
+
+This eliminates:
+- ❌ S3/GCS bucket provisioning and IAM setup
+- ❌ Per-tenant CronJob for periodic snapshots
+- ❌ Snapshot retention management
+- ❌ Object storage costs
 
 ### Storage Mode Flag
 
@@ -165,9 +173,6 @@ metadata:
 # Option B: Spec field on NightscoutTenant CRD
 spec:
   storageMode: ephemeral
-  ephemeralConfig:
-    snapshotBucket: s3://nightscout-snapshots
-    snapshotSchedule: "0 */6 * * *"  # Every 6 hours
 ```
 
 ### Pod Spec Changes
@@ -183,12 +188,12 @@ volumes:
 **Ephemeral Mode (proposed):**
 ```yaml
 initContainers:
-  - name: hydrate-from-snapshot
+  - name: hydrate-from-warehouse
     image: ${nsUtilityImage}
-    command: ["/app/entrypoints/hydrate-from-snapshot.sh"]
+    command: ["/app/entrypoints/hydrate-from-warehouse.sh"]
     env:
-      - name: SNAPSHOT_BUCKET
-        value: "s3://nightscout-snapshots"
+      - name: WAREHOUSE_EXPORT_URL
+        value: "http://warehouse-api.nightscout-system.svc.cluster.local"
       - name: TENANT_ID
         value: "${tenantId}"
       - name: MONGO_DATA_DIR
@@ -211,25 +216,28 @@ volumes:
 
 ```bash
 #!/bin/bash
-# hydrate-from-snapshot.sh
+# hydrate-from-warehouse.sh
 
-# 1. Check for existing snapshot
-SNAPSHOT_KEY="${TENANT_ID}/latest.gz"
-if ! aws s3 ls "s3://${SNAPSHOT_BUCKET}/${SNAPSHOT_KEY}" 2>/dev/null; then
-  log_info "No snapshot found, starting with empty database"
+# 1. Request export from warehouse API
+log_info "Requesting database export from warehouse for tenant ${TENANT_ID}"
+EXPORT_STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+  "${WAREHOUSE_EXPORT_URL}/api/v1/tenants/${TENANT_ID}/export/status")
+
+if [[ "$EXPORT_STATUS" == "404" ]]; then
+  log_info "No data found in warehouse for tenant ${TENANT_ID}, starting with empty database"
   exit 0
 fi
 
-# 2. Download snapshot
-log_info "Downloading snapshot from ${SNAPSHOT_BUCKET}"
-aws s3 cp "s3://${SNAPSHOT_BUCKET}/${SNAPSHOT_KEY}" /tmp/snapshot.gz
+# 2. Stream export directly into mongorestore
+log_info "Streaming database restore from warehouse"
+curl -s "${WAREHOUSE_EXPORT_URL}/api/v1/tenants/${TENANT_ID}/export" | \
+  mongorestore --gzip --archive --dir=/data/db
 
-# 3. Extract and restore
-log_info "Restoring database from snapshot"
-mongorestore --gzip --archive=/tmp/snapshot.gz --dir=/data/db
+if [[ $? -ne 0 ]]; then
+  log_error "Failed to restore from warehouse"
+  exit 1
+fi
 
-# 4. Cleanup
-rm /tmp/snapshot.gz
 log_info "Hydration complete"
 ```
 
@@ -265,15 +273,15 @@ spec:
   class: io.debezium.connector.mongodb.MongoDbConnector
   config:
     mongodb.connection.string: "mongodb://${POD_IP}:27017"
-    collection.include.list: "nightscout.entries,nightscout.treatments"
+    collection.include.list: "nightscout.entries,nightscout.treatments,nightscout.devicestatus"
     topic.prefix: "${tenantId}"
     snapshot.mode: "never"  # Critical: Skip snapshot, start from oplog
 ```
 
 **Key: `snapshot.mode: never`**
 
-Because the database was restored from a snapshot:
-- Historical data is already in the warehouse (that's where the snapshot came from)
+Because the database was restored from the warehouse:
+- Historical data is already in the warehouse (that's where hydration came from)
 - Connector should only capture new changes going forward
 - No need for Debezium initial snapshot
 
@@ -294,7 +302,7 @@ This matches the existing Gen 5 behavior.
 ### Write Path (Runtime)
 
 ```
-Nightscout → MongoDB (ephemeral) → Change Streams → Kafka → Warehouse Consumer → Central Store
+Nightscout → MongoDB (ephemeral) → Change Streams → Kafka → Warehouse Consumer → Warehouse
 ```
 
 **Latency:** Near real-time (seconds)
@@ -302,82 +310,115 @@ Nightscout → MongoDB (ephemeral) → Change Streams → Kafka → Warehouse Co
 ### Read Path (Pod Startup)
 
 ```
-Central Store → Snapshot Export (periodic) → Object Storage → Hydration Init Container → MongoDB
+Warehouse → Export API → Hydration Init Container → MongoDB (ephemeral)
 ```
 
-**Staleness:** Up to snapshot interval (e.g., 6 hours of data from CDC would be missing)
+**Freshness:** Real-time (warehouse contains all CDC events applied)
 
 ### Crash Recovery
 
 When a pod crashes:
 
 1. **Pod restarts** (Metacontroller ensures pod recreation)
-2. **Hydration runs** (restores from latest snapshot)
+2. **Hydration runs** (exports current state from warehouse)
 3. **CDC connector starts** (from current oplog position)
-4. **Missing window:** Data between last snapshot and crash (max: snapshot interval)
+4. **Data loss window:** Only data written between last CDC flush and crash (~1-2 minutes max)
 
-**Mitigation:** Kafka topics retain CDC events. A recovery process could replay events from Kafka to backfill the missing window.
+**Key advantage over snapshot-based approach:** No staleness from snapshot age. The warehouse always has the latest CDC-applied state.
 
 ---
 
-## Snapshot Strategy
+## Warehouse Consumer Contract
 
-### CronJob Approach (Recommended)
+The warehouse consumer is the critical component that:
+1. Applies CDC events to maintain canonical collections
+2. Exposes an export API for hydration
 
-```yaml
-apiVersion: batch/v1
-kind: CronJob
-metadata:
-  name: ${tenantId}-snapshot
-spec:
-  schedule: "0 */6 * * *"  # Every 6 hours
-  jobTemplate:
-    spec:
-      template:
-        spec:
-          containers:
-            - name: snapshot
-              image: ${nsUtilityImage}
-              command: ["/app/entrypoints/snapshot-database.sh"]
-              env:
-                - name: TENANT_ID
-                  value: "${tenantId}"
-                - name: SNAPSHOT_BUCKET
-                  value: "s3://nightscout-snapshots"
-                - name: MONGODB_URI
-                  valueFrom:
-                    secretKeyRef:
-                      name: ${tenantId}-app-credentials
-                      key: MONGODB_URI
+### Required Capabilities
+
+#### 1. CDC Event Application
+
+The consumer must materialize **full MongoDB documents** (not just deltas) in per-tenant collections:
+
+```javascript
+// Warehouse schema: one database per tenant
+// Database: nightscout_${tenantId}
+// Collections: entries, treatments, devicestatus, etc.
+
+// CDC event handling (pseudo-code)
+function applyCDCEvent(event) {
+  const { tenantId, collection, operation, document, documentKey } = event;
+  const db = warehouse.db(`nightscout_${tenantId}`);
+  
+  switch (operation) {
+    case 'insert':
+    case 'update':
+    case 'replace':
+      db.collection(collection).replaceOne(
+        { _id: documentKey._id },
+        document,
+        { upsert: true }
+      );
+      break;
+    case 'delete':
+      db.collection(collection).deleteOne({ _id: documentKey._id });
+      break;
+  }
+}
 ```
 
-### Snapshot Script
+#### 2. Export API
 
-```bash
-#!/bin/bash
-# snapshot-database.sh
+REST endpoint to stream `mongodump`-compatible archive:
 
-# 1. Create mongodump
-log_info "Creating database snapshot"
-mongodump --uri="${MONGODB_URI}" --gzip --archive=/tmp/snapshot.gz
+```
+GET /api/v1/tenants/{tenantId}/export
+Content-Type: application/octet-stream
 
-# 2. Upload to object storage with timestamp
-TIMESTAMP=$(date +%Y%m%d-%H%M%S)
-aws s3 cp /tmp/snapshot.gz "s3://${SNAPSHOT_BUCKET}/${TENANT_ID}/${TIMESTAMP}.gz"
+Response: gzipped mongodump archive stream
+```
 
-# 3. Update "latest" pointer
-aws s3 cp /tmp/snapshot.gz "s3://${SNAPSHOT_BUCKET}/${TENANT_ID}/latest.gz"
+```
+GET /api/v1/tenants/{tenantId}/export/status
+Content-Type: application/json
 
-# 4. Prune old snapshots (keep last 7 days)
-aws s3 ls "s3://${SNAPSHOT_BUCKET}/${TENANT_ID}/" | while read -r line; do
-  SNAPSHOT_DATE=$(echo "$line" | awk '{print $1}')
-  if [[ $(date -d "$SNAPSHOT_DATE" +%s) -lt $(date -d "7 days ago" +%s) ]]; then
-    KEY=$(echo "$line" | awk '{print $4}')
-    aws s3 rm "s3://${SNAPSHOT_BUCKET}/${TENANT_ID}/${KEY}"
-  fi
-done
+Response: { "exists": true, "lastUpdated": "2026-01-10T12:00:00Z", "sizeBytes": 1048576 }
+         or 404 if tenant has no data
+```
 
-log_info "Snapshot complete: ${TIMESTAMP}.gz"
+#### 3. Implementation Options
+
+| Option | Pros | Cons |
+|--------|------|------|
+| **MongoDB Warehouse + Custom API** | Native mongodump, simple export | Need separate API service |
+| **Kafka Connect MongoDB Sink** | Standard connector, automatic | Need API wrapper for export |
+| **Custom Kafka Streams App** | Full control | More code to maintain |
+
+**Recommended:** MongoDB as warehouse backend with a lightweight Node.js API service that wraps `mongodump` for exports. This keeps the stack consistent (MongoDB everywhere) and uses proven tools.
+
+### Warehouse API Service
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: warehouse-api
+  namespace: nightscout-system
+spec:
+  replicas: 2
+  template:
+    spec:
+      containers:
+        - name: api
+          image: ${warehouseApiImage}
+          ports:
+            - containerPort: 8080
+          env:
+            - name: WAREHOUSE_MONGODB_URI
+              valueFrom:
+                secretKeyRef:
+                  name: warehouse-credentials
+                  key: MONGODB_URI
 ```
 
 ---
@@ -401,48 +442,37 @@ log_info "Snapshot complete: ${TIMESTAMP}.gz"
 - [ ] CDC events flow to Kafka topics
 - [ ] Connector handles pod IP changes gracefully
 
-### 2. Object Storage Integration
+### 2. Warehouse Consumer
+
+**Not yet implemented.** This is the critical new component.
+
+**Requirements:**
+- Consume from `${tenantId}-*` Kafka topics
+- Apply changes idempotently to warehouse MongoDB
+- Handle at-least-once delivery (upsert pattern provides deduplication)
+- Expose export API for hydration
+
+**Suggested Implementation:**
+- Kafka Connect MongoDB Sink connector for CDC → Warehouse
+- Lightweight API service for export endpoint
+- Or: Custom consumer service that does both
+
+### 3. Warehouse MongoDB Cluster
 
 **Required:**
-- S3-compatible bucket (AWS S3, MinIO, GCS with interop)
-- IAM credentials for read/write access
-- Pod service account with access (or injected credentials)
-
-**Configuration:**
-```yaml
-# Platform-level Secret
-apiVersion: v1
-kind: Secret
-metadata:
-  name: snapshot-storage-credentials
-data:
-  AWS_ACCESS_KEY_ID: ...
-  AWS_SECRET_ACCESS_KEY: ...
-  AWS_REGION: ...
-  SNAPSHOT_BUCKET: ...
-```
-
-### 3. Warehouse Consumer
-
-**Not yet implemented.** Required to apply CDC events to central store.
-
-**Design options:**
-- Kafka Streams application
-- Kafka Connect sink connector (to MongoDB/TimescaleDB)
-- Custom consumer service
-
-**Responsibilities:**
-- Consume from `${tenantId}-*` topics
-- Apply changes idempotently to warehouse
-- Handle at-least-once delivery (deduplication)
-- Export periodic snapshots to object storage
+- MongoDB cluster (can be small, just needs to store aggregate of all ephemeral tenants)
+- Sizing: Sum of all ephemeral tenant databases + 20% overhead
+- Example: 100 tenants × 1GB average = ~120GB storage
 
 ### 4. Utility Container Updates
 
 **Required scripts:**
-- `hydrate-from-snapshot.sh` - Download and restore from S3
-- `snapshot-database.sh` - Dump and upload to S3
+- `hydrate-from-warehouse.sh` - Stream restore from warehouse API
 - Updates to `mongodb-utils.sh` for ephemeral-specific logic
+
+**Not required (eliminated):**
+- ~~`snapshot-database.sh`~~ - No periodic snapshots needed
+- ~~CronJob rendering~~ - No snapshot jobs needed
 
 ---
 
@@ -452,13 +482,14 @@ data:
 |--------|------------------|----------------------------|
 | **Volume limits** | Constrained by provider | None (emptyDir is node-local) |
 | **Data loss on crash** | None | 1-2 minutes (last CDC batch) |
-| **Cold start time** | ~5 seconds | ~30-60 seconds (hydration) |
-| **Infrastructure deps** | Standard K8s storage | Kafka cluster + object storage |
-| **Ops burden** | Low (just PVCs) | Medium (Kafka + snapshots + warehouse) |
-| **Cost** | PVC storage costs | Kafka + S3 costs |
-| **Provider portability** | High | Medium (need S3-compatible storage) |
+| **Cold start time** | ~5 seconds | ~20-45 seconds (hydration) |
+| **Infrastructure deps** | Standard K8s storage | Kafka cluster + warehouse |
+| **Ops burden** | Low (just PVCs) | Medium (Kafka + warehouse consumer) |
+| **Cost** | PVC storage costs | Kafka + warehouse MongoDB costs |
+| **Provider portability** | High | High (no cloud-specific services) |
 | **Tenant density** | Limited by node volume slots | Limited by CPU/memory only |
 | **Backup strategy** | VolumeSnapshots | Inherent (warehouse is backup) |
+| **Data freshness on restart** | N/A (same data) | Real-time (from warehouse) |
 
 ### When to Use Each Mode
 
@@ -482,36 +513,45 @@ data:
 ### Phase 0: Prerequisites (Current Blockers)
 
 - [ ] Validate Kafka CDC works end-to-end in Gen 5
-- [ ] Implement and deploy warehouse consumer
-- [ ] Set up object storage bucket and IAM credentials
-- [ ] Create utility container scripts for hydration/snapshot
+- [ ] Design and implement warehouse consumer
+- [ ] Deploy warehouse MongoDB cluster
+- [ ] Implement warehouse export API
 
-### Phase 1: Hydration Infrastructure
+### Phase 1: Warehouse Consumer
 
-- [ ] Implement `hydrate-from-snapshot.sh` entrypoint
+- [ ] Choose implementation (Kafka Connect sink vs custom consumer)
+- [ ] Implement CDC event application logic
+- [ ] Deploy to staging and validate data integrity
+- [ ] Add monitoring for consumer lag and error rates
+
+### Phase 2: Export API
+
+- [ ] Implement `/api/v1/tenants/{tenantId}/export` endpoint
+- [ ] Implement `/api/v1/tenants/{tenantId}/export/status` endpoint
+- [ ] Add rate limiting for concurrent exports
+- [ ] Test streaming restore with large databases
+
+### Phase 3: Hydration Infrastructure
+
+- [ ] Implement `hydrate-from-warehouse.sh` entrypoint
 - [ ] Add hydration init container to pod spec (conditional on storage mode)
-- [ ] Test cold start with sample snapshot
+- [ ] Test cold start timing and reliability
 
-### Phase 2: Snapshot CronJob
-
-- [ ] Implement `snapshot-database.sh` entrypoint
-- [ ] Add `renderSnapshotCronJob()` to resources.js
-- [ ] Configure retention policy and pruning
-
-### Phase 3: Storage Mode Flag
+### Phase 4: Storage Mode Flag
 
 - [ ] Add `storageMode` annotation/spec field recognition
 - [ ] Modify `renderMongoDB()` to conditionally use emptyDir vs PVC
 - [ ] Add CDC auto-enable for ephemeral mode
 
-### Phase 4: Integration Testing
+### Phase 5: Integration Testing
 
-- [ ] Test full lifecycle: create → hydrate → run → snapshot → delete → recreate
-- [ ] Test crash recovery and data loss window
+- [ ] Test full lifecycle: create → hydrate → run → crash → restart
+- [ ] Test concurrent restarts (rate limiting)
 - [ ] Test CDC connector behavior on pod restart
 - [ ] Validate Consul registration works identically
+- [ ] Measure data loss window under various failure scenarios
 
-### Phase 5: Documentation and Rollout
+### Phase 6: Documentation and Rollout
 
 - [ ] Update operational runbooks
 - [ ] Create tenant migration guide (persistent → ephemeral)
@@ -519,27 +559,89 @@ data:
 
 ---
 
+## Operational Considerations
+
+### Rate Limiting for Mass Restarts
+
+If a node fails and multiple ephemeral pods restart simultaneously, they'll all request warehouse exports at once. The export API should implement:
+
+```javascript
+// Rate limiting: max concurrent exports
+const MAX_CONCURRENT_EXPORTS = 10;
+const exportSemaphore = new Semaphore(MAX_CONCURRENT_EXPORTS);
+
+app.get('/api/v1/tenants/:tenantId/export', async (req, res) => {
+  if (!await exportSemaphore.tryAcquire(30000)) {  // 30s timeout
+    return res.status(503).json({ error: 'Export queue full, retry later' });
+  }
+  try {
+    await streamExport(req.params.tenantId, res);
+  } finally {
+    exportSemaphore.release();
+  }
+});
+```
+
+Init containers should retry with exponential backoff:
+
+```bash
+MAX_RETRIES=5
+RETRY_DELAY=5
+
+for i in $(seq 1 $MAX_RETRIES); do
+  if curl -sf "${WAREHOUSE_EXPORT_URL}/api/v1/tenants/${TENANT_ID}/export" | \
+     mongorestore --gzip --archive --dir=/data/db; then
+    log_info "Hydration complete"
+    exit 0
+  fi
+  log_warn "Hydration attempt $i failed, retrying in ${RETRY_DELAY}s"
+  sleep $RETRY_DELAY
+  RETRY_DELAY=$((RETRY_DELAY * 2))
+done
+
+log_error "Hydration failed after $MAX_RETRIES attempts"
+exit 1
+```
+
+### Monitoring
+
+Key metrics to track:
+
+| Metric | Alert Threshold | Description |
+|--------|-----------------|-------------|
+| `warehouse_consumer_lag_seconds` | > 60s | CDC consumer falling behind |
+| `warehouse_export_duration_seconds` | > 120s | Slow exports (large databases) |
+| `warehouse_export_queue_size` | > 20 | Too many concurrent restart requests |
+| `ephemeral_pod_hydration_failures` | > 0 | Init container failures |
+| `cdc_connector_status` | != RUNNING | Debezium connector health |
+
+### Fallback Behavior
+
+If warehouse is unavailable during pod startup:
+
+1. **Retry with backoff** (as shown above)
+2. **After max retries**: Pod fails to start, Kubernetes restarts it
+3. **Extended outage**: Operator intervention required
+
+The warehouse should be deployed with HA (replica set + multiple API pods) to minimize this risk.
+
+---
+
 ## Open Questions
 
-1. **Graceful shutdown snapshot?** Should we attempt a snapshot on pod termination (SIGTERM handler)?
-   - Pro: Reduces data loss window
-   - Con: Adds complexity, may timeout, node drain won't wait
+1. **Warehouse retention policy?** How long to keep data for deleted tenants?
+   - Recommendation: 30 days, then purge
 
-2. **Snapshot trigger on low activity?** Trigger snapshot when write rate drops below threshold?
-   - Pro: Captures more data before potential crash
-   - Con: Additional complexity, may not help for sudden crashes
+2. **Per-tenant vs shared warehouse database?** 
+   - Per-tenant databases: Simpler isolation, easier export (`mongodump --db=...`)
+   - Shared database with tenant prefix: Single cluster, more complex queries
+   - Recommendation: Per-tenant databases for simplicity
 
-3. **Per-tenant vs shared warehouse?** Should each tenant have its own warehouse collection, or aggregate?
-   - Per-tenant: Simpler isolation, matches current model
-   - Shared: Easier cross-tenant analytics, single cluster to manage
+3. **Fallback to persistent?** If warehouse becomes unavailable, should we auto-migrate?
+   - Recommendation: No auto-migration (too complex), rely on warehouse HA instead
 
-4. **Fallback to persistent?** If Kafka/S3 becomes unavailable, should we auto-migrate tenants back to PVC?
-   - Pro: Graceful degradation
-   - Con: Complex, may create oscillation
-
-5. **Hydration source preference?** Should hydration prefer Kafka replay over S3 snapshot when available?
-   - Pro: Potentially faster, more up-to-date
-   - Con: Kafka retention limits, more complex implementation
+4. **Graceful shutdown?** Should pods flush to warehouse on SIGTERM?
+   - Recommendation: No, CDC provides this automatically with ~1-2min window
 
 ---
 
@@ -548,19 +650,34 @@ data:
 | Risk | Likelihood | Impact | Mitigation |
 |------|------------|--------|------------|
 | Kafka cluster outage | Medium | High (data loss grows) | Multi-broker HA, monitor lag |
-| S3 unavailable at startup | Low | High (pod can't start) | Retry with backoff, alert on failures |
-| Snapshot corruption | Low | Medium (stale data) | Checksum validation, keep multiple snapshots |
+| Warehouse unavailable | Low | High (pods can't start) | HA deployment, retry with backoff |
 | CDC connector lag | Medium | Low (brief gap) | Monitor lag metrics, auto-restart |
-| Warehouse consumer failure | Medium | Medium (backlog grows) | Kafka retention, dead letter queue |
-| Large database (>2GB) | Low | Medium (slow hydration) | Tier limits, compression, incremental restore |
+| Warehouse consumer failure | Medium | Medium (backlog grows) | Kafka retention (7 days), dead letter queue |
+| Large database (>2GB) | Low | Medium (slow hydration) | Tier limits, compression |
+| Concurrent mass restart | Low | Medium (export queue saturation) | Rate limiting, exponential backoff |
 
 ---
 
 ## Conclusion
 
-Ephemeral storage mode offers a viable path to overcoming cloud provider volume limits for Nightscout multitenancy. The trade-off (1-2 minute data loss window on crash) is acceptable given the workload characteristics and the recoverable nature of CGM data.
+The warehouse-first ephemeral storage approach offers a simpler path to overcoming cloud provider volume limits compared to the original S3-based proposal:
 
-**Recommended next step:** Validate Kafka CDC end-to-end in Gen 5 colocated pod architecture before proceeding with implementation.
+**Eliminated complexity:**
+- No object storage (S3/GCS) provisioning
+- No per-tenant CronJobs for snapshots
+- No snapshot retention management
+- No snapshot staleness (warehouse is always current)
+
+**Added components:**
+- Warehouse consumer (CDC → MongoDB)
+- Warehouse export API (mongodump stream)
+
+The trade-off (1-2 minute data loss window on crash) remains acceptable given Nightscout's workload characteristics.
+
+**Recommended next steps:**
+1. Validate Kafka CDC end-to-end in Gen 5 colocated pod architecture
+2. Design and prototype warehouse consumer + export API
+3. Test hydration timing with realistic database sizes
 
 ---
 

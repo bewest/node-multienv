@@ -3,18 +3,18 @@
 # This example shows how to configure a tenant to use ephemeral MongoDB storage
 # instead of PersistentVolumeClaims. Ephemeral mode uses:
 #   - emptyDir volume for MongoDB data (no PVC required)
-#   - Object storage snapshots for hydration on pod startup
 #   - Kafka CDC for real-time durability to central warehouse
+#   - Warehouse export API for hydration on pod startup
 #
 # Prerequisites:
 #   - Kafka CDC infrastructure deployed and validated
-#   - Object storage bucket configured with IAM credentials
 #   - Warehouse consumer running to apply CDC events
+#   - Warehouse export API available
 #
 # Trade-offs:
 #   - No volume limits: Can scale beyond cloud provider volume-per-node limits
 #   - Data loss window: 1-2 minutes of data may be lost on pod crash
-#   - Cold start delay: ~30-60 seconds for snapshot hydration
+#   - Cold start delay: ~20-45 seconds for warehouse hydration
 #
 # See docs/EPHEMERAL-STORAGE-PROPOSAL.md for full architecture details.
 
@@ -28,10 +28,6 @@ metadata:
   annotations:
     # Storage mode: "ephemeral" uses emptyDir + CDC, "persistent" uses PVC (default)
     ns.mdn.io/storage-mode: "ephemeral"
-    # Snapshot configuration for ephemeral mode
-    ns.mdn.io/snapshot-bucket: "s3://nightscout-snapshots"
-    ns.mdn.io/snapshot-schedule: "0 */6 * * *"  # Every 6 hours
-    ns.mdn.io/snapshot-retention-days: "7"
 data:
   # Tenant Identity
   TENANT_ID: "ephemeral-demo"
@@ -59,6 +55,10 @@ data:
   # Size limit for emptyDir volume (should accommodate database + overhead)
   EPHEMERAL_STORAGE_LIMIT: "5Gi"
   
+  # Warehouse configuration for hydration
+  # The init container will fetch data from this endpoint
+  WAREHOUSE_EXPORT_URL: "http://warehouse-api.nightscout-system.svc.cluster.local"
+  
   # CDC Configuration (REQUIRED for ephemeral mode)
   # Ephemeral mode requires CDC for durability - if not explicitly enabled,
   # the controller will auto-enable it when storage-mode=ephemeral
@@ -70,7 +70,7 @@ data:
   CDC_RETENTION_MS: "604800000"  # 7 days
   CDC_TASKS_MAX: "1"
   # Critical for ephemeral mode: Skip Debezium initial snapshot
-  # Historical data comes from S3 snapshot, not oplog replay
+  # Historical data comes from warehouse export, not oplog replay
   CDC_SNAPSHOT_MODE: "never"
   
   # Kafka cluster references
@@ -93,14 +93,10 @@ spec:
   
   # Ephemeral-specific configuration
   ephemeralConfig:
-    # Object storage location for snapshots
-    snapshotBucket: "s3://nightscout-snapshots"
-    # Cron schedule for periodic snapshots
-    snapshotSchedule: "0 */6 * * *"
-    # How long to keep old snapshots
-    snapshotRetentionDays: 7
     # Size limit for ephemeral volume
     storageSizeLimit: "5Gi"
+    # Warehouse API for hydration (defaults to cluster-local service)
+    warehouseExportUrl: "http://warehouse-api.nightscout-system.svc.cluster.local"
   
   # CDC configuration (auto-enabled for ephemeral)
   cdc:
