@@ -229,6 +229,67 @@ Phase 4: Decommission
 
 **Recommendation:** Use Cloud VPN for initial migration, upgrade to Dedicated Interconnect if latency issues arise.
 
+#### Legacy Shared MongoDB Network Topology
+
+The existing Gen3b architecture uses a **shared central MongoDB cluster** running on private IPs within the DigitalOcean datacenter. This has critical implications for migration job placement:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    LEGACY MONGODB NETWORK TOPOLOGY                           │
+│                                                                              │
+│  DigitalOcean Datacenter (Private Network: 10.0.0.0/16)                     │
+│  ┌─────────────────────────────────────────────────────────────────────────┐│
+│  │                                                                          ││
+│  │  ┌──────────────────────┐         ┌──────────────────────────────────┐  ││
+│  │  │  Legacy Shared       │         │  DOKS Cluster                    │  ││
+│  │  │  MongoDB Cluster     │◄───────►│                                  │  ││
+│  │  │                      │ Private │  ┌────────────┐ ┌────────────┐   │  ││
+│  │  │  • 10.0.50.10:27017  │   IPs   │  │ Gen3b Pod  │ │ Gen3b Pod  │   │  ││
+│  │  │  • 10.0.50.11:27017  │         │  │ tenant-a   │ │ tenant-b   │   │  ││
+│  │  │  • 10.0.50.12:27017  │         │  └────────────┘ └────────────┘   │  ││
+│  │  │                      │         │                                  │  ││
+│  │  │  (Replica Set)       │         │  ┌────────────────────────────┐  │  ││
+│  │  └──────────────────────┘         │  │ Migration Job              │  │  ││
+│  │           ▲                       │  │ (MUST run here)            │  │  ││
+│  │           │ ✓ Accessible          │  │ • Can reach legacy MongoDB │  │  ││
+│  │           │                       │  │ • Reaches GKE via VPN/     │  │  ││
+│  │           │                       │  │   Consul WAN               │  │  ││
+│  │           │                       │  └────────────────────────────┘  │  ││
+│  │           │                       └──────────────────────────────────┘  ││
+│  │           │                                                              ││
+│  └───────────┼──────────────────────────────────────────────────────────────┘│
+│              │                                                               │
+│              │ ✗ NOT Accessible (Private IPs only routable within DO)       │
+│              │                                                               │
+│  ┌───────────┼──────────────────────────────────────────────────────────────┐│
+│  │           ▼                                                              ││
+│  │  Google Cloud VPC (10.1.0.0/16)                                         ││
+│  │  ┌──────────────────────────────────────────────────────────────────┐   ││
+│  │  │  GKE Cluster                                                      │   ││
+│  │  │                                                                   │   ││
+│  │  │  ┌────────────────┐  ┌────────────────┐  ┌────────────────┐      │   ││
+│  │  │  │ Gen5 Pod       │  │ Gen5 Pod       │  │ Gen5 Pod       │      │   ││
+│  │  │  │ tenant-a       │  │ tenant-b       │  │ tenant-c (new) │      │   ││
+│  │  │  │ (MongoDB +     │  │ (MongoDB +     │  │ (MongoDB +     │      │   ││
+│  │  │  │  Nightscout)   │  │  Nightscout)   │  │  Nightscout)   │      │   ││
+│  │  │  └───────▲────────┘  └────────────────┘  └────────────────┘      │   ││
+│  │  │          │                                                        │   ││
+│  │  │          │ mongorestore target                                    │   ││
+│  │  │          │ (via VPN or Consul WAN)                                │   ││
+│  │  └──────────┼────────────────────────────────────────────────────────┘   ││
+│  └─────────────┼────────────────────────────────────────────────────────────┘│
+│                │                                                              │
+└────────────────┼──────────────────────────────────────────────────────────────┘
+                 │
+    Migration data flow: DOKS Job → mongodump (legacy) → mongorestore (GKE pod)
+```
+
+**Key Constraints:**
+- Legacy shared MongoDB runs on **private IPs** (10.0.50.x) within DigitalOcean
+- These IPs are **NOT routable** from Google Cloud
+- Migration jobs **MUST run in DOKS** to access the legacy database
+- GKE pods are reachable from DOKS via VPN or Consul WAN federation
+
 #### Permissions Requirements
 
 **DOKS API Token (Source Cluster):**
@@ -830,6 +891,8 @@ Prioritize tenants for migration based on:
 ```bash
 #!/bin/bash
 # migrate-tenant-batch.sh
+# Cross-cluster migration from DOKS (Gen3b) to GKE (Gen5)
+# Migration jobs run in DOKS to access legacy shared MongoDB
 
 TENANTS="$1"  # Comma-separated tenant IDs
 BATCH_ID=$(date +%Y%m%d-%H%M%S)
@@ -837,38 +900,151 @@ BATCH_ID=$(date +%Y%m%d-%H%M%S)
 for TENANT_ID in ${TENANTS//,/ }; do
   echo "=== Migrating tenant: ${TENANT_ID} ==="
   
-  # 1. Create backup on AWS
-  velero backup create ${TENANT_ID}-${BATCH_ID} \
-    --include-namespaces nightscout-tenants \
-    --selector ns.mdn.io/tenant-id=${TENANT_ID} \
-    --wait
-  
-  # 2. Verify backup completed
-  velero backup describe ${TENANT_ID}-${BATCH_ID}
-  
-  # 3. Restore on GKE
+  # ------------------------------------------------------------------
+  # PHASE 1: Prepare GKE target (runs on GKE)
+  # ------------------------------------------------------------------
   kubectx gke-cluster
-  velero restore create ${TENANT_ID}-${BATCH_ID}-restore \
-    --from-backup ${TENANT_ID}-${BATCH_ID} \
-    --wait
   
-  # 4. Wait for pod ready
+  # 1a. Create NightscoutTenant CRD on GKE (Gen5 architecture)
+  kubectl apply -f - <<EOF
+apiVersion: nightscout.io/v1alpha1
+kind: NightscoutTenant
+metadata:
+  name: ${TENANT_ID}
+  namespace: nightscout-tenants
+spec:
+  storageType: dedicated
+  tier: standard
+EOF
+  
+  # 1b. Wait for Gen5 pod to be ready (MongoDB container up)
+  echo "Waiting for GKE Gen5 pod to be ready..."
   kubectl wait --for=condition=ready pod \
     -l ns.mdn.io/tenant-id=${TENANT_ID} \
     -n nightscout-tenants \
     --timeout=300s
   
-  # 5. Update Consul to point to GKE
-  consul kv put "nightscout/tenants/${TENANT_ID}/cluster" "gke-cluster"
+  # 1c. Get GKE pod's Consul name for migration target
+  # Default: Use Consul WAN DNS (works via mesh gateways, no VPN required)
+  GKE_POD_CONSUL="${TENANT_ID}.backends.gke-dc.consul"
   
-  # 6. Deregister from AWS Consul
+  echo "GKE target: Consul=${GKE_POD_CONSUL}"
+  
+  # Optional: If using VPN mode, also capture pod IP
+  # Uncomment these lines if MIGRATION_USE_DIRECT_IP=true
+  # GKE_POD_IP=$(kubectl get pod \
+  #   -l ns.mdn.io/tenant-id=${TENANT_ID} \
+  #   -n nightscout-tenants \
+  #   -o jsonpath='{.items[0].status.podIP}')
+  # echo "VPN mode - direct IP: ${GKE_POD_IP}"
+  
+  # ------------------------------------------------------------------
+  # PHASE 2: Configure and run migration job (runs on DOKS)
+  # ------------------------------------------------------------------
   kubectx doks-cluster
-  consul services deregister ${TENANT_ID}
   
-  # 7. Delete AWS resources (after validation period)
+  # 2a. Update tenant ConfigMap with cross-cluster migration settings
+  # Default: Consul WAN DNS mode (recommended, no VPN required)
+  kubectl patch configmap ${TENANT_ID}-config \
+    -n nightscout-tenants \
+    --type=merge \
+    -p '{
+      "data": {
+        "MIGRATION_ENABLED": "true",
+        "MIGRATION_TARGET_CLUSTER": "gke-dc",
+        "MIGRATION_TARGET_CONSUL_NAME": "'${GKE_POD_CONSUL}'",
+        "MIGRATION_USE_DIRECT_IP": "false"
+      },
+      "metadata": {
+        "annotations": {
+          "ns.mdn.io/migration-policy": "cross-cluster",
+          "ns.mdn.io/migration-phase": "pending"
+        }
+      }
+    }'
+  
+  # Alternative: VPN mode (uncomment if using VPN with direct pod IP)
+  # kubectl patch configmap ${TENANT_ID}-config \
+  #   -n nightscout-tenants \
+  #   --type=merge \
+  #   -p '{
+  #     "data": {
+  #       "MIGRATION_ENABLED": "true",
+  #       "MIGRATION_TARGET_CLUSTER": "gke-dc",
+  #       "MIGRATION_USE_DIRECT_IP": "true",
+  #       "MIGRATION_TARGET_POD_IP": "'${GKE_POD_IP}'"
+  #     },
+  #     "metadata": {
+  #       "annotations": {
+  #         "ns.mdn.io/migration-policy": "cross-cluster",
+  #         "ns.mdn.io/migration-phase": "pending"
+  #       }
+  #     }
+  #   }'
+  
+  # 2b. Trigger migration by setting migration-needed annotation
+  # (The migration decorator will render the job automatically)
+  kubectl annotate secret ${TENANT_ID}-mongo-auth \
+    ns.mdn.io/migration-needed=true \
+    --overwrite
+  
+  # 2c. Wait for migration job to complete
+  echo "Waiting for migration job to complete..."
+  kubectl wait --for=condition=complete job \
+    -l ns.mdn.io/tenant-id=${TENANT_ID},ns.mdn.io/migration-type=cross-cluster \
+    -n nightscout-tenants \
+    --timeout=600s
+  
+  # 2d. Check migration job status
+  MIGRATION_STATUS=$(kubectl get job \
+    -l ns.mdn.io/tenant-id=${TENANT_ID},ns.mdn.io/migration-type=cross-cluster \
+    -n nightscout-tenants \
+    -o jsonpath='{.items[0].status.succeeded}')
+  
+  if [ "$MIGRATION_STATUS" != "1" ]; then
+    echo "ERROR: Migration job failed for ${TENANT_ID}"
+    kubectl logs job/migrate-${TENANT_ID}-to-gke-dc -n nightscout-tenants
+    continue
+  fi
+  
+  echo "Migration job completed successfully"
+  
+  # ------------------------------------------------------------------
+  # PHASE 3: Verify and cutover (cross-cluster)
+  # ------------------------------------------------------------------
+  
+  # 3a. Verify document counts match
+  SOURCE_COUNT=$(kubectl exec -n nightscout-tenants \
+    $(kubectl get pod -l ns.mdn.io/tenant-id=${TENANT_ID} -o name) \
+    -c nightscout -- mongo nightscout --quiet --eval "db.entries.count()" 2>/dev/null || echo "0")
+  
+  kubectx gke-cluster
+  TARGET_COUNT=$(kubectl exec -n nightscout-tenants \
+    $(kubectl get pod -l ns.mdn.io/tenant-id=${TENANT_ID} -o name) \
+    -c mongodb -- mongo nightscout --quiet --eval "db.entries.count()")
+  
+  echo "Document counts: source=${SOURCE_COUNT}, target=${TARGET_COUNT}"
+  
+  # 3b. Update DNS to point to GKE (see DNS TTL Playbook)
+  ./update-tenant-dns.sh ${TENANT_ID} gke
+  
+  # 3c. Consul routing will update automatically via deployment controller
+  # GKE pod is already registered; DOKS pod will be deregistered when deleted
+  
+  # 3d. Mark migration complete
+  kubectx doks-cluster
+  kubectl annotate configmap ${TENANT_ID}-config \
+    ns.mdn.io/migration-phase=completed \
+    ns.mdn.io/migrated-to=gke-dc \
+    ns.mdn.io/migration-timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ) \
+    --overwrite
+  
+  # 3e. Delete DOKS resources (AFTER 7-day validation period!)
+  # Uncomment after validation:
   # kubectl delete nightscouttenant ${TENANT_ID} -n nightscout-tenants
+  # kubectl delete pvc ${TENANT_ID}-mongodb-data -n nightscout-tenants
   
-  echo "=== Completed: ${TENANT_ID} ==="
+  echo "=== Completed: ${TENANT_ID} (validate for 7 days before cleanup) ==="
 done
 ```
 
@@ -1007,6 +1183,333 @@ fi
 ---
 
 ## Data Migration Details
+
+### Migration Job Placement Strategy
+
+Given that the legacy shared MongoDB is accessible only from within the DigitalOcean datacenter, **migration jobs MUST run in the source cluster (DOKS)**.
+
+#### Why Source-Side Execution is Required
+
+| Factor | Source (DOKS) | Destination (GKE) |
+|--------|---------------|-------------------|
+| Access to Legacy Shared MongoDB | ✓ Direct (private IPs) | ✗ Not routable |
+| Access to GKE Gen5 Pod | Via VPN or Consul WAN | ✓ Direct (local) |
+| Existing migration decorator | ✓ Already deployed | Needs deployment |
+| Network egress cost | Data leaves DO | Data lands locally |
+
+**Conclusion**: Source-side execution is the only viable option without exposing the legacy MongoDB to the public internet.
+
+#### Migration Job Architecture (Source-Side)
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                     SOURCE-SIDE MIGRATION JOB FLOW                           │
+│                                                                              │
+│  DOKS Cluster                                                               │
+│  ┌─────────────────────────────────────────────────────────────────────────┐│
+│  │                                                                          ││
+│  │  ┌──────────────────────────────────────────────────────────────────┐   ││
+│  │  │  Migration Job Pod                                                │   ││
+│  │  │                                                                   │   ││
+│  │  │  ┌─────────────────────┐      ┌─────────────────────┐            │   ││
+│  │  │  │  mongodump          │ ───► │  mongorestore       │            │   ││
+│  │  │  │  --uri=$SOURCE_URI  │ pipe │  --uri=$TARGET_URI  │            │   ││
+│  │  │  └─────────────────────┘      └─────────────────────┘            │   ││
+│  │  │           │                            │                          │   ││
+│  │  └───────────┼────────────────────────────┼──────────────────────────┘   ││
+│  │              │                            │                              ││
+│  │              ▼                            │                              ││
+│  │  ┌──────────────────────┐                 │                              ││
+│  │  │  Legacy Shared       │                 │                              ││
+│  │  │  MongoDB             │                 │                              ││
+│  │  │  (10.0.50.10:27017)  │                 │                              ││
+│  │  └──────────────────────┘                 │                              ││
+│  │                                           │                              ││
+│  └───────────────────────────────────────────┼──────────────────────────────┘│
+│                                              │                               │
+│                                              │ VPN or Consul WAN             │
+│                                              │                               │
+│  GKE Cluster                                 ▼                               │
+│  ┌───────────────────────────────────────────────────────────────────────────┐
+│  │  ┌────────────────────────────────────────────────────────────────────┐  │
+│  │  │  Gen5 Pod (tenant-abc)                                              │  │
+│  │  │  ┌──────────────────┐  ┌──────────────────┐                        │  │
+│  │  │  │  MongoDB         │  │  Nightscout      │                        │  │
+│  │  │  │  (dedicated)     │◄─┤  (after init)    │                        │  │
+│  │  │  │  :27017          │  │                  │                        │  │
+│  │  │  └──────────────────┘  └──────────────────┘                        │  │
+│  │  │                                                                     │  │
+│  │  │  Consul Registration: tenant-abc.backends.gke-dc.consul            │  │
+│  │  └────────────────────────────────────────────────────────────────────┘  │
+│  └───────────────────────────────────────────────────────────────────────────┘
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Destination Connectivity Options
+
+The migration job running in DOKS needs to reach the Gen5 pod on GKE. Two primary options:
+
+#### Option A: Consul WAN DNS Resolution (Recommended)
+
+Since both clusters have deployment controllers syncing pod events to Consul, the GKE pods are discoverable via Consul WAN federation:
+
+```yaml
+# Migration Job ConfigMap
+data:
+  MIGRATION_SOURCE_URI: "mongodb://shared-user:pass@10.0.50.10:27017/tenant-abc"
+  MIGRATION_TARGET_URI: "mongodb://admin:pass@tenant-abc.backends.gke-dc.consul:27017/nightscout"
+  # OR using the service name format:
+  MIGRATION_TARGET_CONSUL_NAME: "tenant-abc.backends.gke-dc.consul"
+```
+
+**Prerequisites for Consul DNS:**
+1. Consul WAN federation established (see Consul Federation section)
+2. Mesh gateways deployed and healthy
+3. DOKS pods can resolve `*.gke-dc.consul` via Consul DNS
+4. TCP traffic routed through mesh gateways
+
+**Consul DNS Configuration:**
+```bash
+# Verify Consul DNS resolution from DOKS
+kubectl run -it --rm debug --image=alpine --restart=Never -- \
+  nslookup tenant-abc.backends.gke-dc.consul consul.consul.svc:8600
+
+# Expected result:
+# Server:    consul.consul.svc
+# Address:   10.0.100.50:8600
+# Name:      tenant-abc.backends.gke-dc.consul
+# Address:   10.1.42.15  (GKE pod IP, routed via mesh gateway)
+```
+
+#### Option B: VPN with Direct Pod IP
+
+If you establish VPN/Interconnect between DO and GCP, the migration job can use the GKE pod IP directly:
+
+```yaml
+# Migration Job ConfigMap
+data:
+  MIGRATION_SOURCE_URI: "mongodb://shared-user:pass@10.0.50.10:27017/tenant-abc"
+  MIGRATION_TARGET_URI: "mongodb://admin:pass@10.1.42.15:27017/nightscout"
+  MIGRATION_TARGET_POD_IP: "10.1.42.15"  # Discovered from GKE
+```
+
+**Prerequisites for VPN:**
+1. Cloud VPN or Dedicated Interconnect configured
+2. Routes advertised between VPCs
+3. Firewall rules allow MongoDB port (27017) from DOKS to GKE pod CIDR
+4. Pod IP discovered via Consul or kubectl query
+
+**Discovering GKE Pod IP:**
+```bash
+# From DOKS, query GKE cluster for pod IP
+GKE_POD_IP=$(kubectl --context=gke-cluster get pod \
+  -l ns.mdn.io/tenant-id=tenant-abc \
+  -n nightscout-tenants \
+  -o jsonpath='{.items[0].status.podIP}')
+
+# Store in ConfigMap for migration job
+kubectl patch configmap tenant-abc-config \
+  -p '{"data":{"MIGRATION_TARGET_POD_IP":"'${GKE_POD_IP}'"}}'
+```
+
+#### Comparison of Connectivity Options
+
+| Factor | Consul WAN DNS | VPN + Direct IP |
+|--------|---------------|-----------------|
+| **Setup Complexity** | Medium (Consul federation) | Medium (VPN setup) |
+| **Runtime Dependency** | Consul + Mesh Gateways | VPN tunnel |
+| **Pod IP Changes** | Automatic (DNS updates) | Manual update needed |
+| **Network Latency** | Higher (mesh gateway hop) | Lower (direct routing) |
+| **Security** | mTLS via mesh | VPN encryption |
+| **Failure Mode** | Consul outage breaks DNS | VPN tunnel down |
+| **Recommended For** | Dynamic environments | Stable pod IPs |
+
+**Recommendation**: Use **Consul WAN DNS** for automatic discovery, with **VPN as fallback** for debugging or if Consul has issues.
+
+### Webhook Modifications for Cross-Cluster Migration
+
+The existing migration decorator (`instance-userdata-decorator-sync.js`) needs updates to support cross-cluster targets.
+
+#### New ConfigMap Fields
+
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: tenant-abc-config
+  namespace: nightscout-tenants
+  annotations:
+    ns.mdn.io/migration-policy: "cross-cluster"
+    ns.mdn.io/migration-phase: "pending"
+data:
+  # Existing fields
+  MIGRATION_ENABLED: "true"
+  MIGRATION_METHOD: "mongodump-restore"
+  MIGRATION_IMAGE: "mongo:6"
+  
+  # Source (legacy shared MongoDB)
+  MIGRATION_SOURCE_URI: "mongodb://shared-user:pass@10.0.50.10:27017/tenant-abc"
+  MIGRATION_SOURCE_SECRET: "legacy-mongo-creds"
+  
+  # NEW: Cross-cluster destination options
+  MIGRATION_TARGET_CLUSTER: "gke-dc"                    # Consul datacenter name
+  MIGRATION_TARGET_CONSUL_NAME: "tenant-abc.backends.gke-dc.consul"  # Full Consul DNS (RECOMMENDED)
+  MIGRATION_TARGET_SECRET: "tenant-abc-app-credentials" # Credentials secret name
+  
+  # VPN-only options (use when VPN is available and preferred over Consul)
+  MIGRATION_USE_DIRECT_IP: "false"                      # Set to "true" to use VPN mode
+  MIGRATION_TARGET_POD_IP: ""                           # Only used when MIGRATION_USE_DIRECT_IP=true
+  
+  # NEW: Cross-cluster verification
+  MIGRATION_VERIFY_TARGET_READY: "true"                 # Wait for target pod Ready
+  MIGRATION_VERIFY_CONSUL_REGISTERED: "true"            # Verify target in Consul
+```
+
+#### Webhook Code Changes
+
+```javascript
+// cmd/webhook/handlers/instance-userdata-decorator-sync.js
+
+function buildMigrationTargetUri(config, podInfo) {
+  // Priority 1: Explicit target URI (full control)
+  if (config.MIGRATION_TARGET_URI) {
+    return config.MIGRATION_TARGET_URI;
+  }
+  
+  // Priority 2: Consul WAN DNS name (RECOMMENDED for cross-cluster)
+  // This path works via Consul mesh gateways without VPN
+  if (config.MIGRATION_TARGET_CONSUL_NAME) {
+    const creds = getTargetCredentials(config.MIGRATION_TARGET_SECRET);
+    return `mongodb://${creds.user}:${creds.pass}@${config.MIGRATION_TARGET_CONSUL_NAME}:27017/nightscout`;
+  }
+  
+  // Priority 3: Direct Pod IP (VPN scenario - explicit opt-in only)
+  // Only used when MIGRATION_USE_DIRECT_IP=true AND pod IP is available
+  if (config.MIGRATION_USE_DIRECT_IP === 'true' && config.MIGRATION_TARGET_POD_IP) {
+    const creds = getTargetCredentials(config.MIGRATION_TARGET_SECRET);
+    return `mongodb://${creds.user}:${creds.pass}@${config.MIGRATION_TARGET_POD_IP}:27017/nightscout`;
+  }
+  
+  // Priority 4: Local pod IP (existing behavior for same-cluster migration)
+  if (podInfo && podInfo.podIp) {
+    return `mongodb://admin:${podInfo.password}@${podInfo.podIp}:27017/nightscout`;
+  }
+  
+  throw new Error('No valid migration target specified');
+}
+
+// Helper to determine which connectivity method is in use
+function getMigrationConnectivityMode(config) {
+  if (config.MIGRATION_TARGET_URI) return 'explicit-uri';
+  if (config.MIGRATION_TARGET_CONSUL_NAME) return 'consul-wan';
+  if (config.MIGRATION_USE_DIRECT_IP === 'true') return 'vpn-direct';
+  return 'local';
+}
+
+function renderCrossClusterMigrationJob(config, sourceUri, targetUri) {
+  return {
+    apiVersion: 'batch/v1',
+    kind: 'Job',
+    metadata: {
+      name: `migrate-${config.tenantId}-to-${config.MIGRATION_TARGET_CLUSTER}`,
+      namespace: 'nightscout-tenants',
+      labels: {
+        'ns.mdn.io/tenant-id': config.tenantId,
+        'ns.mdn.io/migration-type': 'cross-cluster',
+        'ns.mdn.io/target-cluster': config.MIGRATION_TARGET_CLUSTER
+      },
+      annotations: {
+        'ns.mdn.io/source-cluster': 'doks-dc',
+        'ns.mdn.io/target-cluster': config.MIGRATION_TARGET_CLUSTER
+      }
+    },
+    spec: {
+      backoffLimit: 3,
+      ttlSecondsAfterFinished: 3600,
+      template: {
+        spec: {
+          restartPolicy: 'OnFailure',
+          containers: [{
+            name: 'migrate',
+            image: config.MIGRATION_IMAGE || 'mongo:6',
+            command: ['/bin/bash', '-c'],
+            args: [`
+              set -e
+              echo "Starting cross-cluster migration for ${config.tenantId}"
+              echo "Source: ${sourceUri.replace(/:[^:@]+@/, ':***@')}"
+              echo "Target: ${targetUri.replace(/:[^:@]+@/, ':***@')}"
+              
+              # Verify target is reachable
+              echo "Verifying target connectivity..."
+              mongosh "${targetUri}" --eval "db.runCommand({ping:1})" || {
+                echo "ERROR: Cannot reach target MongoDB"
+                exit 1
+              }
+              
+              # Run migration
+              echo "Running mongodump | mongorestore..."
+              mongodump --uri="${sourceUri}" --archive | \
+                mongorestore --uri="${targetUri}" --archive --drop
+              
+              # Verify migration
+              echo "Verifying document counts..."
+              SOURCE_COUNT=$(mongosh "${sourceUri}" --quiet --eval "db.entries.count()")
+              TARGET_COUNT=$(mongosh "${targetUri}" --quiet --eval "db.entries.count()")
+              
+              if [ "$SOURCE_COUNT" -ne "$TARGET_COUNT" ]; then
+                echo "WARNING: Count mismatch - source=$SOURCE_COUNT target=$TARGET_COUNT"
+              else
+                echo "SUCCESS: Migrated $TARGET_COUNT documents"
+              fi
+            `],
+            env: [
+              { name: 'SOURCE_URI', value: sourceUri },
+              { name: 'TARGET_URI', value: targetUri }
+            ],
+            resources: {
+              requests: { cpu: '100m', memory: '256Mi' },
+              limits: { cpu: '500m', memory: '512Mi' }
+            }
+          }],
+          // Use same node affinity as tenant pods for network access
+          affinity: config.nodeAffinity || {}
+        }
+      }
+    }
+  };
+}
+```
+
+#### Migration Secret Handling
+
+For cross-cluster migration, credentials for both source and target must be available:
+
+```yaml
+# Source credentials (legacy shared MongoDB) - already exists
+apiVersion: v1
+kind: Secret
+metadata:
+  name: legacy-mongo-creds
+  namespace: nightscout-tenants
+type: Opaque
+data:
+  MONGO_USER: c2hhcmVkLXVzZXI=      # shared-user
+  MONGO_PASSWORD: c2hhcmVkLXBhc3M=  # shared-pass
+
+# Target credentials - must be synced from GKE or use shared secret
+apiVersion: v1
+kind: Secret
+metadata:
+  name: tenant-abc-app-credentials
+  namespace: nightscout-tenants
+  annotations:
+    ns.mdn.io/synced-from: "gke-dc"
+type: Opaque
+data:
+  MONGO_USER: YWRtaW4=              # admin
+  MONGO_PASSWORD: Z2VuZXJhdGVk...   # generated password
+```
 
 ### PVC Migration with Velero
 
