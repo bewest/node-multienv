@@ -29,7 +29,7 @@ This proposal describes a **federation-based migration strategy** to move the Ni
 | **Adopt PVC Model** | Move to per-tenant dedicated storage with full isolation |
 | **Zero Data Loss** | Migration via mongodump/mongorestore preserves all data |
 | **No CDC Infrastructure** | Avoid Kafka/Strimzi/Debezium complexity |
-| **4.5x Tenant Density** | 128 volumes/node on GKE vs ~28 on DOKS |
+| **18x Volume Capacity** | 128 volumes/node on GKE vs 7 on DOKS |
 | **Gradual Migration** | Run both clusters in parallel during transition |
 | **Rollback Capability** | Source data remains intact until validated |
 
@@ -56,7 +56,7 @@ No source PVCs exist to migrate - the shared MongoDB on droplets is accessed via
 
 ### Recommendation
 
-For the current scale and growth projections, **federation migration to GKE is recommended** over ephemeral storage. The 128 volume limit provides sufficient headroom for 3-5 years of growth, while avoiding the operational complexity of CDC pipelines.
+For the current scale and growth projections, **federation migration to GKE is recommended** over ephemeral storage. The 128 volume limit aligns well with the default 110 pod/node limit, enabling optimal tenant density without requiring limit overrides. Beyond immediate capacity gains, this migration proves multi-cluster federation patterns that can be reused for future capacity expansion across additional clusters—without requiring another migration.
 
 **When to reconsider ephemeral storage:**
 - If tenant count exceeds 10,000+ (approaching GKE limits at scale)
@@ -71,41 +71,50 @@ For the current scale and growth projections, **federation migration to GKE is r
 
 The existing hosting provider imposes strict limits on block volumes per node:
 
-| Provider | Volume Limit Per Node | Effective Tenant Density |
-|----------|----------------------|--------------------------|
-| **Current (DOKS)** | ~28 volumes | ~25 tenants/node |
-| Azure (Managed Disks) | ~64 volumes | ~60 tenants/node |
-| **GKE (Persistent Disk)** | ~128 volumes | ~125 tenants/node |
-| AWS EBS | ~28 volumes | ~25 tenants/node |
+| Provider | Volume Limit Per Node | Default Pod Limit | Density Match |
+|----------|----------------------|-------------------|---------------|
+| **Current (DOKS)** | 7 volumes | 110 pods/node | Poor (7 << 110) |
+| Azure (Managed Disks) | ~64 volumes | 110 pods/node | Moderate |
+| **GKE (Persistent Disk)** | 128 volumes | 110 pods/node | Excellent (128 ≈ 110) |
+| AWS EBS | ~28 volumes | 110 pods/node | Poor |
 
-### Impact on Current Operations
+### Density Analysis
 
-With ~28 volumes per node on DOKS:
-
-```
-Current Cluster: 10 nodes × 25 tenants = 250 tenants maximum
-Actual Usage:    ~200 tenants (80% capacity)
-Growth Rate:     ~20 tenants/month
-Time to Limit:   ~2.5 months
-```
-
-**Consequences:**
-- Adding nodes increases cost but not efficiency
-- CPU/memory underutilized (typically <40% usage)
-- Cannot right-size nodes for workload
-- Emergency scaling blocked by volume limits
-
-### Why GKE Solves This
-
-GKE's 128 volume limit provides immediate relief:
+Based on production experience with Gen3b (shared MongoDB model):
 
 ```
-Target Cluster:  10 nodes × 125 tenants = 1,250 tenants maximum
-Headroom:        1,050 additional tenants (5x current capacity)
-Growth Runway:   ~4 years at current growth rate
+Node Spec:           16GB RAM nodes
+Comfortable Density: ~100 tenants/node at 80% RAM utilization
+Default Pod Limit:   110 pods/node (Kubernetes default)
 ```
 
-This approach avoids the complexity of ephemeral storage while providing substantial scaling headroom.
+**DOKS Volume Constraint:**
+```
+Volume Limit:        7 volumes/node
+Effective Density:   7 tenants/node (volume-bound, not RAM-bound)
+Utilization:         ~7% of available RAM capacity
+Waste Factor:        ~14x (could host 100 tenants, limited to 7)
+```
+
+**GKE Density Alignment:**
+```
+Volume Limit:        128 volumes/node
+Pod Limit:           110 pods/node (default, no override needed)
+Effective Density:   ~100 tenants/node (RAM-bound, as designed)
+Utilization:         80% RAM at comfortable density
+```
+
+The 128 volume limit on GKE is a sweet spot—it exceeds the default 110 pod limit, meaning tenant density is determined by resource utilization (RAM, CPU) rather than artificial volume constraints.
+
+### Strategic Value: Proven Federation
+
+Beyond immediate density improvements, this migration establishes **production-proven multi-cluster federation patterns**:
+
+- Consul WAN federation for cross-cluster service discovery
+- Cross-cluster migration jobs via decorator controllers
+- DNS-based traffic management between clusters
+
+Once proven, these patterns can be reused to **expand capacity by adding clusters** rather than migrating again. Future growth can be addressed by federating additional GKE clusters (or other providers) using the same infrastructure.
 
 ---
 
@@ -147,7 +156,7 @@ This approach avoids the complexity of ephemeral storage while providing substan
 │  │   (Tenant CRD)     │  │  │  │   (Tenant CRD)     │  │
 │  └────────────────────┘  │  │  └────────────────────┘  │
 │                          │  │                          │
-│  Volume Limit: 28/node   │  │  Volume Limit: 128/node  │
+│  Volume Limit: 7/node    │  │  Volume Limit: 128/node  │
 │  Status: Draining        │  │  Status: Active          │
 │                          │  │                          │
 └──────────────────────────┘  └──────────────────────────┘
