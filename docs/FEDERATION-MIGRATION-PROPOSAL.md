@@ -1,0 +1,2084 @@
+# Federation-Based Cloud Migration Proposal
+
+## Status: Draft Proposal
+
+**Date:** 2026-01-12  
+**Authors:** Nightscout Platform Team  
+**Target:** Gen 3b → Gen 5 Migration to GKE  
+**Related Docs:** [EPHEMERAL-STORAGE-PROPOSAL.md](EPHEMERAL-STORAGE-PROPOSAL.md), [ARCHITECTURE-EVOLUTION.md](ARCHITECTURE-EVOLUTION.md), [MIGRATION-PLAYBOOK.md](MIGRATION-PLAYBOOK.md)
+
+---
+
+## Executive Summary
+
+This proposal describes a **federation-based migration strategy** to move the Nightscout platform from the current hosting provider to Google Kubernetes Engine (GKE). Rather than implementing the complex ephemeral storage architecture with Kafka CDC pipelines, this approach leverages GKE's higher volume limits (128 per node vs 28 on AWS) to continue using the proven PVC-based persistent storage model.
+
+### Key Benefits
+
+| Benefit | Description |
+|---------|-------------|
+| **Preserve PVC Model** | Keep the battle-tested persistent storage architecture |
+| **Zero Data Loss Window** | No 1-2 minute crash recovery gap |
+| **No CDC Infrastructure** | Eliminate Kafka/Strimzi/Debezium complexity |
+| **4.5x Tenant Density** | 128 volumes/node vs 28 on AWS |
+| **Gradual Migration** | Run both clusters in parallel during transition |
+| **Rollback Capability** | Easy fallback if issues arise |
+
+### Trade-offs vs Ephemeral Storage
+
+| Aspect | Federation Migration | Ephemeral Storage |
+|--------|---------------------|-------------------|
+| **Tenant Density** | 128/node (GKE limit) | Unlimited (no PVC) |
+| **Data Durability** | Full (PVC-based) | 1-2 min loss window |
+| **Infrastructure** | KubeFed + Velero | Kafka + Strimzi + CDC |
+| **Custom Code** | ~50 lines (migration scripts) | ~300 lines (hydration + export) |
+| **Provider Lock-in** | GKE-dependent | Provider-agnostic |
+| **Operational Complexity** | Lower (proven patterns) | Higher (CDC pipeline) |
+
+### Recommendation
+
+For the current scale and growth projections, **federation migration to GKE is recommended** over ephemeral storage. The 128 volume limit provides sufficient headroom for 3-5 years of growth, while avoiding the operational complexity of CDC pipelines.
+
+**When to reconsider ephemeral storage:**
+- If tenant count exceeds 10,000+ (approaching GKE limits at scale)
+- If multi-cloud redundancy becomes a requirement
+- If GKE pricing becomes unfavorable
+
+---
+
+## Problem Statement
+
+### Current Cloud Volume Limits
+
+The existing hosting provider imposes strict limits on block volumes per node:
+
+| Provider | Volume Limit Per Node | Effective Tenant Density |
+|----------|----------------------|--------------------------|
+| **Current (AWS EBS)** | ~28 volumes | ~25 tenants/node |
+| Azure (Managed Disks) | ~64 volumes | ~60 tenants/node |
+| **GKE (Persistent Disk)** | ~128 volumes | ~125 tenants/node |
+| DigitalOcean | ~7 volumes | ~5 tenants/node |
+
+### Impact on Current Operations
+
+With 28 volumes per node on AWS:
+
+```
+Current Cluster: 10 nodes × 25 tenants = 250 tenants maximum
+Actual Usage:    ~200 tenants (80% capacity)
+Growth Rate:     ~20 tenants/month
+Time to Limit:   ~2.5 months
+```
+
+**Consequences:**
+- Adding nodes increases cost but not efficiency
+- CPU/memory underutilized (typically <40% usage)
+- Cannot right-size nodes for workload
+- Emergency scaling blocked by volume limits
+
+### Why GKE Solves This
+
+GKE's 128 volume limit provides immediate relief:
+
+```
+Target Cluster:  10 nodes × 125 tenants = 1,250 tenants maximum
+Headroom:        1,050 additional tenants (5x current capacity)
+Growth Runway:   ~4 years at current growth rate
+```
+
+This approach avoids the complexity of ephemeral storage while providing substantial scaling headroom.
+
+---
+
+## Federation Architecture Overview
+
+### Cluster Topology
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                           FEDERATION CONTROL PLANE                           │
+│                                                                              │
+│  ┌──────────────────────────────────────────────────────────────────────┐  │
+│  │                      HOST CLUSTER (GKE)                                │  │
+│  │                                                                        │  │
+│  │   ┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐  │  │
+│  │   │   KubeFed       │    │   Federation    │    │   Velero        │  │  │
+│  │   │   Controller    │───►│   Resources     │◄───│   Controller    │  │  │
+│  │   │   Manager       │    │   (CRDs)        │    │   (Backup)      │  │  │
+│  │   └─────────────────┘    └─────────────────┘    └─────────────────┘  │  │
+│  │           │                       │                      │            │  │
+│  └───────────┼───────────────────────┼──────────────────────┼────────────┘  │
+│              │                       │                      │               │
+└──────────────┼───────────────────────┼──────────────────────┼───────────────┘
+               │                       │                      │
+               ▼                       ▼                      ▼
+┌──────────────────────────┐  ┌──────────────────────────┐
+│   SOURCE CLUSTER (AWS)   │  │   TARGET CLUSTER (GKE)   │
+│   (Member Cluster)       │  │   (Member Cluster)       │
+│                          │  │                          │
+│  ┌────────────────────┐  │  │  ┌────────────────────┐  │
+│  │   Gen 3b Pods      │  │  │  │   Gen 5 Pods       │  │
+│  │   - MongoDB + NS   │  │  │  │   - MongoDB + NS   │  │
+│  │   - PVC Storage    │  │  │  │   - PVC Storage    │  │
+│  │   - Consul Agent   │  │  │  │   - Consul Agent   │  │
+│  └────────────────────┘  │  │  └────────────────────┘  │
+│                          │  │                          │
+│  ┌────────────────────┐  │  │  ┌────────────────────┐  │
+│  │   Metacontroller   │  │  │  │   Metacontroller   │  │
+│  │   (Tenant CRD)     │  │  │  │   (Tenant CRD)     │  │
+│  └────────────────────┘  │  │  └────────────────────┘  │
+│                          │  │                          │
+│  Volume Limit: 28/node   │  │  Volume Limit: 128/node  │
+│  Status: Draining        │  │  Status: Active          │
+│                          │  │                          │
+└──────────────────────────┘  └──────────────────────────┘
+```
+
+### Federation Components
+
+| Component | Purpose | Location |
+|-----------|---------|----------|
+| **KubeFed Controller** | Manages federated resources across clusters | Host Cluster (GKE) |
+| **Velero** | Backup/restore PVCs during migration | Both Clusters |
+| **Consul Federation** | Cross-cluster service discovery | Both Clusters |
+| **ExternalDNS** | DNS-based traffic management | Both Clusters |
+| **Metacontroller** | Tenant CRD management | Both Clusters |
+
+### High-Level Migration Flow
+
+```
+Phase 1: Setup
+─────────────────────────────────────────────────────────────
+  1. Provision GKE cluster with federation-ready configuration
+  2. Install KubeFed control plane on GKE (host cluster)
+  3. Register both AWS and GKE as member clusters
+  4. Configure Consul WAN federation between datacenters
+  5. Deploy Velero with cross-cluster backup capability
+
+Phase 2: Parallel Operation
+─────────────────────────────────────────────────────────────
+  1. Deploy Gen 5 infrastructure to GKE
+  2. New tenants provision directly on GKE
+  3. Existing tenants continue on AWS (gen3b)
+  4. Validate GKE operations with new tenant load
+
+Phase 3: Tenant Migration
+─────────────────────────────────────────────────────────────
+  1. Select tenant batch for migration
+  2. Backup tenant data (Velero PVC snapshot)
+  3. Restore to GKE cluster
+  4. Update DNS/Consul to point to GKE pod
+  5. Decommission AWS tenant resources
+  6. Repeat for all tenants in batches
+
+Phase 4: Decommission
+─────────────────────────────────────────────────────────────
+  1. Verify all tenants on GKE
+  2. Remove AWS cluster from federation
+  3. Terminate AWS infrastructure
+  4. Consolidate to single-cluster operations
+```
+
+---
+
+## Federation Requirements
+
+### Prerequisites
+
+#### Cluster Requirements
+
+| Requirement | AWS (Source) | GKE (Target) | Notes |
+|-------------|--------------|--------------|-------|
+| Kubernetes Version | 1.28+ | 1.28+ | Must be compatible |
+| Container Runtime | containerd | containerd | Standard for both |
+| CNI | Calico/AWS VPC CNI | GKE VPC-native | Different CNIs OK |
+| Storage Class | gp3 (EBS) | pd-balanced | Cross-compatible via Velero |
+| Load Balancer | AWS NLB | GKE L7 ILB | Different implementations |
+
+#### Networking Requirements
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                        CROSS-CLUSTER NETWORKING                              │
+│                                                                              │
+│  AWS VPC (10.0.0.0/16)                    GCP VPC (10.1.0.0/16)            │
+│  ┌─────────────────────┐                  ┌─────────────────────┐           │
+│  │ Pod CIDR:           │                  │ Pod CIDR:           │           │
+│  │ 10.0.0.0/16         │◄────VPN/────────►│ 10.1.0.0/16         │           │
+│  │                     │   Interconnect   │                     │           │
+│  │ Service CIDR:       │                  │ Service CIDR:       │           │
+│  │ 172.20.0.0/16       │                  │ 172.21.0.0/16       │           │
+│  └─────────────────────┘                  └─────────────────────┘           │
+│                                                                              │
+│  Required Connectivity:                                                      │
+│  • Kubernetes API (6443) - Federation control plane                         │
+│  • Consul WAN (8302/tcp+udp) - Service mesh federation                     │
+│  • Velero S3/GCS (443) - Backup storage access                             │
+│  • Pod-to-Pod (optional) - Only if cross-cluster service calls needed      │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+**Networking Options:**
+
+| Option | Latency | Cost | Complexity | Recommendation |
+|--------|---------|------|------------|----------------|
+| **Cloud VPN** | 50-100ms | Low | Low | Development/Staging |
+| **Dedicated Interconnect** | 5-10ms | High | Medium | Production |
+| **Public Internet + mTLS** | Variable | Lowest | Medium | Budget option |
+
+**Recommendation:** Use Cloud VPN for initial migration, upgrade to Dedicated Interconnect if latency issues arise.
+
+#### Permissions Requirements
+
+**AWS IAM (Source Cluster):**
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "eks:DescribeCluster",
+        "eks:ListClusters",
+        "ec2:DescribeVolumes",
+        "ec2:CreateSnapshot",
+        "ec2:DeleteSnapshot",
+        "s3:PutObject",
+        "s3:GetObject",
+        "s3:DeleteObject"
+      ],
+      "Resource": "*"
+    }
+  ]
+}
+```
+
+**GCP IAM (Target Cluster):**
+```yaml
+roles:
+  - roles/container.admin           # GKE cluster management
+  - roles/compute.storageAdmin      # Persistent disk management
+  - roles/storage.objectAdmin       # GCS backup bucket access
+  - roles/iam.serviceAccountUser    # Workload identity
+```
+
+### KubeFed Installation
+
+#### Install KubeFed on Host Cluster (GKE)
+
+```bash
+# Add Helm repository
+helm repo add kubefed-charts https://raw.githubusercontent.com/kubernetes-sigs/kubefed/master/charts
+helm repo update
+
+# Create namespace
+kubectl create namespace kube-federation-system
+
+# Install KubeFed
+helm install kubefed kubefed-charts/kubefed \
+  --namespace kube-federation-system \
+  --set controllermanager.replicaCount=2 \
+  --set controllermanager.resources.requests.memory=256Mi \
+  --set controllermanager.resources.limits.memory=512Mi
+
+# Verify installation
+kubectl -n kube-federation-system get pods
+```
+
+#### Install kubefedctl CLI
+
+```bash
+# Download kubefedctl
+VERSION=0.10.0
+OS=linux
+ARCH=amd64
+curl -LO "https://github.com/kubernetes-sigs/kubefed/releases/download/v${VERSION}/kubefedctl-${VERSION}-${OS}-${ARCH}.tgz"
+tar -xzf kubefedctl-${VERSION}-${OS}-${ARCH}.tgz
+sudo mv kubefedctl /usr/local/bin/
+
+# Verify
+kubefedctl version
+```
+
+#### Register Member Clusters
+
+```bash
+# Context names in kubeconfig
+AWS_CONTEXT="arn:aws:eks:us-east-1:123456789:cluster/nightscout-prod"
+GKE_CONTEXT="gke_nightscout-prod_us-central1_nightscout-gke"
+
+# Join AWS cluster (source)
+kubefedctl join aws-cluster \
+  --host-cluster-context=${GKE_CONTEXT} \
+  --cluster-context=${AWS_CONTEXT} \
+  --v=2
+
+# Join GKE cluster (target, also host)
+kubefedctl join gke-cluster \
+  --host-cluster-context=${GKE_CONTEXT} \
+  --cluster-context=${GKE_CONTEXT} \
+  --v=2
+
+# Verify cluster status
+kubectl -n kube-federation-system get kubefedclusters
+```
+
+**Expected Output:**
+```
+NAME          AGE   READY
+aws-cluster   1m    True
+gke-cluster   30s   True
+```
+
+### Velero Installation
+
+Velero handles PVC backup and cross-cluster restore.
+
+#### Install Velero on AWS Cluster
+
+```bash
+# Install Velero with AWS plugin
+velero install \
+  --provider aws \
+  --plugins velero/velero-plugin-for-aws:v1.8.0 \
+  --bucket nightscout-velero-backups \
+  --backup-location-config region=us-east-1 \
+  --snapshot-location-config region=us-east-1 \
+  --secret-file ./credentials-velero \
+  --use-restic \
+  --wait
+
+# Verify
+velero backup-location get
+```
+
+#### Cross-Cloud Velero Architecture
+
+For cross-cloud PVC migration, both clusters must share access to a **single S3 bucket** for backup metadata and restic snapshots:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                     VELERO CROSS-CLOUD BACKUP FLOW                           │
+│                                                                              │
+│  AWS Cluster                          GKE Cluster                            │
+│  ┌─────────────────┐                  ┌─────────────────┐                   │
+│  │ Velero + Restic │                  │ Velero + Restic │                   │
+│  │ (AWS Plugin)    │                  │ (AWS Plugin)    │ ◄── Uses AWS      │
+│  └────────┬────────┘                  └────────┬────────┘     plugin too!   │
+│           │                                    │                             │
+│           └─────────────┬──────────────────────┘                             │
+│                         ▼                                                    │
+│              ┌─────────────────────┐                                         │
+│              │  S3: nightscout-    │                                         │
+│              │  velero-backups     │  ◄── SHARED BUCKET                      │
+│              │  (us-east-1)        │                                         │
+│              │                     │                                         │
+│              │  /backups/          │  Backup metadata                        │
+│              │  /restic/           │  PVC file-level snapshots              │
+│              └─────────────────────┘                                         │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+**Critical: GKE must use the AWS plugin** to access the shared S3 bucket, not GCS.
+
+#### Step 1: Create IAM User for GKE Access to S3
+
+```bash
+# Create IAM user for GKE Velero access
+aws iam create-user --user-name velero-gke-crosscloud
+
+# Create policy for S3 access
+cat > velero-s3-policy.json <<EOF
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetObject",
+        "s3:PutObject",
+        "s3:DeleteObject",
+        "s3:ListBucket",
+        "s3:GetBucketLocation"
+      ],
+      "Resource": [
+        "arn:aws:s3:::nightscout-velero-backups",
+        "arn:aws:s3:::nightscout-velero-backups/*"
+      ]
+    }
+  ]
+}
+EOF
+
+aws iam put-user-policy \
+  --user-name velero-gke-crosscloud \
+  --policy-name VeleroS3Access \
+  --policy-document file://velero-s3-policy.json
+
+# Create access key
+aws iam create-access-key --user-name velero-gke-crosscloud > gke-aws-credentials.json
+
+# Extract credentials for Velero
+cat > credentials-velero-gke <<EOF
+[default]
+aws_access_key_id=$(jq -r '.AccessKey.AccessKeyId' gke-aws-credentials.json)
+aws_secret_access_key=$(jq -r '.AccessKey.SecretAccessKey' gke-aws-credentials.json)
+EOF
+```
+
+#### Step 2: Install Velero on GKE with AWS Plugin
+
+```bash
+# Install Velero on GKE using AWS plugin (NOT GCP plugin)
+velero install \
+  --provider aws \
+  --plugins velero/velero-plugin-for-aws:v1.8.0 \
+  --bucket nightscout-velero-backups \
+  --backup-location-config region=us-east-1,s3ForcePathStyle=true \
+  --secret-file ./credentials-velero-gke \
+  --use-restic \
+  --wait
+
+# Verify connection to shared S3 bucket
+velero backup-location get
+# Should show: default (Available)
+```
+
+#### Step 3: Verify Restic Repository Sync
+
+Both clusters share the same restic repository in S3. Verify access:
+
+```bash
+# On AWS cluster - create test backup with PVC
+velero backup create cross-cloud-test \
+  --include-namespaces nightscout-tenants \
+  --selector ns.mdn.io/tenant-id=test-tenant \
+  --default-volumes-to-restic \
+  --wait
+
+# Check restic snapshots exist
+aws s3 ls s3://nightscout-velero-backups/restic/nightscout-tenants/
+
+# On GKE cluster - verify backup is visible
+kubectx gke-cluster
+velero backup get cross-cloud-test
+# Should show backup with status "Completed"
+
+# Test restore on GKE
+velero restore create cross-cloud-test-restore \
+  --from-backup cross-cloud-test \
+  --wait
+
+# Verify PVC was created
+kubectl get pvc -n nightscout-tenants
+```
+
+#### Step 4: Create AWS Credentials Secret on GKE
+
+For the BackupStorageLocation to work, create the credentials secret:
+
+```bash
+# Create secret with AWS credentials on GKE
+kubectl create secret generic aws-credentials \
+  --namespace velero \
+  --from-file=cloud=./credentials-velero-gke
+```
+
+---
+
+## GKE Cluster Provisioning
+
+### Cluster Specification
+
+```yaml
+# gke-cluster-config.yaml
+apiVersion: container.google.com/v1
+kind: Cluster
+metadata:
+  name: nightscout-gke
+  region: us-central1
+spec:
+  # Use regional cluster for HA
+  location: us-central1
+  
+  # Node pool configuration
+  nodePools:
+  - name: nightscout-pool
+    initialNodeCount: 3
+    autoscaling:
+      enabled: true
+      minNodeCount: 3
+      maxNodeCount: 20
+    config:
+      machineType: e2-standard-8  # 8 vCPU, 32GB RAM
+      diskType: pd-balanced
+      diskSizeGb: 100
+      
+      # Enable workload identity
+      workloadMetadataConfig:
+        mode: GKE_METADATA
+      
+      # Labels for node affinity
+      labels:
+        workload: nightscout
+        generation: gen5
+      
+      # Taints (optional, for dedicated workloads)
+      # taints:
+      # - key: dedicated
+      #   value: nightscout
+      #   effect: NoSchedule
+  
+  # Networking
+  networkConfig:
+    network: projects/nightscout-prod/global/networks/nightscout-vpc
+    subnetwork: projects/nightscout-prod/regions/us-central1/subnetworks/nightscout-pods
+    
+    # VPC-native cluster (required for high volume limits)
+    enableIntraNodeVisibility: true
+  
+  ipAllocationPolicy:
+    useIpAliases: true
+    clusterSecondaryRangeName: pods
+    servicesSecondaryRangeName: services
+  
+  # Addons
+  addonsConfig:
+    httpLoadBalancing:
+      disabled: false
+    horizontalPodAutoscaling:
+      disabled: false
+    gcePersistentDiskCsiDriverConfig:
+      enabled: true  # Required for PVC operations
+  
+  # Security
+  workloadIdentityConfig:
+    workloadPool: nightscout-prod.svc.id.goog
+  
+  # Maintenance
+  maintenancePolicy:
+    window:
+      dailyMaintenanceWindow:
+        startTime: "03:00"  # UTC
+```
+
+### Provision with Terraform
+
+```hcl
+# gke.tf
+resource "google_container_cluster" "nightscout" {
+  name     = "nightscout-gke"
+  location = "us-central1"
+  
+  # Remove default node pool
+  remove_default_node_pool = true
+  initial_node_count       = 1
+  
+  # Networking
+  network    = google_compute_network.nightscout.name
+  subnetwork = google_compute_subnetwork.nightscout.name
+  
+  ip_allocation_policy {
+    cluster_secondary_range_name  = "pods"
+    services_secondary_range_name = "services"
+  }
+  
+  # Workload Identity
+  workload_identity_config {
+    workload_pool = "${var.project_id}.svc.id.goog"
+  }
+  
+  # Addons
+  addons_config {
+    gce_persistent_disk_csi_driver_config {
+      enabled = true
+    }
+  }
+}
+
+resource "google_container_node_pool" "nightscout" {
+  name       = "nightscout-pool"
+  location   = "us-central1"
+  cluster    = google_container_cluster.nightscout.name
+  
+  initial_node_count = 3
+  
+  autoscaling {
+    min_node_count = 3
+    max_node_count = 20
+  }
+  
+  node_config {
+    machine_type = "e2-standard-8"
+    disk_type    = "pd-balanced"
+    disk_size_gb = 100
+    
+    workload_metadata_config {
+      mode = "GKE_METADATA"
+    }
+    
+    labels = {
+      workload   = "nightscout"
+      generation = "gen5"
+    }
+    
+    oauth_scopes = [
+      "https://www.googleapis.com/auth/cloud-platform"
+    ]
+  }
+}
+```
+
+### Storage Class Configuration
+
+```yaml
+# storage-class.yaml
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: nightscout-mongodb
+  annotations:
+    storageclass.kubernetes.io/is-default-class: "false"
+provisioner: pd.csi.storage.gke.io
+parameters:
+  type: pd-balanced
+  replication-type: regional-pd  # For HA (optional)
+reclaimPolicy: Retain
+allowVolumeExpansion: true
+volumeBindingMode: WaitForFirstConsumer
+```
+
+---
+
+## Migration Strategy
+
+### Phase Overview
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         MIGRATION TIMELINE                                   │
+│                                                                              │
+│  Week 1-2          Week 3-4          Week 5-8          Week 9-10            │
+│  ┌─────────┐       ┌─────────┐       ┌─────────┐       ┌─────────┐          │
+│  │ Phase 1 │──────►│ Phase 2 │──────►│ Phase 3 │──────►│ Phase 4 │          │
+│  │ Setup   │       │ Parallel│       │ Migrate │       │ Cleanup │          │
+│  └─────────┘       └─────────┘       └─────────┘       └─────────┘          │
+│                                                                              │
+│  • GKE Cluster     • Gen 5 on GKE    • Batch migrate   • Decommission AWS  │
+│  • Federation      • New tenants     • 50 tenants/week • Remove federation │
+│  • Networking      • Monitoring      • Validate each   • Consolidate       │
+│  • Velero          • Runbooks        • Rollback ready  • Cost optimization │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Phase 1: Infrastructure Setup (Week 1-2)
+
+#### Day 1-3: GKE Cluster Provisioning
+
+```bash
+# 1. Create GKE cluster
+gcloud container clusters create nightscout-gke \
+  --region us-central1 \
+  --num-nodes 3 \
+  --machine-type e2-standard-8 \
+  --enable-ip-alias \
+  --workload-pool=nightscout-prod.svc.id.goog
+
+# 2. Get credentials
+gcloud container clusters get-credentials nightscout-gke \
+  --region us-central1
+
+# 3. Verify volume limits
+kubectl describe nodes | grep "attachable-volumes-gce-pd"
+# Expected: attachable-volumes-gce-pd: 128
+```
+
+#### Day 4-5: Federation Setup
+
+```bash
+# 1. Install KubeFed on GKE
+helm install kubefed kubefed-charts/kubefed \
+  --namespace kube-federation-system \
+  --create-namespace
+
+# 2. Register clusters
+kubefedctl join aws-cluster --host-cluster-context=gke --cluster-context=aws
+kubefedctl join gke-cluster --host-cluster-context=gke --cluster-context=gke
+
+# 3. Verify
+kubectl get kubefedclusters -n kube-federation-system
+```
+
+#### Day 6-7: Cross-Cluster Networking
+
+```bash
+# 1. Create Cloud VPN between AWS and GCP
+# (Terraform or console - detailed steps in NETWORKING.md)
+
+# 2. Verify connectivity
+# From AWS cluster pod:
+kubectl run test --rm -it --image=busybox -- wget -qO- http://10.1.0.1:8500/v1/status/leader
+
+# 3. Configure Consul WAN federation
+consul join -wan <gke-consul-server-ip>
+```
+
+#### Day 8-10: Velero and Backup Configuration
+
+```bash
+# 1. Install Velero on both clusters (see above)
+
+# 2. Test backup/restore cycle
+# On AWS:
+velero backup create test-backup --include-namespaces nightscout-tenants
+
+# On GKE:
+velero restore create test-restore --from-backup test-backup
+
+# 3. Verify restored resources
+kubectl get pvc -n nightscout-tenants
+```
+
+### Phase 2: Parallel Operation (Week 3-4)
+
+#### Deploy Gen 5 Stack to GKE
+
+```bash
+# 1. Deploy shared infrastructure
+kubectl apply -f manifests/metacontroller/
+kubectl apply -f manifests/consul/
+kubectl apply -f manifests/ingress/
+
+# 2. Deploy tenant composite controller
+kubectl apply -f manifests/tenant-composite/
+
+# 3. Verify readiness
+kubectl get pods -n nightscout-system
+```
+
+#### Route New Tenants to GKE
+
+Update tenant provisioning to target GKE:
+
+```yaml
+# federation/new-tenant-placement.yaml
+apiVersion: types.kubefed.io/v1beta1
+kind: FederatedConfigMap
+metadata:
+  name: tenant-provisioning-config
+  namespace: nightscout-system
+spec:
+  template:
+    data:
+      default-cluster: gke-cluster
+      fallback-cluster: aws-cluster
+  placement:
+    clusters:
+    - name: gke-cluster
+```
+
+#### Monitoring Setup
+
+```yaml
+# prometheus/federation-alerts.yaml
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: federation-migration-alerts
+spec:
+  groups:
+  - name: migration
+    rules:
+    - alert: TenantMigrationFailed
+      expr: |
+        increase(velero_restore_failed_total[1h]) > 0
+      for: 5m
+      labels:
+        severity: critical
+      annotations:
+        summary: "Tenant migration restore failed"
+        
+    - alert: CrossClusterLatencyHigh
+      expr: |
+        histogram_quantile(0.99, consul_rpc_request_seconds_bucket{datacenter=~"aws|gke"}) > 0.5
+      for: 10m
+      labels:
+        severity: warning
+      annotations:
+        summary: "Cross-cluster latency exceeds 500ms"
+```
+
+### Phase 3: Tenant Migration (Week 5-8)
+
+#### Tenant Selection Criteria
+
+Prioritize tenants for migration based on:
+
+| Priority | Criteria | Rationale |
+|----------|----------|-----------|
+| 1 | Inactive tenants (no writes in 30 days) | Low risk, validate process |
+| 2 | Low-activity tenants (<100 writes/day) | Quick migration, minimal data |
+| 3 | Standard tenants | Bulk of migrations |
+| 4 | High-activity tenants (>1000 writes/day) | Careful scheduling needed |
+| 5 | Premium/SLA tenants | Final batch, proven process |
+
+#### Migration Batch Script
+
+```bash
+#!/bin/bash
+# migrate-tenant-batch.sh
+
+TENANTS="$1"  # Comma-separated tenant IDs
+BATCH_ID=$(date +%Y%m%d-%H%M%S)
+
+for TENANT_ID in ${TENANTS//,/ }; do
+  echo "=== Migrating tenant: ${TENANT_ID} ==="
+  
+  # 1. Create backup on AWS
+  velero backup create ${TENANT_ID}-${BATCH_ID} \
+    --include-namespaces nightscout-tenants \
+    --selector ns.mdn.io/tenant-id=${TENANT_ID} \
+    --wait
+  
+  # 2. Verify backup completed
+  velero backup describe ${TENANT_ID}-${BATCH_ID}
+  
+  # 3. Restore on GKE
+  kubectx gke-cluster
+  velero restore create ${TENANT_ID}-${BATCH_ID}-restore \
+    --from-backup ${TENANT_ID}-${BATCH_ID} \
+    --wait
+  
+  # 4. Wait for pod ready
+  kubectl wait --for=condition=ready pod \
+    -l ns.mdn.io/tenant-id=${TENANT_ID} \
+    -n nightscout-tenants \
+    --timeout=300s
+  
+  # 5. Update Consul to point to GKE
+  consul kv put "nightscout/tenants/${TENANT_ID}/cluster" "gke-cluster"
+  
+  # 6. Deregister from AWS Consul
+  kubectx aws-cluster
+  consul services deregister ${TENANT_ID}
+  
+  # 7. Delete AWS resources (after validation period)
+  # kubectl delete nightscouttenant ${TENANT_ID} -n nightscout-tenants
+  
+  echo "=== Completed: ${TENANT_ID} ==="
+done
+```
+
+#### Pre-Migration Validation Checklist
+
+Before migrating each tenant:
+
+- [ ] Tenant is not in maintenance window (`kubectl get nightscouttenant ${TENANT_ID} -o jsonpath='{.metadata.annotations.maintenance}'`)
+- [ ] Recent backup exists (<24h old) (`velero backup get | grep ${TENANT_ID}`)
+- [ ] Source pod healthy (`kubectl get pod -l ns.mdn.io/tenant-id=${TENANT_ID} -o jsonpath='{.status.phase}'`)
+- [ ] MongoDB document count recorded (`kubectl exec ... -- mongo nightscout --eval "db.entries.count()"`)
+- [ ] Current DNS TTL lowered to 60s (see DNS TTL Playbook below)
+
+#### Migration Execution Checklist
+
+During migration:
+
+- [ ] Velero backup completed successfully (`velero backup describe ${BACKUP_NAME} | grep Phase`)
+- [ ] Velero restore completed successfully (`velero restore describe ${RESTORE_NAME} | grep Phase`)
+- [ ] GKE pod running and ready (`kubectl --context=gke get pod -l ns.mdn.io/tenant-id=${TENANT_ID}`)
+- [ ] PVC bound with correct size (`kubectl --context=gke get pvc | grep ${TENANT_ID}`)
+- [ ] MongoDB document count matches source (within 100 documents for active tenants)
+
+#### Post-Migration Validation Checklist
+
+After migration (wait for DNS TTL to expire):
+
+- [ ] Nightscout API responding on GKE (`curl -s https://${TENANT_ID}.nightscout.example.com/api/v1/status`)
+- [ ] Consul registration shows GKE datacenter (`consul catalog service nightscout -datacenter=gke-dc | grep ${TENANT_ID}`)
+- [ ] AWS pod deregistered from Consul (`consul catalog service nightscout -datacenter=aws-dc | grep -v ${TENANT_ID}`)
+- [ ] Recent CGM entries visible in UI (manual check or API call)
+- [ ] No error logs in last hour (`kubectl --context=gke logs ... --since=1h | grep -i error`)
+- [ ] Response latency acceptable (<500ms p99)
+
+#### Source Resource Cleanup (Day +7)
+
+Only after 7-day validation period:
+
+- [ ] No traffic to AWS pod for 24h (check Consul metrics)
+- [ ] User confirmed no issues (or no support tickets)
+- [ ] Final backup taken as archive (`velero backup create ${TENANT_ID}-final-archive`)
+- [ ] AWS resources deleted:
+  ```bash
+  kubectl --context=aws delete nightscouttenant ${TENANT_ID} -n nightscout-tenants
+  kubectl --context=aws delete pvc ${TENANT_ID}-mongodb-data -n nightscout-tenants
+  ```
+
+#### Automated Validation Script
+
+```bash
+#!/bin/bash
+# validate-migration.sh
+
+TENANT_ID=$1
+BACKUP_NAME=$2
+
+echo "=== Validating Migration: ${TENANT_ID} ==="
+
+FAILED=0
+
+# Check GKE pod status
+GKE_POD_STATUS=$(kubectl --context=gke-cluster get pod \
+  -l ns.mdn.io/tenant-id=${TENANT_ID} \
+  -n nightscout-tenants \
+  -o jsonpath='{.items[0].status.phase}' 2>/dev/null)
+
+if [ "$GKE_POD_STATUS" != "Running" ]; then
+  echo "❌ GKE pod not running: ${GKE_POD_STATUS}"
+  FAILED=1
+else
+  echo "✅ GKE pod running"
+fi
+
+# Check PVC bound
+GKE_PVC_STATUS=$(kubectl --context=gke-cluster get pvc \
+  -l ns.mdn.io/tenant-id=${TENANT_ID} \
+  -n nightscout-tenants \
+  -o jsonpath='{.items[0].status.phase}' 2>/dev/null)
+
+if [ "$GKE_PVC_STATUS" != "Bound" ]; then
+  echo "❌ GKE PVC not bound: ${GKE_PVC_STATUS}"
+  FAILED=1
+else
+  echo "✅ GKE PVC bound"
+fi
+
+# Check API response
+HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+  "https://${TENANT_ID}.nightscout.example.com/api/v1/status")
+
+if [ "$HTTP_STATUS" != "200" ]; then
+  echo "❌ API not responding: HTTP ${HTTP_STATUS}"
+  FAILED=1
+else
+  echo "✅ API responding (HTTP 200)"
+fi
+
+# Check document count
+SOURCE_COUNT=$(kubectl --context=aws-cluster exec -n nightscout-tenants \
+  $(kubectl --context=aws-cluster get pod -l ns.mdn.io/tenant-id=${TENANT_ID} -n nightscout-tenants -o name 2>/dev/null) \
+  -c mongodb -- mongo nightscout --quiet --eval "db.entries.count()" 2>/dev/null || echo "0")
+
+TARGET_COUNT=$(kubectl --context=gke-cluster exec -n nightscout-tenants \
+  $(kubectl --context=gke-cluster get pod -l ns.mdn.io/tenant-id=${TENANT_ID} -n nightscout-tenants -o name) \
+  -c mongodb -- mongo nightscout --quiet --eval "db.entries.count()" 2>/dev/null || echo "0")
+
+DIFF=$((SOURCE_COUNT - TARGET_COUNT))
+if [ ${DIFF#-} -gt 100 ]; then
+  echo "❌ Document count mismatch: source=${SOURCE_COUNT}, target=${TARGET_COUNT}"
+  FAILED=1
+else
+  echo "✅ Document count matches (source=${SOURCE_COUNT}, target=${TARGET_COUNT})"
+fi
+
+# Check Consul registration
+CONSUL_DC=$(consul catalog service nightscout -format=json 2>/dev/null | \
+  jq -r ".[] | select(.ServiceID | contains(\"${TENANT_ID}\")) | .Datacenter")
+
+if [ "$CONSUL_DC" != "gke-dc" ]; then
+  echo "❌ Consul shows wrong datacenter: ${CONSUL_DC}"
+  FAILED=1
+else
+  echo "✅ Consul registration on gke-dc"
+fi
+
+# Summary
+if [ $FAILED -eq 0 ]; then
+  echo "=== Migration Validated Successfully ==="
+  exit 0
+else
+  echo "=== Migration Validation FAILED ==="
+  exit 1
+fi
+```
+
+---
+
+## Data Migration Details
+
+### PVC Migration with Velero
+
+#### Backup Strategy
+
+```yaml
+# velero/tenant-backup-schedule.yaml
+apiVersion: velero.io/v1
+kind: Schedule
+metadata:
+  name: tenant-pre-migration-backup
+  namespace: velero
+spec:
+  schedule: "0 2 * * *"  # Daily at 2 AM
+  template:
+    includedNamespaces:
+    - nightscout-tenants
+    storageLocation: default
+    volumeSnapshotLocations:
+    - aws-ebs
+    ttl: 168h  # 7 days
+    hooks:
+      resources:
+      - name: mongodb-freeze
+        includedNamespaces:
+        - nightscout-tenants
+        labelSelector:
+          matchLabels:
+            app: mongodb
+        pre:
+        - exec:
+            container: mongodb
+            command:
+            - /bin/sh
+            - -c
+            - "mongo --eval 'db.fsyncLock()'"
+            onError: Fail
+            timeout: 30s
+        post:
+        - exec:
+            container: mongodb
+            command:
+            - /bin/sh
+            - -c
+            - "mongo --eval 'db.fsyncUnlock()'"
+            onError: Continue
+            timeout: 30s
+```
+
+### Cross-Cloud PVC Restore
+
+Velero's restic integration handles cross-cloud PVC migration:
+
+```bash
+# Backup with restic (file-level backup)
+velero backup create tenant-123-migration \
+  --include-namespaces nightscout-tenants \
+  --selector ns.mdn.io/tenant-id=tenant-123 \
+  --default-volumes-to-restic \
+  --wait
+
+# Restore on different cloud
+velero restore create tenant-123-gke \
+  --from-backup tenant-123-migration \
+  --namespace-mappings nightscout-tenants:nightscout-tenants \
+  --wait
+```
+
+### Data Verification
+
+```bash
+#!/bin/bash
+# verify-migration.sh
+
+TENANT_ID=$1
+
+# Get document counts from source (AWS)
+kubectx aws-cluster
+SOURCE_ENTRIES=$(kubectl exec -n nightscout-tenants \
+  $(kubectl get pod -l ns.mdn.io/tenant-id=${TENANT_ID} -o name) \
+  -c mongodb -- mongo nightscout --quiet --eval "db.entries.count()")
+
+# Get document counts from target (GKE)
+kubectx gke-cluster
+TARGET_ENTRIES=$(kubectl exec -n nightscout-tenants \
+  $(kubectl get pod -l ns.mdn.io/tenant-id=${TENANT_ID} -o name) \
+  -c mongodb -- mongo nightscout --quiet --eval "db.entries.count()")
+
+if [ "$SOURCE_ENTRIES" -eq "$TARGET_ENTRIES" ]; then
+  echo "✅ Document count matches: ${SOURCE_ENTRIES}"
+else
+  echo "❌ Document count mismatch: source=${SOURCE_ENTRIES}, target=${TARGET_ENTRIES}"
+  exit 1
+fi
+```
+
+---
+
+## DNS and Traffic Cutover
+
+### Consul WAN Federation Architecture
+
+Consul WAN federation enables cross-cluster service discovery, allowing traffic to route to tenants on either cluster during migration.
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                      CONSUL WAN FEDERATION TOPOLOGY                          │
+│                                                                              │
+│  AWS Datacenter (aws-dc)              GKE Datacenter (gke-dc) [PRIMARY]     │
+│  ┌─────────────────────┐              ┌─────────────────────┐               │
+│  │ Consul Servers (3)  │◄────WAN─────►│ Consul Servers (3)  │               │
+│  │ - Gossip: 8301      │   Gossip     │ - Gossip: 8301      │               │
+│  │ - WAN: 8302         │   (8302)     │ - WAN: 8302         │               │
+│  │ - RPC: 8300         │              │ - RPC: 8300         │               │
+│  └─────────┬───────────┘              └─────────┬───────────┘               │
+│            │                                    │                            │
+│  ┌─────────▼───────────┐              ┌─────────▼───────────┐               │
+│  │ Mesh Gateway        │◄────mTLS────►│ Mesh Gateway        │               │
+│  │ (LoadBalancer:8443) │              │ (LoadBalancer:8443) │               │
+│  └─────────────────────┘              └─────────────────────┘               │
+│            ▲                                    ▲                            │
+│            │                                    │                            │
+│  ┌─────────┴───────────┐              ┌─────────┴───────────┐               │
+│  │ Tenant Pods         │              │ Tenant Pods         │               │
+│  │ (Consul Agents)     │              │ (Consul Agents)     │               │
+│  └─────────────────────┘              └─────────────────────┘               │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Step 1: Generate TLS Certificates
+
+Consul WAN federation requires TLS. Generate a shared CA:
+
+```bash
+# Create CA on GKE (primary datacenter)
+consul tls ca create
+
+# Generate server certificates for each datacenter
+consul tls cert create -server -dc gke-dc -additional-dnsname="consul-server.consul.svc"
+consul tls cert create -server -dc aws-dc -additional-dnsname="consul-server.consul.svc"
+
+# Create Kubernetes secrets
+kubectl create secret generic consul-ca-cert \
+  --namespace consul \
+  --from-file=tls.crt=consul-agent-ca.pem
+
+kubectl create secret generic consul-server-cert \
+  --namespace consul \
+  --from-file=tls.crt=gke-dc-server-consul-0.pem \
+  --from-file=tls.key=gke-dc-server-consul-0-key.pem
+```
+
+### Step 2: Generate Gossip Encryption Key
+
+```bash
+# Generate gossip key (must be same on both clusters)
+GOSSIP_KEY=$(consul keygen)
+
+# Create secret on both clusters
+kubectl create secret generic consul-gossip-key \
+  --namespace consul \
+  --from-literal=key="${GOSSIP_KEY}"
+```
+
+### Step 3: Bootstrap ACL System
+
+```bash
+# Bootstrap ACL on GKE (primary datacenter)
+kubectl exec -n consul consul-server-0 -- consul acl bootstrap > acl-bootstrap.json
+
+# Extract bootstrap token
+BOOTSTRAP_TOKEN=$(jq -r '.SecretID' acl-bootstrap.json)
+
+# Create replication token for AWS datacenter
+kubectl exec -n consul consul-server-0 -- consul acl token create \
+  -token="${BOOTSTRAP_TOKEN}" \
+  -description="AWS Replication Token" \
+  -policy-name="global-management" \
+  > aws-replication-token.json
+
+REPLICATION_TOKEN=$(jq -r '.SecretID' aws-replication-token.json)
+
+# Store tokens as secrets
+kubectl create secret generic consul-bootstrap-token \
+  --namespace consul \
+  --from-literal=token="${BOOTSTRAP_TOKEN}"
+
+kubectl create secret generic consul-replication-token \
+  --namespace consul \
+  --from-literal=token="${REPLICATION_TOKEN}"
+```
+
+### Step 4: Consul Server Configuration (GKE - Primary)
+
+```yaml
+# consul/gke-server-config.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: consul-server-config
+  namespace: consul
+data:
+  server.json: |
+    {
+      "datacenter": "gke-dc",
+      "primary_datacenter": "gke-dc",
+      "server": true,
+      "bootstrap_expect": 3,
+      "ui_config": {
+        "enabled": true
+      },
+      "connect": {
+        "enabled": true,
+        "enable_mesh_gateway_wan_federation": true
+      },
+      "acl": {
+        "enabled": true,
+        "default_policy": "deny",
+        "enable_token_persistence": true,
+        "tokens": {
+          "initial_management": "${BOOTSTRAP_TOKEN}",
+          "agent": "${BOOTSTRAP_TOKEN}"
+        }
+      },
+      "encrypt": "${GOSSIP_KEY}",
+      "verify_incoming": true,
+      "verify_outgoing": true,
+      "verify_server_hostname": true,
+      "ca_file": "/consul/tls/ca/tls.crt",
+      "cert_file": "/consul/tls/server/tls.crt",
+      "key_file": "/consul/tls/server/tls.key",
+      "ports": {
+        "https": 8501,
+        "grpc": 8502,
+        "serf_wan": 8302
+      },
+      "retry_join_wan": [
+        "consul-mesh-gateway.aws-dc.consul:8443"
+      ]
+    }
+```
+
+### Step 5: Consul Server Configuration (AWS - Secondary)
+
+```yaml
+# consul/aws-server-config.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: consul-server-config
+  namespace: consul
+data:
+  server.json: |
+    {
+      "datacenter": "aws-dc",
+      "primary_datacenter": "gke-dc",
+      "server": true,
+      "bootstrap_expect": 3,
+      "connect": {
+        "enabled": true,
+        "enable_mesh_gateway_wan_federation": true
+      },
+      "acl": {
+        "enabled": true,
+        "default_policy": "deny",
+        "enable_token_persistence": true,
+        "tokens": {
+          "replication": "${REPLICATION_TOKEN}",
+          "agent": "${REPLICATION_TOKEN}"
+        }
+      },
+      "encrypt": "${GOSSIP_KEY}",
+      "verify_incoming": true,
+      "verify_outgoing": true,
+      "verify_server_hostname": true,
+      "ca_file": "/consul/tls/ca/tls.crt",
+      "cert_file": "/consul/tls/server/tls.crt",
+      "key_file": "/consul/tls/server/tls.key",
+      "ports": {
+        "https": 8501,
+        "grpc": 8502,
+        "serf_wan": 8302
+      },
+      "retry_join_wan": [
+        "consul-mesh-gateway.gke-dc.consul:8443"
+      ]
+    }
+```
+
+### Step 6: Deploy Mesh Gateways
+
+```yaml
+# consul/mesh-gateway.yaml
+apiVersion: consul.hashicorp.com/v1alpha1
+kind: MeshGateway
+metadata:
+  name: mesh-gateway
+  namespace: consul
+spec:
+  replicas: 2
+  wanAddress:
+    source: Service
+    port: 8443
+  service:
+    type: LoadBalancer
+    annotations:
+      # GKE: Reserve static IP
+      # networking.gke.io/load-balancer-type: "External"
+      # AWS: Use NLB
+      # service.beta.kubernetes.io/aws-load-balancer-type: "nlb"
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+```
+
+### Step 7: WAN Join Script
+
+```bash
+#!/bin/bash
+# consul-wan-join.sh
+
+set -e
+
+echo "=== Consul WAN Federation Setup ==="
+
+# Get mesh gateway addresses
+GKE_MESH_IP=$(kubectl --context=gke-cluster get svc mesh-gateway \
+  -n consul -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+AWS_MESH_IP=$(kubectl --context=aws-cluster get svc mesh-gateway \
+  -n consul -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+
+echo "GKE Mesh Gateway: ${GKE_MESH_IP}"
+echo "AWS Mesh Gateway: ${AWS_MESH_IP}"
+
+# Update DNS or /etc/hosts for mesh gateway discovery
+# (In production, use proper DNS entries)
+
+# Verify WAN members from GKE
+kubectl --context=gke-cluster exec -n consul consul-server-0 -- \
+  consul members -wan
+
+# Expected output:
+# Node                 Address              Status  Type    Build   Protocol  DC      Partition  Segment
+# consul-server-0.gke  10.1.0.5:8302        alive   server  1.17.0  2         gke-dc  default    <all>
+# consul-server-0.aws  10.0.0.5:8302        alive   server  1.17.0  2         aws-dc  default    <all>
+
+# Verify services are discoverable across datacenters
+kubectl --context=gke-cluster exec -n consul consul-server-0 -- \
+  consul catalog services -datacenter=aws-dc
+
+echo "=== WAN Federation Complete ==="
+```
+
+### Step 8: Health Check Propagation
+
+Configure health checks to propagate across datacenters:
+
+```yaml
+# consul/service-defaults.yaml
+apiVersion: consul.hashicorp.com/v1alpha1
+kind: ServiceDefaults
+metadata:
+  name: nightscout
+  namespace: nightscout-tenants
+spec:
+  protocol: http
+  meshGateway:
+    mode: local  # Use local mesh gateway for cross-DC traffic
+  expose:
+    checks: true  # Expose health checks through mesh gateway
+```
+
+### Step 9: Verify Federation Health
+
+```bash
+#!/bin/bash
+# verify-consul-federation.sh
+
+echo "=== Verifying Consul WAN Federation ==="
+
+# Check WAN members
+echo "1. WAN Members:"
+kubectl --context=gke-cluster exec -n consul consul-server-0 -- consul members -wan
+
+# Check ACL replication status
+echo "2. ACL Replication Status:"
+kubectl --context=aws-cluster exec -n consul consul-server-0 -- \
+  consul acl replication status -format=json | jq '.'
+
+# Check cross-datacenter service discovery
+echo "3. Cross-DC Service Discovery:"
+kubectl --context=gke-cluster exec -n consul consul-server-0 -- \
+  consul catalog services -datacenter=aws-dc
+
+# Check mesh gateway health
+echo "4. Mesh Gateway Health:"
+kubectl --context=gke-cluster exec -n consul consul-server-0 -- \
+  consul catalog nodes -service=mesh-gateway
+
+# Verify service resolution across DCs
+echo "5. Service Resolution Test:"
+kubectl --context=gke-cluster exec -n consul consul-server-0 -- \
+  consul catalog service nightscout -datacenter=aws-dc
+
+echo "=== Federation Verification Complete ==="
+```
+
+### Consul Federation Monitoring
+
+```yaml
+# prometheus/consul-federation-alerts.yaml
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: consul-federation-alerts
+spec:
+  groups:
+  - name: consul-federation
+    rules:
+    - alert: ConsulWANMemberDown
+      expr: |
+        consul_serf_wan_member_status != 1
+      for: 5m
+      labels:
+        severity: critical
+      annotations:
+        summary: "Consul WAN member unhealthy"
+        
+    - alert: ConsulACLReplicationLag
+      expr: |
+        consul_acl_replication_index_diff > 100
+      for: 10m
+      labels:
+        severity: warning
+      annotations:
+        summary: "ACL replication lagging between datacenters"
+        
+    - alert: MeshGatewayUnavailable
+      expr: |
+        up{job="consul-mesh-gateway"} == 0
+      for: 2m
+      labels:
+        severity: critical
+      annotations:
+        summary: "Mesh gateway is down"
+```
+    port: 8443
+  service:
+    type: LoadBalancer
+```
+
+### DNS TTL Playbook
+
+Proper DNS TTL management is critical for zero-downtime migration. This playbook ensures traffic drains before resource deletion.
+
+#### TTL Timeline
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                           DNS TTL TIMELINE                                   │
+│                                                                              │
+│  Normal         T-24h           T-0            T+TTL          T+7d          │
+│  Operations     (Pre-Migrate)   (Migrate)      (Verified)     (Cleanup)     │
+│  ┌──────────┐   ┌──────────┐    ┌──────────┐   ┌──────────┐   ┌──────────┐ │
+│  │TTL: 3600s│──►│TTL: 60s  │───►│TTL: 60s  │──►│TTL: 300s │──►│TTL: 3600s│ │
+│  │(1 hour)  │   │(1 minute)│    │Update IP │   │(5 minutes)│  │(1 hour)  │ │
+│  └──────────┘   └──────────┘    └──────────┘   └──────────┘   └──────────┘ │
+│       │              │               │              │              │        │
+│       │              │               │              │              │        │
+│  All traffic    Wait for        Switch DNS     Verify traffic   Restore    │
+│  to AWS         cache expire    to GKE         on GKE only      normal TTL │
+│                 (1 hour)                                                    │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### Step 1: Lower TTL Before Migration (T-24h)
+
+```bash
+#!/bin/bash
+# lower-ttl.sh
+
+TENANT_ID=$1
+NEW_TTL=60  # 1 minute
+
+# Get current record
+CURRENT_IP=$(aws route53 list-resource-record-sets \
+  --hosted-zone-id Z123456789 \
+  --query "ResourceRecordSets[?Name=='${TENANT_ID}.nightscout.example.com.'].ResourceRecords[0].Value" \
+  --output text)
+
+# Update with lower TTL
+aws route53 change-resource-record-sets \
+  --hosted-zone-id Z123456789 \
+  --change-batch '{
+    "Changes": [{
+      "Action": "UPSERT",
+      "ResourceRecordSet": {
+        "Name": "'${TENANT_ID}'.nightscout.example.com",
+        "Type": "A",
+        "TTL": '${NEW_TTL}',
+        "ResourceRecords": [{"Value": "'${CURRENT_IP}'"}]
+      }
+    }]
+  }'
+
+echo "TTL lowered to ${NEW_TTL}s for ${TENANT_ID}"
+echo "Wait at least 1 hour (old TTL) before migrating"
+```
+
+#### Step 2: Wait for Old TTL to Expire
+
+```bash
+#!/bin/bash
+# verify-ttl-propagation.sh
+
+TENANT_ID=$1
+EXPECTED_TTL=60
+
+# Check TTL from multiple DNS servers
+for DNS in 8.8.8.8 1.1.1.1 208.67.222.222; do
+  TTL=$(dig +noall +answer ${TENANT_ID}.nightscout.example.com @${DNS} | awk '{print $2}')
+  echo "DNS ${DNS}: TTL=${TTL}"
+  if [ "$TTL" -gt "$EXPECTED_TTL" ]; then
+    echo "⚠️  TTL still high on ${DNS}, wait longer"
+  fi
+done
+```
+
+#### Step 3: Verify Traffic Drain After DNS Switch
+
+```bash
+#!/bin/bash
+# verify-traffic-drain.sh
+
+TENANT_ID=$1
+WAIT_SECONDS=120  # 2x the 60s TTL
+
+echo "Waiting ${WAIT_SECONDS}s for DNS cache expiry..."
+sleep ${WAIT_SECONDS}
+
+# Check AWS pod is receiving no new connections
+AWS_CONNECTIONS=$(kubectl --context=aws-cluster exec -n nightscout-tenants \
+  $(kubectl --context=aws-cluster get pod -l ns.mdn.io/tenant-id=${TENANT_ID} -n nightscout-tenants -o name 2>/dev/null) \
+  -c nightscout -- netstat -an | grep ESTABLISHED | wc -l 2>/dev/null || echo "0")
+
+if [ "$AWS_CONNECTIONS" -gt 0 ]; then
+  echo "⚠️  AWS pod still has ${AWS_CONNECTIONS} connections"
+  echo "   Consider extending wait time"
+else
+  echo "✅ AWS pod has no active connections"
+  echo "   Safe to proceed with cleanup"
+fi
+
+# Check GKE pod is receiving traffic
+GKE_CONNECTIONS=$(kubectl --context=gke-cluster exec -n nightscout-tenants \
+  $(kubectl --context=gke-cluster get pod -l ns.mdn.io/tenant-id=${TENANT_ID} -n nightscout-tenants -o name) \
+  -c nightscout -- netstat -an | grep ESTABLISHED | wc -l 2>/dev/null || echo "0")
+
+echo "GKE pod has ${GKE_CONNECTIONS} active connections"
+```
+
+#### Step 4: Restore Normal TTL After Validation (T+7d)
+
+```bash
+#!/bin/bash
+# restore-ttl.sh
+
+TENANT_ID=$1
+NORMAL_TTL=3600  # 1 hour
+
+GKE_IP=$(kubectl --context=gke-cluster get svc -n ingress-nginx ingress-nginx-controller \
+  -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+
+aws route53 change-resource-record-sets \
+  --hosted-zone-id Z123456789 \
+  --change-batch '{
+    "Changes": [{
+      "Action": "UPSERT",
+      "ResourceRecordSet": {
+        "Name": "'${TENANT_ID}'.nightscout.example.com",
+        "Type": "A",
+        "TTL": '${NORMAL_TTL}',
+        "ResourceRecords": [{"Value": "'${GKE_IP}'"}]
+      }
+    }]
+  }'
+
+echo "TTL restored to ${NORMAL_TTL}s for ${TENANT_ID}"
+```
+
+### Traffic Shifting Strategy
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         TRAFFIC SHIFT TIMELINE                               │
+│                                                                              │
+│  Pre-Migration    Migration Day    Day +1         Day +7                    │
+│  ┌───────────┐    ┌───────────┐    ┌───────────┐  ┌───────────┐            │
+│  │ AWS: 100% │───►│ AWS: 100% │───►│ AWS:  0%  │─►│ AWS:  0%  │            │
+│  │ GKE:   0% │    │ GKE:   0% │    │ GKE: 100% │  │ GKE: 100% │            │
+│  └───────────┘    └───────────┘    └───────────┘  └───────────┘            │
+│                   ▲                ▲              ▲                         │
+│                   │                │              │                         │
+│             Backup/Restore   DNS Switch    AWS Cleanup                      │
+│                 + TTL Lower  + Verify Drain  (After validation)            │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Complete Migration Sequence
+
+```bash
+#!/bin/bash
+# full-migration-sequence.sh
+
+TENANT_ID=$1
+
+echo "=== Full Migration Sequence for ${TENANT_ID} ==="
+
+# Step 1: Lower TTL (do this 24h before actual migration)
+echo "Step 1: Lower DNS TTL"
+./lower-ttl.sh ${TENANT_ID}
+echo "⏳ Wait 1 hour for TTL propagation before continuing"
+echo "   Run: ./verify-ttl-propagation.sh ${TENANT_ID}"
+read -p "Press enter when TTL is propagated..."
+
+# Step 2: Create backup
+echo "Step 2: Create Velero backup"
+BACKUP_NAME="${TENANT_ID}-$(date +%Y%m%d-%H%M%S)"
+velero backup create ${BACKUP_NAME} \
+  --include-namespaces nightscout-tenants \
+  --selector ns.mdn.io/tenant-id=${TENANT_ID} \
+  --default-volumes-to-restic \
+  --wait
+
+# Step 3: Restore to GKE
+echo "Step 3: Restore to GKE"
+kubectx gke-cluster
+velero restore create ${BACKUP_NAME}-restore \
+  --from-backup ${BACKUP_NAME} \
+  --wait
+
+# Step 4: Wait for pod ready
+echo "Step 4: Wait for GKE pod ready"
+kubectl wait --for=condition=ready pod \
+  -l ns.mdn.io/tenant-id=${TENANT_ID} \
+  -n nightscout-tenants \
+  --timeout=300s
+
+# Step 5: Update DNS
+echo "Step 5: Update DNS to GKE"
+./update-tenant-dns.sh ${TENANT_ID} gke
+
+# Step 6: Verify traffic drain
+echo "Step 6: Verify traffic drain from AWS"
+./verify-traffic-drain.sh ${TENANT_ID}
+
+# Step 7: Run validation
+echo "Step 7: Validate migration"
+./validate-migration.sh ${TENANT_ID} ${BACKUP_NAME}
+
+if [ $? -eq 0 ]; then
+  echo "=== Migration Successful ==="
+  echo "Schedule cleanup for T+7d: ./cleanup-aws-tenant.sh ${TENANT_ID}"
+else
+  echo "=== Migration Failed - Initiating Rollback ==="
+  ./rollback-tenant.sh ${TENANT_ID} ${BACKUP_NAME}
+fi
+```
+
+### DNS Update Script
+
+```bash
+#!/bin/bash
+# update-tenant-dns.sh
+
+TENANT_ID=$1
+GKE_INGRESS_IP=$(kubectl get svc -n ingress-nginx ingress-nginx-controller \
+  -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+
+# Update Route53 (if using AWS DNS)
+aws route53 change-resource-record-sets \
+  --hosted-zone-id Z123456789 \
+  --change-batch '{
+    "Changes": [{
+      "Action": "UPSERT",
+      "ResourceRecordSet": {
+        "Name": "'${TENANT_ID}'.nightscout.example.com",
+        "Type": "A",
+        "TTL": 60,
+        "ResourceRecords": [{"Value": "'${GKE_INGRESS_IP}'"}]
+      }
+    }]
+  }'
+
+# Or update CloudFlare
+# curl -X PUT "https://api.cloudflare.com/client/v4/zones/${ZONE_ID}/dns_records/${RECORD_ID}" \
+#   -H "Authorization: Bearer ${CF_TOKEN}" \
+#   -H "Content-Type: application/json" \
+#   --data '{"type":"A","name":"'${TENANT_ID}'.nightscout.example.com","content":"'${GKE_INGRESS_IP}'"}'
+```
+
+---
+
+## Rollback Procedures
+
+### Rollback Decision Criteria
+
+| Severity | Condition | Action |
+|----------|-----------|--------|
+| **Critical** | >5% tenant errors post-migration | Immediate rollback |
+| **High** | Data loss detected | Rollback affected tenants |
+| **Medium** | Performance degradation >50% | Pause, investigate |
+| **Low** | Minor feature issues | Continue, fix forward |
+
+### Per-Tenant Rollback
+
+```bash
+#!/bin/bash
+# rollback-tenant.sh
+
+TENANT_ID=$1
+BACKUP_NAME=$2  # Original pre-migration backup
+
+echo "=== Rolling back tenant: ${TENANT_ID} ==="
+
+# 1. Stop GKE pod
+kubectx gke-cluster
+kubectl scale deployment ${TENANT_ID} --replicas=0 -n nightscout-tenants
+
+# 2. Restore to AWS from backup
+kubectx aws-cluster
+velero restore create ${TENANT_ID}-rollback \
+  --from-backup ${BACKUP_NAME} \
+  --wait
+
+# 3. Wait for AWS pod ready
+kubectl wait --for=condition=ready pod \
+  -l ns.mdn.io/tenant-id=${TENANT_ID} \
+  -n nightscout-tenants \
+  --timeout=300s
+
+# 4. Update DNS back to AWS
+./update-tenant-dns.sh ${TENANT_ID} aws
+
+# 5. Update Consul
+consul kv put "nightscout/tenants/${TENANT_ID}/cluster" "aws-cluster"
+
+echo "=== Rollback complete: ${TENANT_ID} ==="
+```
+
+### Full Migration Rollback
+
+For catastrophic failures requiring full rollback:
+
+```bash
+#!/bin/bash
+# rollback-all.sh
+
+# 1. Stop all GKE workloads
+kubectx gke-cluster
+kubectl scale deployment --all --replicas=0 -n nightscout-tenants
+
+# 2. Update global DNS to AWS
+./update-global-dns.sh aws
+
+# 3. Verify AWS cluster healthy
+kubectx aws-cluster
+kubectl get pods -n nightscout-tenants | grep -v Running
+
+# 4. Re-enable AWS autoscaling
+kubectl patch hpa nightscout-tenants -p '{"spec":{"minReplicas":3}}'
+
+# 5. Alert team
+./send-alert.sh "Migration rollback initiated - all traffic on AWS"
+```
+
+### Rollback Testing
+
+Before production migration, test rollback procedures:
+
+```bash
+# 1. Migrate test tenant to GKE
+./migrate-tenant.sh test-tenant-001
+
+# 2. Verify working on GKE
+curl https://test-tenant-001.nightscout.example.com/api/v1/status
+
+# 3. Simulate failure and rollback
+./rollback-tenant.sh test-tenant-001 test-tenant-001-pre-migration
+
+# 4. Verify working on AWS
+curl https://test-tenant-001.nightscout.example.com/api/v1/status
+
+# 5. Document timing
+echo "Rollback completed in ${SECONDS} seconds"
+```
+
+---
+
+## Monitoring and Observability
+
+### Cross-Cluster Metrics
+
+```yaml
+# prometheus/federation-scrape.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-federation
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: 15s
+    
+    scrape_configs:
+    # Federate metrics from AWS cluster
+    - job_name: 'federate-aws'
+      honor_labels: true
+      metrics_path: '/federate'
+      params:
+        'match[]':
+        - '{job=~"nightscout.*"}'
+        - '{__name__=~"mongodb.*"}'
+      static_configs:
+      - targets:
+        - 'prometheus.aws-cluster.svc.cluster.local:9090'
+      relabel_configs:
+      - source_labels: [__address__]
+        target_label: cluster
+        replacement: aws-cluster
+    
+    # Local GKE scrape
+    - job_name: 'nightscout-gke'
+      kubernetes_sd_configs:
+      - role: pod
+        namespaces:
+          names: ['nightscout-tenants']
+```
+
+### Migration Progress Dashboard
+
+```yaml
+# grafana/migration-dashboard.json
+{
+  "title": "Federation Migration Progress",
+  "panels": [
+    {
+      "title": "Tenants by Cluster",
+      "type": "piechart",
+      "targets": [
+        {
+          "expr": "count(kube_pod_info{namespace='nightscout-tenants'}) by (cluster)"
+        }
+      ]
+    },
+    {
+      "title": "Migration Rate (tenants/hour)",
+      "type": "graph",
+      "targets": [
+        {
+          "expr": "increase(velero_restore_success_total[1h])"
+        }
+      ]
+    },
+    {
+      "title": "Migration Errors",
+      "type": "graph",
+      "targets": [
+        {
+          "expr": "increase(velero_restore_failed_total[1h])"
+        }
+      ]
+    },
+    {
+      "title": "Cross-Cluster Latency",
+      "type": "graph",
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.99, consul_rpc_request_seconds_bucket)"
+        }
+      ]
+    }
+  ]
+}
+```
+
+### Alerting Rules
+
+```yaml
+# prometheus/migration-alerts.yaml
+groups:
+- name: migration-alerts
+  rules:
+  - alert: MigrationBackupFailed
+    expr: velero_backup_failure_total > 0
+    for: 5m
+    labels:
+      severity: critical
+    annotations:
+      summary: "Velero backup failed"
+      runbook: "https://runbooks.example.com/migration/backup-failed"
+  
+  - alert: MigrationRestoreFailed
+    expr: velero_restore_failure_total > 0
+    for: 5m
+    labels:
+      severity: critical
+    annotations:
+      summary: "Velero restore failed"
+      runbook: "https://runbooks.example.com/migration/restore-failed"
+  
+  - alert: TenantUnhealthyPostMigration
+    expr: |
+      (time() - kube_pod_created{namespace="nightscout-tenants"}) < 3600
+      and
+      kube_pod_status_phase{phase!="Running"} == 1
+    for: 10m
+    labels:
+      severity: warning
+    annotations:
+      summary: "Recently migrated tenant pod not healthy"
+  
+  - alert: CrossClusterNetworkDown
+    expr: up{job="federate-aws"} == 0
+    for: 5m
+    labels:
+      severity: critical
+    annotations:
+      summary: "Cannot reach AWS cluster from GKE"
+```
+
+---
+
+## Timeline and Milestones
+
+### Detailed Schedule
+
+| Week | Phase | Activities | Success Criteria |
+|------|-------|------------|------------------|
+| **1** | Setup | GKE provisioning, networking | Cluster operational, 128 volumes confirmed |
+| **2** | Setup | Federation install, Velero | Both clusters federated, backup/restore working |
+| **3** | Parallel | Gen 5 on GKE, monitoring | New tenants provisioning on GKE |
+| **4** | Parallel | Runbook testing, load test | 10 test tenants migrated successfully |
+| **5** | Migrate | Batch 1: 50 inactive tenants | All tenants healthy on GKE |
+| **6** | Migrate | Batch 2: 50 low-activity tenants | Migration time <30min per tenant |
+| **7** | Migrate | Batch 3: 50 standard tenants | Zero data loss incidents |
+| **8** | Migrate | Batch 4: 50 remaining tenants | All tenants on GKE |
+| **9** | Cleanup | AWS resource deletion | 50% cost reduction |
+| **10** | Cleanup | Federation removal, consolidation | Single-cluster operation |
+
+### Go/No-Go Criteria
+
+**Phase 2 → Phase 3 (Start Migration):**
+- [ ] GKE cluster stable for 7 days
+- [ ] 10+ test tenants migrated and validated
+- [ ] Rollback tested and documented
+- [ ] Cross-cluster networking stable (99.9% uptime)
+- [ ] Monitoring and alerting operational
+
+**Phase 3 → Phase 4 (Start Cleanup):**
+- [ ] All tenants migrated to GKE
+- [ ] Zero critical incidents in 7 days
+- [ ] All rollback tickets resolved
+- [ ] Cost analysis confirms savings
+
+---
+
+## Risk Assessment
+
+### Identified Risks
+
+| Risk | Probability | Impact | Mitigation |
+|------|-------------|--------|------------|
+| **Data loss during migration** | Low | Critical | Velero backups, validation scripts, rollback procedures |
+| **Network partition between clusters** | Medium | High | VPN redundancy, circuit breakers, async operations |
+| **GKE volume limits change** | Low | High | Monitor GCP announcements, plan B (ephemeral storage) |
+| **Performance degradation on GKE** | Medium | Medium | Load testing, node right-sizing, gradual rollout |
+| **Cost overrun during migration** | Medium | Low | Parallel cluster budget, aggressive AWS cleanup |
+| **Consul federation issues** | Low | Medium | Mesh gateway redundancy, manual DNS failover |
+
+### Contingency Plans
+
+**If GKE proves unsuitable:**
+1. Pivot to Azure AKS (64 volume limit, still 2x improvement)
+2. Implement ephemeral storage on current provider
+3. Hybrid approach: ephemeral for new tenants, PVC for existing
+
+**If migration velocity too slow:**
+1. Increase parallelism (multiple tenant batches)
+2. Skip validation for low-risk tenants
+3. Accept longer timeline
+
+---
+
+## Comparison: Federation vs Ephemeral Storage
+
+### Decision Matrix
+
+| Factor | Weight | Federation (GKE) | Ephemeral Storage | Winner |
+|--------|--------|------------------|-------------------|--------|
+| **Implementation Complexity** | 20% | Low (proven tools) | High (custom CDC) | Federation |
+| **Data Durability** | 25% | Full | 1-2 min window | Federation |
+| **Operational Overhead** | 20% | Medium (multi-cluster) | High (Kafka ops) | Federation |
+| **Scalability Ceiling** | 15% | 128/node (finite) | Unlimited | Ephemeral |
+| **Provider Flexibility** | 10% | GKE lock-in | Any provider | Ephemeral |
+| **Time to Implement** | 10% | 10 weeks | 8 weeks | Ephemeral |
+
+**Weighted Score:**
+- Federation: 78/100
+- Ephemeral: 65/100
+
+### Recommendation Summary
+
+**Choose Federation Migration if:**
+- Current tenant count <5,000
+- Data durability is critical
+- Team prefers proven Kubernetes patterns
+- GKE pricing is acceptable
+- Multi-cloud is not a near-term requirement
+
+**Choose Ephemeral Storage if:**
+- Tenant count approaching 10,000+
+- 1-2 minute data loss is acceptable
+- Multi-cloud redundancy required
+- Team has Kafka/streaming expertise
+- Provider lock-in must be avoided
+
+**For Nightscout's current situation: Federation Migration is recommended.**
+
+---
+
+## Appendix
+
+### A. Commands Reference
+
+```bash
+# Federation status
+kubefedctl status --all
+
+# Cluster health
+kubectl get kubefedclusters -n kube-federation-system
+
+# Migration progress
+velero backup get
+velero restore get
+
+# Tenant lookup by cluster
+kubectl get pods -n nightscout-tenants --context=aws-cluster -l ns.mdn.io/tenant-id=<id>
+kubectl get pods -n nightscout-tenants --context=gke-cluster -l ns.mdn.io/tenant-id=<id>
+
+# Cross-cluster Consul query
+consul catalog services -datacenter=aws-dc
+consul catalog services -datacenter=gke-dc
+```
+
+### B. Related Documentation
+
+- [EPHEMERAL-STORAGE-PROPOSAL.md](EPHEMERAL-STORAGE-PROPOSAL.md) - Alternative approach
+- [ARCHITECTURE-EVOLUTION.md](ARCHITECTURE-EVOLUTION.md) - Historical context
+- [MIGRATION-PLAYBOOK.md](MIGRATION-PLAYBOOK.md) - Existing migration procedures
+- [TANKA-DEPLOYMENT.md](TANKA-DEPLOYMENT.md) - Deployment automation
+
+### C. External References
+
+- [KubeFed User Guide](https://github.com/kubernetes-sigs/kubefed/blob/master/docs/userguide.md)
+- [Velero Documentation](https://velero.io/docs/)
+- [Consul WAN Federation](https://developer.hashicorp.com/consul/docs/east-west/wan-federation)
+- [GKE Volume Limits](https://cloud.google.com/kubernetes-engine/docs/concepts/persistent-volumes)
