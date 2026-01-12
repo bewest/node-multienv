@@ -11,7 +11,7 @@
 
 ## Executive Summary
 
-This proposal describes a **federation-based migration strategy** to move the Nightscout platform from the current hosting provider to Google Kubernetes Engine (GKE). Rather than implementing the complex ephemeral storage architecture with Kafka CDC pipelines, this approach leverages GKE's higher volume limits (128 per node vs 28 on AWS) to continue using the proven PVC-based persistent storage model.
+This proposal describes a **federation-based migration strategy** to move the Nightscout platform from Digital Ocean Kubernetes (DOKS) to Google Kubernetes Engine (GKE). Rather than implementing the complex ephemeral storage architecture with Kafka CDC pipelines, this approach leverages GKE's higher volume limits (128 per node vs ~28 on DOKS) to continue using the proven PVC-based persistent storage model.
 
 ### Key Benefits
 
@@ -20,7 +20,7 @@ This proposal describes a **federation-based migration strategy** to move the Ni
 | **Preserve PVC Model** | Keep the battle-tested persistent storage architecture |
 | **Zero Data Loss Window** | No 1-2 minute crash recovery gap |
 | **No CDC Infrastructure** | Eliminate Kafka/Strimzi/Debezium complexity |
-| **4.5x Tenant Density** | 128 volumes/node vs 28 on AWS |
+| **4.5x Tenant Density** | 128 volumes/node vs ~28 on DOKS |
 | **Gradual Migration** | Run both clusters in parallel during transition |
 | **Rollback Capability** | Easy fallback if issues arise |
 
@@ -54,14 +54,14 @@ The existing hosting provider imposes strict limits on block volumes per node:
 
 | Provider | Volume Limit Per Node | Effective Tenant Density |
 |----------|----------------------|--------------------------|
-| **Current (AWS EBS)** | ~28 volumes | ~25 tenants/node |
+| **Current (DOKS)** | ~28 volumes | ~25 tenants/node |
 | Azure (Managed Disks) | ~64 volumes | ~60 tenants/node |
 | **GKE (Persistent Disk)** | ~128 volumes | ~125 tenants/node |
-| DigitalOcean | ~7 volumes | ~5 tenants/node |
+| AWS EBS | ~28 volumes | ~25 tenants/node |
 
 ### Impact on Current Operations
 
-With 28 volumes per node on AWS:
+With ~28 volumes per node on DOKS:
 
 ```
 Current Cluster: 10 nodes × 25 tenants = 250 tenants maximum
@@ -113,7 +113,7 @@ This approach avoids the complexity of ephemeral storage while providing substan
                │                       │                      │
                ▼                       ▼                      ▼
 ┌──────────────────────────┐  ┌──────────────────────────┐
-│   SOURCE CLUSTER (AWS)   │  │   TARGET CLUSTER (GKE)   │
+│   SOURCE CLUSTER (DOKS)  │  │   TARGET CLUSTER (GKE)   │
 │   (Member Cluster)       │  │   (Member Cluster)       │
 │                          │  │                          │
 │  ┌────────────────────┐  │  │  ┌────────────────────┐  │
@@ -151,7 +151,7 @@ Phase 1: Setup
 ─────────────────────────────────────────────────────────────
   1. Provision GKE cluster with federation-ready configuration
   2. Install KubeFed control plane on GKE (host cluster)
-  3. Register both AWS and GKE as member clusters
+  3. Register both DOKS and GKE as member clusters
   4. Configure Consul WAN federation between datacenters
   5. Deploy Velero with cross-cluster backup capability
 
@@ -159,7 +159,7 @@ Phase 2: Parallel Operation
 ─────────────────────────────────────────────────────────────
   1. Deploy Gen 5 infrastructure to GKE
   2. New tenants provision directly on GKE
-  3. Existing tenants continue on AWS (gen3b)
+  3. Existing tenants continue on DOKS (gen3b)
   4. Validate GKE operations with new tenant load
 
 Phase 3: Tenant Migration
@@ -168,14 +168,14 @@ Phase 3: Tenant Migration
   2. Backup tenant data (Velero PVC snapshot)
   3. Restore to GKE cluster
   4. Update DNS/Consul to point to GKE pod
-  5. Decommission AWS tenant resources
+  5. Decommission DOKS tenant resources
   6. Repeat for all tenants in batches
 
 Phase 4: Decommission
 ─────────────────────────────────────────────────────────────
   1. Verify all tenants on GKE
-  2. Remove AWS cluster from federation
-  3. Terminate AWS infrastructure
+  2. Remove DOKS cluster from federation
+  3. Terminate DOKS infrastructure
   4. Consolidate to single-cluster operations
 ```
 
@@ -187,13 +187,13 @@ Phase 4: Decommission
 
 #### Cluster Requirements
 
-| Requirement | AWS (Source) | GKE (Target) | Notes |
+| Requirement | DOKS (Source) | GKE (Target) | Notes |
 |-------------|--------------|--------------|-------|
 | Kubernetes Version | 1.28+ | 1.28+ | Must be compatible |
 | Container Runtime | containerd | containerd | Standard for both |
-| CNI | Calico/AWS VPC CNI | GKE VPC-native | Different CNIs OK |
-| Storage Class | gp3 (EBS) | pd-balanced | Cross-compatible via Velero |
-| Load Balancer | AWS NLB | GKE L7 ILB | Different implementations |
+| CNI | Cilium/DOKS CNI | GKE VPC-native | Different CNIs OK |
+| Storage Class | do-block-storage | pd-balanced | Cross-compatible via Velero |
+| Load Balancer | DO Load Balancer | GKE L7 ILB | Different implementations |
 
 #### Networking Requirements
 
@@ -201,7 +201,7 @@ Phase 4: Decommission
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                        CROSS-CLUSTER NETWORKING                              │
 │                                                                              │
-│  AWS VPC (10.0.0.0/16)                    GCP VPC (10.1.0.0/16)            │
+│  DOKS VPC (10.0.0.0/16)                   GCP VPC (10.1.0.0/16)            │
 │  ┌─────────────────────┐                  ┌─────────────────────┐           │
 │  │ Pod CIDR:           │                  │ Pod CIDR:           │           │
 │  │ 10.0.0.0/16         │◄────VPN/────────►│ 10.1.0.0/16         │           │
@@ -231,7 +231,7 @@ Phase 4: Decommission
 
 #### Permissions Requirements
 
-**AWS IAM (Source Cluster):**
+**DOKS API Token (Source Cluster):**
 ```json
 {
   "Version": "2012-10-17",
@@ -309,7 +309,7 @@ AWS_CONTEXT="arn:aws:eks:us-east-1:123456789:cluster/nightscout-prod"
 GKE_CONTEXT="gke_nightscout-prod_us-central1_nightscout-gke"
 
 # Join AWS cluster (source)
-kubefedctl join aws-cluster \
+kubefedctl join doks-cluster \
   --host-cluster-context=${GKE_CONTEXT} \
   --cluster-context=${AWS_CONTEXT} \
   --v=2
@@ -327,7 +327,7 @@ kubectl -n kube-federation-system get kubefedclusters
 **Expected Output:**
 ```
 NAME          AGE   READY
-aws-cluster   1m    True
+doks-cluster   1m    True
 gke-cluster   30s   True
 ```
 
@@ -666,7 +666,7 @@ volumeBindingMode: WaitForFirstConsumer
 │  │ Setup   │       │ Parallel│       │ Migrate │       │ Cleanup │          │
 │  └─────────┘       └─────────┘       └─────────┘       └─────────┘          │
 │                                                                              │
-│  • GKE Cluster     • Gen 5 on GKE    • Batch migrate   • Decommission AWS  │
+│  • GKE Cluster     • Gen 5 on GKE    • Batch migrate   • Decommission DOKS │
 │  • Federation      • New tenants     • 50 tenants/week • Remove federation │
 │  • Networking      • Monitoring      • Validate each   • Consolidate       │
 │  • Velero          • Runbooks        • Rollback ready  • Cost optimization │
@@ -705,7 +705,7 @@ helm install kubefed kubefed-charts/kubefed \
   --create-namespace
 
 # 2. Register clusters
-kubefedctl join aws-cluster --host-cluster-context=gke --cluster-context=aws
+kubefedctl join doks-cluster --host-cluster-context=gke --cluster-context=aws
 kubefedctl join gke-cluster --host-cluster-context=gke --cluster-context=gke
 
 # 3. Verify
@@ -774,7 +774,7 @@ spec:
   template:
     data:
       default-cluster: gke-cluster
-      fallback-cluster: aws-cluster
+      fallback-cluster: doks-cluster
   placement:
     clusters:
     - name: gke-cluster
@@ -862,7 +862,7 @@ for TENANT_ID in ${TENANTS//,/ }; do
   consul kv put "nightscout/tenants/${TENANT_ID}/cluster" "gke-cluster"
   
   # 6. Deregister from AWS Consul
-  kubectx aws-cluster
+  kubectx doks-cluster
   consul services deregister ${TENANT_ID}
   
   # 7. Delete AWS resources (after validation period)
@@ -898,7 +898,7 @@ After migration (wait for DNS TTL to expire):
 
 - [ ] Nightscout API responding on GKE (`curl -s https://${TENANT_ID}.nightscout.example.com/api/v1/status`)
 - [ ] Consul registration shows GKE datacenter (`consul catalog service nightscout -datacenter=gke-dc | grep ${TENANT_ID}`)
-- [ ] AWS pod deregistered from Consul (`consul catalog service nightscout -datacenter=aws-dc | grep -v ${TENANT_ID}`)
+- [ ] DOKS pod deregistered from Consul (`consul catalog service nightscout -datacenter=doks-dc | grep -v ${TENANT_ID}`)
 - [ ] Recent CGM entries visible in UI (manual check or API call)
 - [ ] No error logs in last hour (`kubectl --context=gke logs ... --since=1h | grep -i error`)
 - [ ] Response latency acceptable (<500ms p99)
@@ -907,13 +907,13 @@ After migration (wait for DNS TTL to expire):
 
 Only after 7-day validation period:
 
-- [ ] No traffic to AWS pod for 24h (check Consul metrics)
+- [ ] No traffic to DOKS pod for 24h (check Consul metrics)
 - [ ] User confirmed no issues (or no support tickets)
 - [ ] Final backup taken as archive (`velero backup create ${TENANT_ID}-final-archive`)
-- [ ] AWS resources deleted:
+- [ ] DOKS resources deleted:
   ```bash
-  kubectl --context=aws delete nightscouttenant ${TENANT_ID} -n nightscout-tenants
-  kubectl --context=aws delete pvc ${TENANT_ID}-mongodb-data -n nightscout-tenants
+  kubectl --context=doks delete nightscouttenant ${TENANT_ID} -n nightscout-tenants
+  kubectl --context=doks delete pvc ${TENANT_ID}-mongodb-data -n nightscout-tenants
   ```
 
 #### Automated Validation Script
@@ -967,8 +967,8 @@ else
 fi
 
 # Check document count
-SOURCE_COUNT=$(kubectl --context=aws-cluster exec -n nightscout-tenants \
-  $(kubectl --context=aws-cluster get pod -l ns.mdn.io/tenant-id=${TENANT_ID} -n nightscout-tenants -o name 2>/dev/null) \
+SOURCE_COUNT=$(kubectl --context=doks-cluster exec -n nightscout-tenants \
+  $(kubectl --context=doks-cluster get pod -l ns.mdn.io/tenant-id=${TENANT_ID} -n nightscout-tenants -o name 2>/dev/null) \
   -c mongodb -- mongo nightscout --quiet --eval "db.entries.count()" 2>/dev/null || echo "0")
 
 TARGET_COUNT=$(kubectl --context=gke-cluster exec -n nightscout-tenants \
@@ -1084,7 +1084,7 @@ velero restore create tenant-123-gke \
 TENANT_ID=$1
 
 # Get document counts from source (AWS)
-kubectx aws-cluster
+kubectx doks-cluster
 SOURCE_ENTRIES=$(kubectl exec -n nightscout-tenants \
   $(kubectl get pod -l ns.mdn.io/tenant-id=${TENANT_ID} -o name) \
   -c mongodb -- mongo nightscout --quiet --eval "db.entries.count()")
@@ -1115,7 +1115,7 @@ Consul WAN federation enables cross-cluster service discovery, allowing traffic 
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                      CONSUL WAN FEDERATION TOPOLOGY                          │
 │                                                                              │
-│  AWS Datacenter (aws-dc)              GKE Datacenter (gke-dc) [PRIMARY]     │
+│  DOKS Datacenter (doks-dc)              GKE Datacenter (gke-dc) [PRIMARY]     │
 │  ┌─────────────────────┐              ┌─────────────────────┐               │
 │  │ Consul Servers (3)  │◄────WAN─────►│ Consul Servers (3)  │               │
 │  │ - Gossip: 8301      │   Gossip     │ - Gossip: 8301      │               │
@@ -1147,7 +1147,7 @@ consul tls ca create
 
 # Generate server certificates for each datacenter
 consul tls cert create -server -dc gke-dc -additional-dnsname="consul-server.consul.svc"
-consul tls cert create -server -dc aws-dc -additional-dnsname="consul-server.consul.svc"
+consul tls cert create -server -dc doks-dc -additional-dnsname="consul-server.consul.svc"
 
 # Create Kubernetes secrets
 kubectl create secret generic consul-ca-cert \
@@ -1245,7 +1245,7 @@ data:
         "serf_wan": 8302
       },
       "retry_join_wan": [
-        "consul-mesh-gateway.aws-dc.consul:8443"
+        "consul-mesh-gateway.doks-dc.consul:8443"
       ]
     }
 ```
@@ -1262,7 +1262,7 @@ metadata:
 data:
   server.json: |
     {
-      "datacenter": "aws-dc",
+      "datacenter": "doks-dc",
       "primary_datacenter": "gke-dc",
       "server": true,
       "bootstrap_expect": 3,
@@ -1340,7 +1340,7 @@ echo "=== Consul WAN Federation Setup ==="
 # Get mesh gateway addresses
 GKE_MESH_IP=$(kubectl --context=gke-cluster get svc mesh-gateway \
   -n consul -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
-AWS_MESH_IP=$(kubectl --context=aws-cluster get svc mesh-gateway \
+AWS_MESH_IP=$(kubectl --context=doks-cluster get svc mesh-gateway \
   -n consul -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
 
 echo "GKE Mesh Gateway: ${GKE_MESH_IP}"
@@ -1356,11 +1356,11 @@ kubectl --context=gke-cluster exec -n consul consul-server-0 -- \
 # Expected output:
 # Node                 Address              Status  Type    Build   Protocol  DC      Partition  Segment
 # consul-server-0.gke  10.1.0.5:8302        alive   server  1.17.0  2         gke-dc  default    <all>
-# consul-server-0.aws  10.0.0.5:8302        alive   server  1.17.0  2         aws-dc  default    <all>
+# consul-server-0.aws  10.0.0.5:8302        alive   server  1.17.0  2         doks-dc  default    <all>
 
 # Verify services are discoverable across datacenters
 kubectl --context=gke-cluster exec -n consul consul-server-0 -- \
-  consul catalog services -datacenter=aws-dc
+  consul catalog services -datacenter=doks-dc
 
 echo "=== WAN Federation Complete ==="
 ```
@@ -1398,13 +1398,13 @@ kubectl --context=gke-cluster exec -n consul consul-server-0 -- consul members -
 
 # Check ACL replication status
 echo "2. ACL Replication Status:"
-kubectl --context=aws-cluster exec -n consul consul-server-0 -- \
+kubectl --context=doks-cluster exec -n consul consul-server-0 -- \
   consul acl replication status -format=json | jq '.'
 
 # Check cross-datacenter service discovery
 echo "3. Cross-DC Service Discovery:"
 kubectl --context=gke-cluster exec -n consul consul-server-0 -- \
-  consul catalog services -datacenter=aws-dc
+  consul catalog services -datacenter=doks-dc
 
 # Check mesh gateway health
 echo "4. Mesh Gateway Health:"
@@ -1414,7 +1414,7 @@ kubectl --context=gke-cluster exec -n consul consul-server-0 -- \
 # Verify service resolution across DCs
 echo "5. Service Resolution Test:"
 kubectl --context=gke-cluster exec -n consul consul-server-0 -- \
-  consul catalog service nightscout -datacenter=aws-dc
+  consul catalog service nightscout -datacenter=doks-dc
 
 echo "=== Federation Verification Complete ==="
 ```
@@ -1553,16 +1553,16 @@ WAIT_SECONDS=120  # 2x the 60s TTL
 echo "Waiting ${WAIT_SECONDS}s for DNS cache expiry..."
 sleep ${WAIT_SECONDS}
 
-# Check AWS pod is receiving no new connections
-AWS_CONNECTIONS=$(kubectl --context=aws-cluster exec -n nightscout-tenants \
-  $(kubectl --context=aws-cluster get pod -l ns.mdn.io/tenant-id=${TENANT_ID} -n nightscout-tenants -o name 2>/dev/null) \
+# Check DOKS pod is receiving no new connections
+AWS_CONNECTIONS=$(kubectl --context=doks-cluster exec -n nightscout-tenants \
+  $(kubectl --context=doks-cluster get pod -l ns.mdn.io/tenant-id=${TENANT_ID} -n nightscout-tenants -o name 2>/dev/null) \
   -c nightscout -- netstat -an | grep ESTABLISHED | wc -l 2>/dev/null || echo "0")
 
 if [ "$AWS_CONNECTIONS" -gt 0 ]; then
-  echo "⚠️  AWS pod still has ${AWS_CONNECTIONS} connections"
+  echo "⚠️  DOKS pod still has ${AWS_CONNECTIONS} connections"
   echo "   Consider extending wait time"
 else
-  echo "✅ AWS pod has no active connections"
+  echo "✅ DOKS pod has no active connections"
   echo "   Safe to proceed with cleanup"
 fi
 
@@ -1616,7 +1616,7 @@ echo "TTL restored to ${NORMAL_TTL}s for ${TENANT_ID}"
 │  └───────────┘    └───────────┘    └───────────┘  └───────────┘            │
 │                   ▲                ▲              ▲                         │
 │                   │                │              │                         │
-│             Backup/Restore   DNS Switch    AWS Cleanup                      │
+│             Backup/Restore   DNS Switch    DOKS Cleanup                      │
 │                 + TTL Lower  + Verify Drain  (After validation)            │
 │                                                                              │
 └─────────────────────────────────────────────────────────────────────────────┘
@@ -1744,12 +1744,12 @@ kubectx gke-cluster
 kubectl scale deployment ${TENANT_ID} --replicas=0 -n nightscout-tenants
 
 # 2. Restore to AWS from backup
-kubectx aws-cluster
+kubectx doks-cluster
 velero restore create ${TENANT_ID}-rollback \
   --from-backup ${BACKUP_NAME} \
   --wait
 
-# 3. Wait for AWS pod ready
+# 3. Wait for DOKS pod ready
 kubectl wait --for=condition=ready pod \
   -l ns.mdn.io/tenant-id=${TENANT_ID} \
   -n nightscout-tenants \
@@ -1759,7 +1759,7 @@ kubectl wait --for=condition=ready pod \
 ./update-tenant-dns.sh ${TENANT_ID} aws
 
 # 5. Update Consul
-consul kv put "nightscout/tenants/${TENANT_ID}/cluster" "aws-cluster"
+consul kv put "nightscout/tenants/${TENANT_ID}/cluster" "doks-cluster"
 
 echo "=== Rollback complete: ${TENANT_ID} ==="
 ```
@@ -1780,7 +1780,7 @@ kubectl scale deployment --all --replicas=0 -n nightscout-tenants
 ./update-global-dns.sh aws
 
 # 3. Verify AWS cluster healthy
-kubectx aws-cluster
+kubectx doks-cluster
 kubectl get pods -n nightscout-tenants | grep -v Running
 
 # 4. Re-enable AWS autoscaling
@@ -1839,11 +1839,11 @@ data:
         - '{__name__=~"mongodb.*"}'
       static_configs:
       - targets:
-        - 'prometheus.aws-cluster.svc.cluster.local:9090'
+        - 'prometheus.doks-cluster.svc.cluster.local:9090'
       relabel_configs:
       - source_labels: [__address__]
         target_label: cluster
-        replacement: aws-cluster
+        replacement: doks-cluster
     
     # Local GKE scrape
     - job_name: 'nightscout-gke'
@@ -2061,11 +2061,11 @@ velero backup get
 velero restore get
 
 # Tenant lookup by cluster
-kubectl get pods -n nightscout-tenants --context=aws-cluster -l ns.mdn.io/tenant-id=<id>
+kubectl get pods -n nightscout-tenants --context=doks-cluster -l ns.mdn.io/tenant-id=<id>
 kubectl get pods -n nightscout-tenants --context=gke-cluster -l ns.mdn.io/tenant-id=<id>
 
 # Cross-cluster Consul query
-consul catalog services -datacenter=aws-dc
+consul catalog services -datacenter=doks-dc
 consul catalog services -datacenter=gke-dc
 ```
 
