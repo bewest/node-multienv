@@ -11,18 +11,27 @@
 
 ## Executive Summary
 
-This proposal describes a **federation-based migration strategy** to move the Nightscout platform from Digital Ocean Kubernetes (DOKS) to Google Kubernetes Engine (GKE). Rather than implementing the complex ephemeral storage architecture with Kafka CDC pipelines, this approach leverages GKE's higher volume limits (128 per node vs ~28 on DOKS) to continue using the proven PVC-based persistent storage model.
+This proposal describes a **federation-based migration strategy** to move the Nightscout platform from Digital Ocean Kubernetes (DOKS) to Google Kubernetes Engine (GKE). This migration involves a **storage paradigm shift**: Gen3b tenants currently connect to a central shared MongoDB cluster running on DigitalOcean droplets (accessed via private IPs), while Gen5 on GKE uses per-tenant dedicated MongoDB instances backed by PVCs.
+
+### Storage Architecture Transition
+
+| Aspect | Source (DOKS Gen3b) | Destination (GKE Gen5) |
+|--------|---------------------|------------------------|
+| **MongoDB Location** | Central shared cluster on droplets | Per-tenant container in pod |
+| **Storage Type** | External (private IP network) | PVC per tenant |
+| **Data Isolation** | Database-level (shared cluster) | Infrastructure-level (dedicated pod) |
+| **Scalability** | Limited by shared cluster | Limited by PVC count (128/node) |
 
 ### Key Benefits
 
 | Benefit | Description |
 |---------|-------------|
-| **Preserve PVC Model** | Keep the battle-tested persistent storage architecture |
-| **Zero Data Loss Window** | No 1-2 minute crash recovery gap |
-| **No CDC Infrastructure** | Eliminate Kafka/Strimzi/Debezium complexity |
-| **4.5x Tenant Density** | 128 volumes/node vs ~28 on DOKS |
+| **Adopt PVC Model** | Move to per-tenant dedicated storage with full isolation |
+| **Zero Data Loss** | Migration via mongodump/mongorestore preserves all data |
+| **No CDC Infrastructure** | Avoid Kafka/Strimzi/Debezium complexity |
+| **4.5x Tenant Density** | 128 volumes/node on GKE vs ~28 on DOKS |
 | **Gradual Migration** | Run both clusters in parallel during transition |
-| **Rollback Capability** | Easy fallback if issues arise |
+| **Rollback Capability** | Source data remains intact until validated |
 
 ### Trade-offs vs Ephemeral Storage
 
@@ -30,10 +39,20 @@ This proposal describes a **federation-based migration strategy** to move the Ni
 |--------|---------------------|-------------------|
 | **Tenant Density** | 128/node (GKE limit) | Unlimited (no PVC) |
 | **Data Durability** | Full (PVC-based) | 1-2 min loss window |
-| **Infrastructure** | KubeFed + Velero | Kafka + Strimzi + CDC |
+| **Infrastructure** | Consul WAN + migration jobs | Kafka + Strimzi + CDC |
 | **Custom Code** | ~50 lines (migration scripts) | ~300 lines (hydration + export) |
 | **Provider Lock-in** | GKE-dependent | Provider-agnostic |
 | **Operational Complexity** | Lower (proven patterns) | Higher (CDC pipeline) |
+
+### Migration Approach Summary
+
+The migration is a **pure data migration**, not a PVC copy:
+
+1. **Create Gen5 tenant on GKE** - Provisions new pod with dedicated MongoDB + fresh PVC
+2. **Run migration job on DOKS** - mongodump from shared MongoDB, mongorestore to GKE pod via Consul WAN DNS
+3. **Verify and cutover** - Validate document counts, update DNS, deregister from DOKS
+
+No source PVCs exist to migrate - the shared MongoDB on droplets is accessed via private IP only.
 
 ### Recommendation
 
@@ -118,9 +137,9 @@ This approach avoids the complexity of ephemeral storage while providing substan
 │                          │  │                          │
 │  ┌────────────────────┐  │  │  ┌────────────────────┐  │
 │  │   Gen 3b Pods      │  │  │  │   Gen 5 Pods       │  │
-│  │   - MongoDB + NS   │  │  │  │   - MongoDB + NS   │  │
-│  │   - PVC Storage    │  │  │  │   - PVC Storage    │  │
-│  │   - Consul Agent   │  │  │  │   - Consul Agent   │  │
+│  │   - Nightscout     │  │  │  │   - MongoDB + NS   │  │
+│  │   - No PVC (shared │  │  │  │   - PVC Storage    │  │
+│  │     MongoDB)       │  │  │  │   - Consul Agent   │  │
 │  └────────────────────┘  │  │  └────────────────────┘  │
 │                          │  │                          │
 │  ┌────────────────────┐  │  │  ┌────────────────────┐  │
@@ -139,10 +158,11 @@ This approach avoids the complexity of ephemeral storage while providing substan
 | Component | Purpose | Location |
 |-----------|---------|----------|
 | **KubeFed Controller** | Manages federated resources across clusters | Host Cluster (GKE) |
-| **Velero** | Backup/restore PVCs during migration | Both Clusters |
-| **Consul Federation** | Cross-cluster service discovery | Both Clusters |
+| **Migration Decorator** | Renders mongodump/mongorestore Jobs | DOKS (source) |
+| **Consul WAN Federation** | Cross-cluster service discovery for migration targets | Both Clusters |
 | **ExternalDNS** | DNS-based traffic management | Both Clusters |
 | **Metacontroller** | Tenant CRD management | Both Clusters |
+| **Velero** | Post-migration backup for GKE PVCs (not used for migration) | GKE only |
 
 ### High-Level Migration Flow
 
@@ -153,30 +173,31 @@ Phase 1: Setup
   2. Install KubeFed control plane on GKE (host cluster)
   3. Register both DOKS and GKE as member clusters
   4. Configure Consul WAN federation between datacenters
-  5. Deploy Velero with cross-cluster backup capability
+  5. Deploy migration decorator on DOKS for cross-cluster jobs
+  6. Optionally deploy Velero on GKE for post-migration backups
 
 Phase 2: Parallel Operation
 ─────────────────────────────────────────────────────────────
   1. Deploy Gen 5 infrastructure to GKE
-  2. New tenants provision directly on GKE
-  3. Existing tenants continue on DOKS (gen3b)
+  2. New tenants provision directly on GKE (with fresh PVCs)
+  3. Existing tenants continue on DOKS (gen3b, shared MongoDB)
   4. Validate GKE operations with new tenant load
 
-Phase 3: Tenant Migration
+Phase 3: Tenant Migration (Data Migration, NOT PVC Copy)
 ─────────────────────────────────────────────────────────────
   1. Select tenant batch for migration
-  2. Backup tenant data (Velero PVC snapshot)
-  3. Restore to GKE cluster
-  4. Update DNS/Consul to point to GKE pod
-  5. Decommission DOKS tenant resources
+  2. Create Gen5 tenant on GKE (provisions fresh PVC + MongoDB pod)
+  3. Run migration job on DOKS: mongodump from shared DB → mongorestore to GKE
+  4. Verify document counts match
+  5. Update DNS/Consul to point to GKE pod
   6. Repeat for all tenants in batches
 
 Phase 4: Decommission
 ─────────────────────────────────────────────────────────────
-  1. Verify all tenants on GKE
+  1. Verify all tenants on GKE (7-day validation period)
   2. Remove DOKS cluster from federation
-  3. Terminate DOKS infrastructure
-  4. Consolidate to single-cluster operations
+  3. Decommission shared MongoDB cluster on droplets
+  4. Terminate DOKS infrastructure
 ```
 
 ---
@@ -192,7 +213,7 @@ Phase 4: Decommission
 | Kubernetes Version | 1.28+ | 1.28+ | Must be compatible |
 | Container Runtime | containerd | containerd | Standard for both |
 | CNI | Cilium/DOKS CNI | GKE VPC-native | Different CNIs OK |
-| Storage Class | do-block-storage | pd-balanced | Cross-compatible via Velero |
+| Storage Class | N/A (shared MongoDB) | pd-balanced | Fresh PVCs created on GKE |
 | Load Balancer | DO Load Balancer | GKE L7 ILB | Different implementations |
 
 #### Networking Requirements
@@ -213,8 +234,8 @@ Phase 4: Decommission
 │  Required Connectivity:                                                      │
 │  • Kubernetes API (6443) - Federation control plane                         │
 │  • Consul WAN (8302/tcp+udp) - Service mesh federation                     │
-│  • Velero S3/GCS (443) - Backup storage access                             │
-│  • Pod-to-Pod (optional) - Only if cross-cluster service calls needed      │
+│  • MongoDB (27017) - Migration jobs from DOKS to GKE pods (via Consul WAN) │
+│  • Pod-to-Pod (optional) - Only if using VPN for direct migration          │
 │                                                                              │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -392,159 +413,108 @@ doks-cluster   1m    True
 gke-cluster   30s   True
 ```
 
-### Velero Installation
+### Velero Installation (Optional - GKE Post-Migration Backups)
 
-Velero handles PVC backup and cross-cluster restore.
+**Note:** Velero is NOT used for the migration itself (Gen3b has no PVCs to backup). Instead, Velero can be deployed on GKE to backup the newly created per-tenant PVCs after migration. This is optional but recommended for disaster recovery.
 
-#### Install Velero on AWS Cluster
+#### Why Velero is NOT Used for Migration
+
+| Aspect | Gen3b (Source) | Gen5 (Target) |
+|--------|---------------|---------------|
+| **Storage Type** | Shared MongoDB on droplets | Per-tenant PVC |
+| **PVC Count** | 0 (no PVCs) | 1 per tenant |
+| **Backup Method** | N/A | Velero with GCS |
+| **Migration Method** | mongodump (via migration job) | mongorestore |
+
+#### Install Velero on GKE for Post-Migration Backups
 
 ```bash
-# Install Velero with AWS plugin
+# Install Velero with GCP plugin on GKE
 velero install \
-  --provider aws \
-  --plugins velero/velero-plugin-for-aws:v1.8.0 \
-  --bucket nightscout-velero-backups \
-  --backup-location-config region=us-east-1 \
-  --snapshot-location-config region=us-east-1 \
-  --secret-file ./credentials-velero \
-  --use-restic \
+  --provider gcp \
+  --plugins velero/velero-plugin-for-gcp:v1.8.0 \
+  --bucket nightscout-gke-backups \
+  --secret-file ./credentials-velero-gcp \
+  --use-node-agent \
   --wait
 
 # Verify
 velero backup-location get
 ```
 
-#### Cross-Cloud Velero Architecture
+#### GKE Backup Architecture (Post-Migration)
 
-For cross-cloud PVC migration, both clusters must share access to a **single S3 bucket** for backup metadata and restic snapshots:
+After tenants are migrated to GKE, Velero provides PVC-level backups for disaster recovery:
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                     VELERO CROSS-CLOUD BACKUP FLOW                           │
+│                     GKE POST-MIGRATION BACKUP FLOW                           │
 │                                                                              │
-│  AWS Cluster                          GKE Cluster                            │
-│  ┌─────────────────┐                  ┌─────────────────┐                   │
-│  │ Velero + Restic │                  │ Velero + Restic │                   │
-│  │ (AWS Plugin)    │                  │ (AWS Plugin)    │ ◄── Uses AWS      │
-│  └────────┬────────┘                  └────────┬────────┘     plugin too!   │
-│           │                                    │                             │
-│           └─────────────┬──────────────────────┘                             │
-│                         ▼                                                    │
-│              ┌─────────────────────┐                                         │
-│              │  S3: nightscout-    │                                         │
-│              │  velero-backups     │  ◄── SHARED BUCKET                      │
-│              │  (us-east-1)        │                                         │
-│              │                     │                                         │
-│              │  /backups/          │  Backup metadata                        │
-│              │  /restic/           │  PVC file-level snapshots              │
-│              └─────────────────────┘                                         │
+│  GKE Cluster (Gen5)                                                         │
+│  ┌───────────────────────────────────────────────────────────────────────┐  │
+│  │  Tenant Pods with PVCs                                                 │  │
+│  │  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐       │  │
+│  │  │ tenant-a        │  │ tenant-b        │  │ tenant-c        │       │  │
+│  │  │ PVC: 10Gi       │  │ PVC: 10Gi       │  │ PVC: 10Gi       │       │  │
+│  │  └────────┬────────┘  └────────┬────────┘  └────────┬────────┘       │  │
+│  │           │                    │                    │                 │  │
+│  │           └────────────────────┼────────────────────┘                 │  │
+│  │                                ▼                                      │  │
+│  │                    ┌─────────────────────┐                           │  │
+│  │                    │  Velero + Node Agent│                           │  │
+│  │                    │  (GCP Plugin)       │                           │  │
+│  │                    └──────────┬──────────┘                           │  │
+│  └───────────────────────────────┼──────────────────────────────────────┘  │
+│                                  │                                         │
+│                                  ▼                                         │
+│              ┌───────────────────────────────────────┐                     │
+│              │  GCS: nightscout-gke-backups          │                     │
+│              │  /backups/          │  Backup metadata                     │
+│              │  /kopia/            │  PVC snapshots                       │
+│              └───────────────────────────────────────┘                     │
 │                                                                              │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-**Critical: GKE must use the AWS plugin** to access the shared S3 bucket, not GCS.
+**Important:** This backup flow only applies AFTER migration is complete. The migration itself uses mongodump/mongorestore via the migration decorator, not Velero.
 
-#### Step 1: Create IAM User for GKE Access to S3
+#### Create GCP Service Account for Velero
 
 ```bash
-# Create IAM user for GKE Velero access
-aws iam create-user --user-name velero-gke-crosscloud
+# Create service account for Velero
+gcloud iam service-accounts create velero-gke \
+  --display-name "Velero for GKE backups"
 
-# Create policy for S3 access
-cat > velero-s3-policy.json <<EOF
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Effect": "Allow",
-      "Action": [
-        "s3:GetObject",
-        "s3:PutObject",
-        "s3:DeleteObject",
-        "s3:ListBucket",
-        "s3:GetBucketLocation"
-      ],
-      "Resource": [
-        "arn:aws:s3:::nightscout-velero-backups",
-        "arn:aws:s3:::nightscout-velero-backups/*"
-      ]
-    }
-  ]
-}
-EOF
+# Grant storage permissions
+gcloud projects add-iam-policy-binding ${PROJECT_ID} \
+  --member "serviceAccount:velero-gke@${PROJECT_ID}.iam.gserviceaccount.com" \
+  --role "roles/storage.admin"
 
-aws iam put-user-policy \
-  --user-name velero-gke-crosscloud \
-  --policy-name VeleroS3Access \
-  --policy-document file://velero-s3-policy.json
+# Create key file
+gcloud iam service-accounts keys create credentials-velero-gcp \
+  --iam-account velero-gke@${PROJECT_ID}.iam.gserviceaccount.com
 
-# Create access key
-aws iam create-access-key --user-name velero-gke-crosscloud > gke-aws-credentials.json
-
-# Extract credentials for Velero
-cat > credentials-velero-gke <<EOF
-[default]
-aws_access_key_id=$(jq -r '.AccessKey.AccessKeyId' gke-aws-credentials.json)
-aws_secret_access_key=$(jq -r '.AccessKey.SecretAccessKey' gke-aws-credentials.json)
-EOF
+# Create GCS bucket for backups
+gsutil mb -p ${PROJECT_ID} -l us-central1 gs://nightscout-gke-backups
 ```
 
-#### Step 2: Install Velero on GKE with AWS Plugin
+#### Test Velero Backup on GKE
 
 ```bash
-# Install Velero on GKE using AWS plugin (NOT GCP plugin)
-velero install \
-  --provider aws \
-  --plugins velero/velero-plugin-for-aws:v1.8.0 \
-  --bucket nightscout-velero-backups \
-  --backup-location-config region=us-east-1,s3ForcePathStyle=true \
-  --secret-file ./credentials-velero-gke \
-  --use-restic \
-  --wait
-
-# Verify connection to shared S3 bucket
-velero backup-location get
-# Should show: default (Available)
-```
-
-#### Step 3: Verify Restic Repository Sync
-
-Both clusters share the same restic repository in S3. Verify access:
-
-```bash
-# On AWS cluster - create test backup with PVC
-velero backup create cross-cloud-test \
+# Create test backup of tenant PVCs
+velero backup create gke-backup-test \
   --include-namespaces nightscout-tenants \
   --selector ns.mdn.io/tenant-id=test-tenant \
-  --default-volumes-to-restic \
   --wait
 
-# Check restic snapshots exist
-aws s3 ls s3://nightscout-velero-backups/restic/nightscout-tenants/
+# Verify backup completed
+velero backup describe gke-backup-test
 
-# On GKE cluster - verify backup is visible
-kubectx gke-cluster
-velero backup get cross-cloud-test
-# Should show backup with status "Completed"
-
-# Test restore on GKE
-velero restore create cross-cloud-test-restore \
-  --from-backup cross-cloud-test \
+# Test restore (to verify backup integrity)
+velero restore create gke-restore-test \
+  --from-backup gke-backup-test \
+  --namespace-mappings nightscout-tenants:restore-test \
   --wait
-
-# Verify PVC was created
-kubectl get pvc -n nightscout-tenants
-```
-
-#### Step 4: Create AWS Credentials Secret on GKE
-
-For the BackupStorageLocation to work, create the credentials secret:
-
-```bash
-# Create secret with AWS credentials on GKE
-kubectl create secret generic aws-credentials \
-  --namespace velero \
-  --from-file=cloud=./credentials-velero-gke
 ```
 
 ---
@@ -1042,7 +1012,9 @@ EOF
   # 3e. Delete DOKS resources (AFTER 7-day validation period!)
   # Uncomment after validation:
   # kubectl delete nightscouttenant ${TENANT_ID} -n nightscout-tenants
-  # kubectl delete pvc ${TENANT_ID}-mongodb-data -n nightscout-tenants
+  # kubectl delete configmap ${TENANT_ID}-config -n nightscout-tenants
+  # kubectl delete secret ${TENANT_ID}-mongo-auth -n nightscout-tenants
+  # Note: Drop shared MongoDB database after all tenants migrated
   
   echo "=== Completed: ${TENANT_ID} (validate for 7 days before cleanup) ==="
 done
@@ -1052,20 +1024,21 @@ done
 
 Before migrating each tenant:
 
-- [ ] Tenant is not in maintenance window (`kubectl get nightscouttenant ${TENANT_ID} -o jsonpath='{.metadata.annotations.maintenance}'`)
-- [ ] Recent backup exists (<24h old) (`velero backup get | grep ${TENANT_ID}`)
+- [ ] Tenant is not in maintenance window (`kubectl get configmap ${TENANT_ID}-config -o jsonpath='{.metadata.annotations.maintenance}'`)
 - [ ] Source pod healthy (`kubectl get pod -l ns.mdn.io/tenant-id=${TENANT_ID} -o jsonpath='{.status.phase}'`)
-- [ ] MongoDB document count recorded (`kubectl exec ... -- mongo nightscout --eval "db.entries.count()"`)
+- [ ] Shared MongoDB accessible (`mongo mongodb://shared-user:pass@10.0.50.10:27017/${TENANT_ID} --eval "db.entries.count()"`)
+- [ ] MongoDB document count recorded for verification
 - [ ] Current DNS TTL lowered to 60s (see DNS TTL Playbook below)
+- [ ] Consul WAN federation healthy (`consul members -wan`)
 
 #### Migration Execution Checklist
 
 During migration:
 
-- [ ] Velero backup completed successfully (`velero backup describe ${BACKUP_NAME} | grep Phase`)
-- [ ] Velero restore completed successfully (`velero restore describe ${RESTORE_NAME} | grep Phase`)
-- [ ] GKE pod running and ready (`kubectl --context=gke get pod -l ns.mdn.io/tenant-id=${TENANT_ID}`)
-- [ ] PVC bound with correct size (`kubectl --context=gke get pvc | grep ${TENANT_ID}`)
+- [ ] GKE Gen5 tenant created and pod ready (`kubectl --context=gke get pod -l ns.mdn.io/tenant-id=${TENANT_ID}`)
+- [ ] GKE PVC provisioned and bound (`kubectl --context=gke get pvc | grep ${TENANT_ID}`)
+- [ ] Migration job triggered on DOKS (`kubectl --context=doks get job -l ns.mdn.io/tenant-id=${TENANT_ID},ns.mdn.io/migration-type=cross-cluster`)
+- [ ] Migration job completed successfully (`kubectl --context=doks get job ... -o jsonpath='{.status.succeeded}'` = 1)
 - [ ] MongoDB document count matches source (within 100 documents for active tenants)
 
 #### Post-Migration Validation Checklist
@@ -1085,11 +1058,16 @@ Only after 7-day validation period:
 
 - [ ] No traffic to DOKS pod for 24h (check Consul metrics)
 - [ ] User confirmed no issues (or no support tickets)
-- [ ] Final backup taken as archive (`velero backup create ${TENANT_ID}-final-archive`)
+- [ ] Tenant data archived from shared MongoDB (optional: mongodump to GCS)
 - [ ] DOKS resources deleted:
   ```bash
   kubectl --context=doks delete nightscouttenant ${TENANT_ID} -n nightscout-tenants
-  kubectl --context=doks delete pvc ${TENANT_ID}-mongodb-data -n nightscout-tenants
+  kubectl --context=doks delete configmap ${TENANT_ID}-config -n nightscout-tenants
+  kubectl --context=doks delete secret ${TENANT_ID}-mongo-auth -n nightscout-tenants
+  ```
+- [ ] Tenant database dropped from shared MongoDB (after all tenants migrated):
+  ```bash
+  mongo mongodb://admin:pass@10.0.50.10:27017/admin --eval "db.getSiblingDB('${TENANT_ID}').dropDatabase()"
   ```
 
 #### Automated Validation Script
@@ -1511,74 +1489,70 @@ data:
   MONGO_PASSWORD: Z2VuZXJhdGVk...   # generated password
 ```
 
-### PVC Migration with Velero
+### Storage Paradigm: Shared MongoDB to Per-Tenant PVC
 
-#### Backup Strategy
+**Important:** Gen3b does NOT use PVCs. The source architecture uses a central shared MongoDB cluster running on DigitalOcean droplets, accessed via private IPs (10.0.50.x). This means:
 
-```yaml
-# velero/tenant-backup-schedule.yaml
-apiVersion: velero.io/v1
-kind: Schedule
-metadata:
-  name: tenant-pre-migration-backup
-  namespace: velero
-spec:
-  schedule: "0 2 * * *"  # Daily at 2 AM
-  template:
-    includedNamespaces:
-    - nightscout-tenants
-    storageLocation: default
-    volumeSnapshotLocations:
-    - aws-ebs
-    ttl: 168h  # 7 days
-    hooks:
-      resources:
-      - name: mongodb-freeze
-        includedNamespaces:
-        - nightscout-tenants
-        labelSelector:
-          matchLabels:
-            app: mongodb
-        pre:
-        - exec:
-            container: mongodb
-            command:
-            - /bin/sh
-            - -c
-            - "mongo --eval 'db.fsyncLock()'"
-            onError: Fail
-            timeout: 30s
-        post:
-        - exec:
-            container: mongodb
-            command:
-            - /bin/sh
-            - -c
-            - "mongo --eval 'db.fsyncUnlock()'"
-            onError: Continue
-            timeout: 30s
+- **No Velero PVC backup/restore** - There are no source PVCs to migrate
+- **Fresh PVC provisioning** - GKE Gen5 creates new PVCs during tenant provisioning
+- **Pure data migration** - Only MongoDB data moves, via mongodump/mongorestore
+
+#### Source Architecture (DOKS Gen3b)
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                     GEN3B SOURCE ARCHITECTURE (DOKS)                         │
+│                                                                              │
+│  DigitalOcean Kubernetes (DOKS)           DigitalOcean Droplets              │
+│  ┌─────────────────────────────┐          ┌─────────────────────────────┐   │
+│  │  Tenant Pods (Nightscout)   │          │  Shared MongoDB Cluster      │   │
+│  │  ┌─────────┐ ┌─────────┐   │          │  ┌─────────────────────────┐ │   │
+│  │  │ tenant-a│ │ tenant-b│   │   ───►   │  │  MongoDB Replica Set    │ │   │
+│  │  │ (no PVC)│ │ (no PVC)│   │ Private  │  │  - Primary              │ │   │
+│  │  └────┬────┘ └────┬────┘   │   IP     │  │  - Secondary            │ │   │
+│  │       │           │        │ Network  │  │  - Arbiter              │ │   │
+│  │       └─────┬─────┘        │          │  └─────────────────────────┘ │   │
+│  │             │              │          │  IP: 10.0.50.10              │   │
+│  └─────────────┼──────────────┘          └─────────────────────────────┘   │
+│                │                                                            │
+│                └── mongodb://shared-user:pass@10.0.50.10:27017/tenant-a    │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-### Cross-Cloud PVC Restore
+#### Destination Architecture (GKE Gen5)
 
-Velero's restic integration handles cross-cloud PVC migration:
-
-```bash
-# Backup with restic (file-level backup)
-velero backup create tenant-123-migration \
-  --include-namespaces nightscout-tenants \
-  --selector ns.mdn.io/tenant-id=tenant-123 \
-  --default-volumes-to-restic \
-  --wait
-
-# Restore on different cloud
-velero restore create tenant-123-gke \
-  --from-backup tenant-123-migration \
-  --namespace-mappings nightscout-tenants:nightscout-tenants \
-  --wait
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    GEN5 DESTINATION ARCHITECTURE (GKE)                       │
+│                                                                              │
+│  Google Kubernetes Engine (GKE)                                              │
+│  ┌─────────────────────────────────────────────────────────────────────────┐│
+│  │  Tenant Pods (MongoDB + Nightscout co-located)                           ││
+│  │                                                                          ││
+│  │  ┌─────────────────────────┐    ┌─────────────────────────┐             ││
+│  │  │ tenant-a-pod            │    │ tenant-b-pod            │             ││
+│  │  │ ┌─────────┐ ┌─────────┐│    │ ┌─────────┐ ┌─────────┐│             ││
+│  │  │ │ MongoDB │ │Nightscout││    │ │ MongoDB │ │Nightscout││             ││
+│  │  │ │ :27017  │ │ :1337   ││    │ │ :27017  │ │ :1337   ││             ││
+│  │  │ └────┬────┘ └─────────┘│    │ └────┬────┘ └─────────┘│             ││
+│  │  └──────┼─────────────────┘    └──────┼─────────────────┘             ││
+│  │         │                             │                                ││
+│  │  ┌──────▼──────┐               ┌──────▼──────┐                        ││
+│  │  │ PVC         │               │ PVC         │                        ││
+│  │  │ tenant-a-   │               │ tenant-b-   │                        ││
+│  │  │ mongodb-data│               │ mongodb-data│                        ││
+│  │  │ (10Gi)      │               │ (10Gi)      │                        ││
+│  │  └─────────────┘               └─────────────┘                        ││
+│  │                                                                          ││
+│  └──────────────────────────────────────────────────────────────────────────┘│
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-### Data Verification
+### Post-Migration Verification
+
+After data migration completes, verify the transfer was successful:
 
 ```bash
 #!/bin/bash
@@ -1586,13 +1560,13 @@ velero restore create tenant-123-gke \
 
 TENANT_ID=$1
 
-# Get document counts from source (AWS)
+# Get document counts from source (shared MongoDB via private IP)
+# Must run from DOKS where private IP is accessible
 kubectx doks-cluster
-SOURCE_ENTRIES=$(kubectl exec -n nightscout-tenants \
-  $(kubectl get pod -l ns.mdn.io/tenant-id=${TENANT_ID} -o name) \
-  -c mongodb -- mongo nightscout --quiet --eval "db.entries.count()")
+SOURCE_ENTRIES=$(mongo "mongodb://shared-user:pass@10.0.50.10:27017/${TENANT_ID}" \
+  --quiet --eval "db.entries.count()")
 
-# Get document counts from target (GKE)
+# Get document counts from target (Gen5 dedicated MongoDB)
 kubectx gke-cluster
 TARGET_ENTRIES=$(kubectl exec -n nightscout-tenants \
   $(kubectl get pod -l ns.mdn.io/tenant-id=${TENANT_ID} -o name) \
@@ -1604,6 +1578,21 @@ else
   echo "❌ Document count mismatch: source=${SOURCE_ENTRIES}, target=${TARGET_ENTRIES}"
   exit 1
 fi
+
+# Additional verification: check critical collections
+for COLLECTION in entries treatments devicestatus profile; do
+  SOURCE=$(mongo "mongodb://shared-user:pass@10.0.50.10:27017/${TENANT_ID}" \
+    --quiet --eval "db.${COLLECTION}.count()")
+  TARGET=$(kubectl exec -n nightscout-tenants \
+    $(kubectl get pod -l ns.mdn.io/tenant-id=${TENANT_ID} -o name) \
+    -c mongodb -- mongo nightscout --quiet --eval "db.${COLLECTION}.count()")
+  
+  if [ "$SOURCE" -eq "$TARGET" ]; then
+    echo "✅ ${COLLECTION}: ${SOURCE} documents"
+  else
+    echo "❌ ${COLLECTION}: source=${SOURCE}, target=${TARGET}"
+  fi
+done
 ```
 
 ---
@@ -2130,6 +2119,7 @@ echo "TTL restored to ${NORMAL_TTL}s for ${TENANT_ID}"
 ```bash
 #!/bin/bash
 # full-migration-sequence.sh
+# Cross-cluster data migration: Gen3b (shared MongoDB) → Gen5 (per-tenant PVC)
 
 TENANT_ID=$1
 
@@ -2142,47 +2132,81 @@ echo "⏳ Wait 1 hour for TTL propagation before continuing"
 echo "   Run: ./verify-ttl-propagation.sh ${TENANT_ID}"
 read -p "Press enter when TTL is propagated..."
 
-# Step 2: Create backup
-echo "Step 2: Create Velero backup"
-BACKUP_NAME="${TENANT_ID}-$(date +%Y%m%d-%H%M%S)"
-velero backup create ${BACKUP_NAME} \
-  --include-namespaces nightscout-tenants \
-  --selector ns.mdn.io/tenant-id=${TENANT_ID} \
-  --default-volumes-to-restic \
-  --wait
-
-# Step 3: Restore to GKE
-echo "Step 3: Restore to GKE"
+# Step 2: Create Gen5 tenant on GKE (provisions fresh PVC + MongoDB pod)
+echo "Step 2: Create Gen5 tenant on GKE"
 kubectx gke-cluster
-velero restore create ${BACKUP_NAME}-restore \
-  --from-backup ${BACKUP_NAME} \
-  --wait
+kubectl apply -f - <<EOF
+apiVersion: nightscout.io/v1alpha1
+kind: NightscoutTenant
+metadata:
+  name: ${TENANT_ID}
+  namespace: nightscout-tenants
+spec:
+  storageType: dedicated
+  tier: standard
+EOF
 
-# Step 4: Wait for pod ready
-echo "Step 4: Wait for GKE pod ready"
+# Step 3: Wait for GKE pod ready
+echo "Step 3: Wait for GKE pod ready"
 kubectl wait --for=condition=ready pod \
   -l ns.mdn.io/tenant-id=${TENANT_ID} \
   -n nightscout-tenants \
   --timeout=300s
 
-# Step 5: Update DNS
-echo "Step 5: Update DNS to GKE"
+# Get Consul DNS name for migration target
+GKE_POD_CONSUL="${TENANT_ID}.backends.gke-dc.consul"
+echo "GKE target: ${GKE_POD_CONSUL}"
+
+# Step 4: Configure and trigger migration job on DOKS
+echo "Step 4: Trigger migration job on DOKS"
+kubectx doks-cluster
+kubectl patch configmap ${TENANT_ID}-config \
+  -n nightscout-tenants \
+  --type=merge \
+  -p '{
+    "data": {
+      "MIGRATION_ENABLED": "true",
+      "MIGRATION_TARGET_CLUSTER": "gke-dc",
+      "MIGRATION_TARGET_CONSUL_NAME": "'${GKE_POD_CONSUL}'",
+      "MIGRATION_USE_DIRECT_IP": "false"
+    },
+    "metadata": {
+      "annotations": {
+        "ns.mdn.io/migration-policy": "cross-cluster",
+        "ns.mdn.io/migration-phase": "pending"
+      }
+    }
+  }'
+
+# Trigger migration
+kubectl annotate secret ${TENANT_ID}-mongo-auth \
+  ns.mdn.io/migration-needed=true --overwrite
+
+# Step 5: Wait for migration job to complete
+echo "Step 5: Wait for migration job"
+kubectl wait --for=condition=complete job \
+  -l ns.mdn.io/tenant-id=${TENANT_ID},ns.mdn.io/migration-type=cross-cluster \
+  -n nightscout-tenants \
+  --timeout=600s
+
+# Step 6: Update DNS
+echo "Step 6: Update DNS to GKE"
 ./update-tenant-dns.sh ${TENANT_ID} gke
 
-# Step 6: Verify traffic drain
-echo "Step 6: Verify traffic drain from AWS"
+# Step 7: Verify traffic drain
+echo "Step 7: Verify traffic drain from DOKS"
 ./verify-traffic-drain.sh ${TENANT_ID}
 
-# Step 7: Run validation
-echo "Step 7: Validate migration"
-./validate-migration.sh ${TENANT_ID} ${BACKUP_NAME}
+# Step 8: Run validation
+echo "Step 8: Validate migration"
+./validate-migration.sh ${TENANT_ID}
 
 if [ $? -eq 0 ]; then
   echo "=== Migration Successful ==="
-  echo "Schedule cleanup for T+7d: ./cleanup-aws-tenant.sh ${TENANT_ID}"
+  echo "Schedule cleanup for T+7d: ./cleanup-doks-tenant.sh ${TENANT_ID}"
 else
   echo "=== Migration Failed - Initiating Rollback ==="
-  ./rollback-tenant.sh ${TENANT_ID} ${BACKUP_NAME}
+  ./rollback-tenant.sh ${TENANT_ID}
 fi
 ```
 
@@ -2233,38 +2257,45 @@ aws route53 change-resource-record-sets \
 
 ### Per-Tenant Rollback
 
+Rollback is simple because the source data remains intact in the shared MongoDB during the validation period.
+
 ```bash
 #!/bin/bash
 # rollback-tenant.sh
 
 TENANT_ID=$1
-BACKUP_NAME=$2  # Original pre-migration backup
 
 echo "=== Rolling back tenant: ${TENANT_ID} ==="
 
-# 1. Stop GKE pod
-kubectx gke-cluster
-kubectl scale deployment ${TENANT_ID} --replicas=0 -n nightscout-tenants
+# 1. Update DNS back to DOKS
+# (DOKS Gen3b pod is still connected to shared MongoDB with original data)
+./update-tenant-dns.sh ${TENANT_ID} doks
 
-# 2. Restore to AWS from backup
+# 2. Remove migration annotations to restore original state
 kubectx doks-cluster
-velero restore create ${TENANT_ID}-rollback \
-  --from-backup ${BACKUP_NAME} \
-  --wait
+kubectl annotate configmap ${TENANT_ID}-config \
+  ns.mdn.io/migration-phase- \
+  ns.mdn.io/migration-policy- \
+  ns.mdn.io/migrated-to-
 
-# 3. Wait for DOKS pod ready
-kubectl wait --for=condition=ready pod \
-  -l ns.mdn.io/tenant-id=${TENANT_ID} \
+kubectl patch configmap ${TENANT_ID}-config \
   -n nightscout-tenants \
-  --timeout=300s
+  --type=merge \
+  -p '{"data":{"MIGRATION_ENABLED":"false"}}'
 
-# 4. Update DNS back to AWS
-./update-tenant-dns.sh ${TENANT_ID} aws
+# 3. Delete GKE resources (optional - can keep for retry)
+kubectx gke-cluster
+kubectl delete nightscouttenant ${TENANT_ID} -n nightscout-tenants --ignore-not-found
+
+# 4. Verify DOKS pod still healthy
+kubectx doks-cluster
+kubectl get pod -l ns.mdn.io/tenant-id=${TENANT_ID} -n nightscout-tenants
 
 # 5. Update Consul
 consul kv put "nightscout/tenants/${TENANT_ID}/cluster" "doks-cluster"
 
 echo "=== Rollback complete: ${TENANT_ID} ==="
+echo "Note: Source data in shared MongoDB was never modified"
 ```
 
 ### Full Migration Rollback
