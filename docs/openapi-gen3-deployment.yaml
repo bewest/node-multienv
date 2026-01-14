@@ -1,0 +1,611 @@
+openapi: 3.0.3
+info:
+  title: Nightscout Deployment Controller (Generation 3b) - Per-Tenant Kubernetes Resources API
+  version: 3.0.0
+  description: |
+    **Generation 3b** of the Nightscout hosting platform. This represents the **Deployment Controller** phase,
+    where each tenant gets isolated Kubernetes resources (one Deployment per tenant).
+    
+    **Generation 3 Evolution:**
+    - **Gen 3a (StatefulSet Runners)**: Multiple master.js instances in StatefulSet, demuxer routes changes to runners
+    - **Gen 3b (Deployment Controller)**: This API - per-tenant Deployments, dispatcher watches ConfigMaps, deployment-operator registers with Consul
+    
+    **Gen 3b Key Characteristics:**
+    - Per-tenant Deployments (one Deployment per tenant, full resource isolation)
+    - ConfigMap-triggered orchestration via dispatcher pattern
+    - deployment-controller creates Deployments ONLY (experimental code for more resources exists but not used)
+    - deployment-operator watches pods and registers with Consul
+    - Consul integration for service discovery
+    - REST API for manual operations and debugging
+    
+    **Architecture:**
+    - `k8s-deployment-controller.js`: Creates per-tenant Deployments (limited scope)
+    - `k8s-dispatcher.js`: Watches ConfigMaps, dispatches ADDED/MODIFIED/DELETED events
+    - `k8s-dispatcher.js` (deployment-operator mode): Watches pods, registers with Consul
+    - `tenant-availability-keeper.js` (demuxer): Routes user requests (no longer routes ConfigMap changes)
+    
+    **Components:**
+    1. **Deployment Controller**: Receives sync events, creates K8s resources
+    2. **Dispatcher**: Watches ConfigMaps, sends ADDED/MODIFIED/DELETED events
+    3. **Demuxer (Availability Keeper)**: Routes requests based on Consul health
+    4. **Consul**: Service discovery and health checking
+    
+    **Use Cases:**
+    - Production Kubernetes clusters
+    - Multi-node deployments
+    - High-availability configurations
+    - Service mesh integration
+  contact:
+    email: bewest@gmail.com
+  license:
+    name: Affero GPL 3.0
+
+servers:
+  - url: 'http://localhost:2831'
+    description: Local deployment controller
+  - url: 'http://deployment-controller.hosted-tenants.svc.cluster.local'
+    description: Kubernetes service endpoint
+
+tags:
+  - name: deployments
+    description: Kubernetes Deployment management
+  - name: inspect
+    description: Resource inspection and templates
+  - name: configmaps
+    description: ConfigMap operations
+  - name: sync
+    description: Dispatcher sync endpoints (internal)
+  - name: consul
+    description: Consul service discovery integration
+  - name: metacontroller
+    description: Early metacontroller webhook endpoints
+
+paths:
+  /deployments:
+    get:
+      tags:
+        - deployments
+      summary: List all Deployments
+      description: Returns all Nightscout deployments in the namespace
+      operationId: listDeployments
+      parameters:
+        - name: labelSelector
+          in: query
+          schema:
+            type: string
+          example: "app=tenant,managed=multienv"
+        - name: fieldSelector
+          in: query
+          schema:
+            type: string
+        - name: limit
+          in: query
+          schema:
+            type: integer
+        - name: continue
+          in: query
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Successful operation
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeploymentList'
+
+  /deployments/{name}:
+    get:
+      tags:
+        - deployments
+      summary: Get Deployment by name
+      description: Returns details of a specific Nightscout deployment
+      operationId: getDeployment
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+          example: "demo"
+      responses:
+        '200':
+          description: Successful operation
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Deployment'
+
+    post:
+      tags:
+        - deployments
+      summary: Create or update Deployment
+      description: |
+        Creates a full Nightscout stack:
+        - PersistentVolumeClaim for MongoDB data
+        - Deployment with Nightscout + MongoDB containers
+        - Service (optional)
+      operationId: createDeployment
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties:
+                type: string
+              example:
+                WEB_NAME: "demo"
+                MONGODB_URI: "mongodb://localhost:27017/demo"
+                API_SECRET: "my-secret-123"
+      responses:
+        '200':
+          description: Deployment updated
+          headers:
+            Location:
+              schema:
+                type: string
+                example: "/environs/demo"
+        '201':
+          description: Deployment created
+          headers:
+            Location:
+              schema:
+                type: string
+                example: "/environs/demo"
+
+    delete:
+      tags:
+        - deployments
+      summary: Delete Deployment
+      description: Deletes the Deployment (PVC and Services remain)
+      operationId: deleteDeployment
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '204':
+          description: Deployment deleted successfully
+
+  /inspect/{name}:
+    get:
+      tags:
+        - inspect
+      summary: Inspect Deployment (raw)
+      description: Returns the raw Kubernetes Deployment object
+      operationId: inspectDeployment
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Successful operation
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Deployment'
+
+    post:
+      tags:
+        - inspect
+      summary: Create Deployment
+      description: Creates a new Deployment with full resource stack
+      operationId: createInspectDeployment
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        '201':
+          description: Deployment created
+
+  /template/{name}:
+    post:
+      tags:
+        - inspect
+      summary: Generate Deployment template
+      description: |
+        Returns the Deployment template without creating it.
+        Useful for debugging and testing.
+      operationId: generateTemplate
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties:
+                type: string
+      responses:
+        '200':
+          description: Template generated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Deployment'
+
+  /sync/additions:
+    post:
+      tags:
+        - sync
+      summary: Handle ConfigMap addition
+      description: |
+        Called by dispatcher when a new ConfigMap is created.
+        Creates corresponding Deployment.
+        
+        **Internal endpoint** - called by k8s-dispatcher.js
+      operationId: syncAddition
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WatchEvent'
+      responses:
+        '200':
+          description: Addition processed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Deployment'
+
+  /sync/updates:
+    post:
+      tags:
+        - sync
+      summary: Handle ConfigMap update
+      description: |
+        Called by dispatcher when a ConfigMap is modified.
+        Triggers rolling restart via annotation patch.
+        
+        **Internal endpoint** - called by k8s-dispatcher.js
+      operationId: syncUpdate
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WatchEvent'
+      responses:
+        '200':
+          description: Update processed
+
+  /sync/deletions:
+    post:
+      tags:
+        - sync
+      summary: Handle ConfigMap deletion
+      description: |
+        Called by dispatcher when a ConfigMap is deleted.
+        Deletes corresponding Deployment.
+        
+        **Internal endpoint** - called by k8s-dispatcher.js
+      operationId: syncDeletion
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WatchEvent'
+      responses:
+        '204':
+          description: Deletion processed
+
+  /consul/sync/additions:
+    post:
+      tags:
+        - consul
+      summary: Sync pod to Consul
+      description: |
+        Registers running pod in Consul service catalog.
+        Called when pod becomes Running.
+      operationId: consulSyncAddition
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PodWatchEvent'
+      responses:
+        '200':
+          description: Pod registered in Consul
+
+  /consul/sync/updates:
+    post:
+      tags:
+        - consul
+      summary: Update pod in Consul
+      description: Updates Consul service registration
+      operationId: consulSyncUpdate
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PodWatchEvent'
+      responses:
+        '200':
+          description: Consul updated
+
+  /consul/sync/deletions:
+    post:
+      tags:
+        - consul
+      summary: Deregister pod from Consul
+      description: Removes pod from Consul service catalog
+      operationId: consulSyncDeletion
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PodWatchEvent'
+      responses:
+        '204':
+          description: Pod deregistered from Consul
+
+  /metacontroller/sync:
+    post:
+      tags:
+        - metacontroller
+      summary: Metacontroller sync webhook (early version)
+      description: |
+        Early implementation of metacontroller sync webhook.
+        **Deprecated** - Use Generation 4 metacontroller implementation instead.
+      operationId: metacontrollerSync
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MetacontrollerSyncRequest'
+      responses:
+        '200':
+          description: Sync response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MetacontrollerSyncResponse'
+
+  /metacontroller/storage/sync:
+    post:
+      tags:
+        - metacontroller
+      summary: Storage decorator sync webhook
+      description: Early PVC decorator implementation
+      operationId: storageSyncWebhook
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        '200':
+          description: Decorator sync response
+
+components:
+  schemas:
+    WatchEvent:
+      type: object
+      description: Kubernetes watch event from dispatcher
+      required:
+        - type
+        - object
+      properties:
+        type:
+          type: string
+          enum: [ADDED, MODIFIED, DELETED, BOOKMARK, ERROR]
+          example: "ADDED"
+        object:
+          type: object
+          description: Kubernetes resource object (ConfigMap, Pod, etc.)
+          properties:
+            kind:
+              type: string
+            apiVersion:
+              type: string
+            metadata:
+              type: object
+              properties:
+                name:
+                  type: string
+                namespace:
+                  type: string
+                resourceVersion:
+                  type: string
+                labels:
+                  type: object
+                annotations:
+                  type: object
+            data:
+              type: object
+              description: ConfigMap data
+              additionalProperties:
+                type: string
+
+    PodWatchEvent:
+      type: object
+      description: Pod watch event for Consul sync
+      required:
+        - type
+        - object
+      properties:
+        type:
+          type: string
+          enum: [ADDED, MODIFIED, DELETED]
+        object:
+          type: object
+          properties:
+            metadata:
+              type: object
+            status:
+              type: object
+              properties:
+                phase:
+                  type: string
+                  enum: [Pending, Running, Succeeded, Failed, Unknown]
+                podIP:
+                  type: string
+                conditions:
+                  type: array
+
+    Deployment:
+      type: object
+      description: Kubernetes Deployment object
+      properties:
+        kind:
+          type: string
+          example: "Deployment"
+        apiVersion:
+          type: string
+          example: "apps/v1"
+        metadata:
+          type: object
+          properties:
+            name:
+              type: string
+            namespace:
+              type: string
+            labels:
+              type: object
+              additionalProperties:
+                type: string
+              example:
+                managed: "multienv"
+                app: "tenant"
+                internal_name: "demo"
+            annotations:
+              type: object
+        spec:
+          type: object
+          properties:
+            replicas:
+              type: integer
+              example: 1
+            selector:
+              type: object
+            template:
+              type: object
+              properties:
+                metadata:
+                  type: object
+                spec:
+                  type: object
+                  properties:
+                    containers:
+                      type: array
+                      items:
+                        type: object
+                        properties:
+                          name:
+                            type: string
+                          image:
+                            type: string
+                          env:
+                            type: array
+                          envFrom:
+                            type: array
+                          resources:
+                            type: object
+
+    DeploymentList:
+      type: object
+      properties:
+        kind:
+          type: string
+          example: "DeploymentList"
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Deployment'
+        metadata:
+          type: object
+          properties:
+            continue:
+              type: string
+            resourceVersion:
+              type: string
+
+    MetacontrollerSyncRequest:
+      type: object
+      description: Early metacontroller sync request format
+      properties:
+        parent:
+          type: object
+        children:
+          type: object
+
+    MetacontrollerSyncResponse:
+      type: object
+      description: Early metacontroller sync response format
+      properties:
+        status:
+          type: object
+        children:
+          type: array
+
+externalDocs:
+  description: Kubernetes Deployments Documentation
+  url: https://kubernetes.io/docs/concepts/workloads/controllers/deployment/
+
+x-generation: 3
+x-implementation: deployment-controller + dispatcher + consul
+x-architecture:
+  - component: k8s-deployment-controller.js
+    role: Deployment orchestration
+    description: Creates Deployments, StatefulSets, PVCs, Services
+  - component: k8s-dispatcher.js
+    role: ConfigMap watcher
+    description: Watches ConfigMaps, dispatches sync events
+  - component: tenant-availability-keeper.js
+    role: Load balancer / demuxer
+    description: Consul-based service discovery and routing
+  - component: Consul
+    role: Service discovery
+    description: Service registry and health checking
+x-workflow:
+  description: |
+    1. User creates ConfigMap with labels: managed=multienv, app=tenant
+    2. Dispatcher watches ConfigMaps, detects ADDED event
+    3. Dispatcher POSTs to /sync/additions
+    4. Controller creates: PVC, Deployment (Nightscout + MongoDB containers)
+    5. Pod starts, becomes Running
+    6. Dispatcher POSTs to /consul/sync/additions
+    7. Controller registers pod in Consul
+    8. Demuxer routes traffic based on Consul health
+x-migration:
+  from-gen2:
+    - Add dispatcher to watch ConfigMaps
+    - Add deployment controller to create pods
+    - Add Consul for service discovery
+  to-gen4:
+    - Replace custom controller with metacontroller
+    - Remove dispatcher (metacontroller handles watching)
+    - Declarative webhook-based approach

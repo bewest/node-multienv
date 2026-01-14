@@ -1,0 +1,140 @@
+const restify = require('restify');
+var bunyan = require('bunyan');
+const config = require('./config');
+
+// Import handler factories
+const createStorageCompositeSync = require('./handlers/storage-composite-sync');
+const createStorageCompositeCustomize = require('./handlers/storage-composite-customize');
+const createComputeCompositeSync = require('./handlers/compute-composite-sync');
+const createComputeCompositeCustomize = require('./handlers/compute-composite-customize');
+const createTenantCompositeSync = require('./handlers/tenant-composite-sync');
+const createTenantCompositeCustomize = require('./handlers/tenant-composite-customize');
+const createDecoratorSync = require('./handlers/decorator-sync');
+const createDecoratorFinalize = require('./handlers/decorator-finalize');
+const { createStorageCredentialsDecoratorSync } = require('./handlers/storage-credentials-decorator-sync');
+const { createStorageInitializationDecoratorSync } = require('./handlers/storage-initialization-decorator-sync');
+const { createStorageInitializationDecoratorCustomize } = require('./handlers/storage-initialization-decorator-customize');
+const { createTenantInitializationDecoratorSync } = require('./handlers/tenant-initialization-decorator-sync');
+const { createTenantInitializationDecoratorCustomize } = require('./handlers/tenant-initialization-decorator-customize');
+const createInstanceUserdataDecorator = require('./handlers/instance-userdata-decorator');
+const { createMongoAuthInitDecoratorSync, createMongoAuthInitDecoratorCustomize } = require('./handlers/mongo-auth-init-decorator');
+const { createAppCredentialsInitDecoratorSync, createAppCredentialsInitDecoratorCustomize } = require('./handlers/app-credentials-init-decorator');
+
+// Create handlers with config
+const storageCompositeSync = createStorageCompositeSync(config);
+const storageCompositeCustomize = createStorageCompositeCustomize(config);
+const computeCompositeSync = createComputeCompositeSync(config);
+const computeCompositeCustomize = createComputeCompositeCustomize(config);
+const tenantCompositeSync = createTenantCompositeSync(config);
+const tenantCompositeCustomize = createTenantCompositeCustomize(config);
+const decoratorSync = createDecoratorSync(config);
+const decoratorFinalize = createDecoratorFinalize(config);
+const { sync: storageCredentialsDecoratorSync, customize: storageCredentialsDecoratorCustomize } = createStorageCredentialsDecoratorSync(config);
+const storageInitializationDecoratorSync = createStorageInitializationDecoratorSync(config);
+const storageInitializationDecoratorCustomize = createStorageInitializationDecoratorCustomize(config);
+const tenantInitializationDecoratorSync = createTenantInitializationDecoratorSync(config);
+const tenantInitializationDecoratorCustomize = createTenantInitializationDecoratorCustomize(config);
+const instanceUserdataDecorator = createInstanceUserdataDecorator(config);
+const instanceUserdataDecoratorSync = instanceUserdataDecorator.sync;
+const instanceUserdataDecoratorCustomize = instanceUserdataDecorator.customize;
+const mongoAuthInitDecoratorSync = createMongoAuthInitDecoratorSync(config);
+const mongoAuthInitDecoratorCustomize = createMongoAuthInitDecoratorCustomize(config);
+const appCredentialsInitDecoratorSync = createAppCredentialsInitDecoratorSync(config);
+const appCredentialsInitDecoratorCustomize = createAppCredentialsInitDecoratorCustomize(config);
+
+const server = restify.createServer({
+  name: config.server.name,
+  version: '1.0.0',
+});
+
+const port = config.server.port;
+
+server.on('after', restify.plugins.auditLogger({
+  log: bunyan.createLogger({
+    name: 'audit',
+    stream: process.stdout
+  }),
+  event: 'after'
+}));
+
+server.use(restify.plugins.bodyParser());
+
+server.use((req, res, next) => {
+  console.log(`${new Date().toISOString()} ${req.method} ${req.path()}`);
+  next();
+});
+
+// Gen 4: Three-Controller Architecture
+// Storage composite: StorageAccount CRD → MongoDB StatefulSet + Migration Jobs
+server.post('/composite/storage/customize', storageCompositeCustomize);
+server.post('/composite/storage/sync', storageCompositeSync);
+
+// Compute composite: ComputeInstance CRD → Nightscout Deployment + CDC resources
+server.post('/composite/compute/customize', computeCompositeCustomize);
+server.post('/composite/compute/sync', computeCompositeSync);
+
+// Gen 5: Tenant Composite (Two-phase provisioning architecture)
+// Tenant composite: NightscoutTenant CRD → ReplicaSet (co-located MongoDB + Nightscout)
+// ConfigMap signals compute activation, PVC/mongo-auth owned by provisioner
+server.post('/composite/tenant/customize', tenantCompositeCustomize);
+server.post('/composite/tenant/sync', tenantCompositeSync);
+
+// Decorator: PVC backup policy enforcement
+server.post('/decorator/sync', decoratorSync);
+server.post('/decorator/finalize', decoratorFinalize);
+
+// Decorator: Storage credentials management (ComputeInstance → App Credentials + User Init)
+server.post('/decorator/storage-credentials/customize', storageCredentialsDecoratorCustomize);
+server.post('/decorator/storage-credentials/sync', storageCredentialsDecoratorSync);
+
+// Decorator: Storage initialization state (mongo-auth Secret → Replica Set Init Tracking)
+server.post('/decorator/storage-initialization/customize', storageInitializationDecoratorCustomize);
+server.post('/decorator/storage-initialization/sync', ...storageInitializationDecoratorSync);
+
+// Decorator: Tenant migration (ConfigMap → Shared to Dedicated MongoDB migration)
+// Gen5: Watches tenant ConfigMaps, orchestrates data migration Jobs
+server.post('/decorator/instance-userdata/customize', ...instanceUserdataDecoratorCustomize);
+server.post('/decorator/instance-userdata/sync', ...instanceUserdataDecoratorSync);
+
+// Decorator: Tenant initialization (Gen 5: Job orchestration for NightscoutTenant)
+server.post('/decorator/tenant-initialization/customize', tenantInitializationDecoratorCustomize);
+server.post('/decorator/tenant-initialization/sync', ...tenantInitializationDecoratorSync);
+
+// Decorator: Mongo-auth init (Shared Gen4/Gen5: mongo-auth Secret → init-rs Job → replica-set-initialized)
+server.post('/decorator/mongo-auth-init/customize', mongoAuthInitDecoratorCustomize);
+server.post('/decorator/mongo-auth-init/sync', ...mongoAuthInitDecoratorSync);
+
+// Decorator: App-credentials init (Shared Gen4/Gen5: app-credentials Secret → create-user Job → user-initialized)
+server.post('/decorator/app-credentials-init/customize', appCredentialsInitDecoratorCustomize);
+server.post('/decorator/app-credentials-init/sync', ...appCredentialsInitDecoratorSync);
+
+server.get('/health', (req, res, next) => {
+  res.send({ status: 'healthy', timestamp: new Date().toISOString() });
+  return next();
+});
+
+server.listen(port, '0.0.0.0', () => {
+  console.log(`Metacontroller webhook server listening on port ${port}`);
+  console.log(`Gen 4/5: Multi-Architecture Support (3 Composites + 7 Decorators)`);
+  console.log(`Endpoints:`);
+  console.log(`  POST /composite/storage/customize - Gen4: Storage: Related resource discovery`);
+  console.log(`  POST /composite/storage/sync - Gen4: StorageAccount → MongoDB + Migration`);
+  console.log(`  POST /composite/compute/customize - Gen4: Compute: Related resource discovery`);
+  console.log(`  POST /composite/compute/sync - Gen4: ComputeInstance → Nightscout + CDC`);
+  console.log(`  POST /composite/tenant/customize - Gen5: NightscoutTenant: ConfigMap discovery`);
+  console.log(`  POST /composite/tenant/sync - Gen5: NightscoutTenant → ReplicaSet (infrastructure)`);
+  console.log(`  POST /decorator/sync - PVC backup policy`);
+  console.log(`  POST /decorator/finalize - PVC cleanup`);
+  console.log(`  POST /decorator/storage-credentials/sync - Credentials: ComputeInstance → App Creds + User Init`);
+  console.log(`  POST /decorator/storage-initialization/customize - Initialization: mongo-auth Secret state tracking`);
+  console.log(`  POST /decorator/storage-initialization/sync - Initialization: Replica set init marker`);
+  console.log(`  POST /decorator/instance-userdata/customize - Tenant Migration: Pod/Secret discovery`);
+  console.log(`  POST /decorator/instance-userdata/sync - Tenant Migration: Shared → Dedicated MongoDB`);
+  console.log(`  POST /decorator/tenant-initialization/customize - Tenant Init: Job orchestration discovery`);
+  console.log(`  POST /decorator/tenant-initialization/sync - Tenant Init: MongoDB Jobs (init-rs, create-user)`);
+  console.log(`  POST /decorator/mongo-auth-init/customize - Shared: mongo-auth Secret discovery`);
+  console.log(`  POST /decorator/mongo-auth-init/sync - Shared: mongo-auth → init-rs Job → replica-set-initialized`);
+  console.log(`  POST /decorator/app-credentials-init/customize - Shared: app-credentials Secret discovery`);
+  console.log(`  POST /decorator/app-credentials-init/sync - Shared: app-creds → create-user Job → user-initialized`);
+  console.log(`  GET  /health - Health check`);
+});

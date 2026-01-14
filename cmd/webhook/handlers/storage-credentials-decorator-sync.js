@@ -1,0 +1,662 @@
+/**
+ * Storage Credentials Decorator Controller
+ * 
+ * Manages per-tenant app credentials as attachments to ComputeInstance CRDs
+ * 
+ * Target: ComputeInstance CRD (nightscout.io/v1alpha1)
+ * Attachments:
+ *   - App Credentials Secret (MongoDB credentials for Nightscout pods)
+ *   - Create User Job (initializes MongoDB user for new tenants)
+ *   - Migration Job (optional - for shared → dedicated transitions)
+ * 
+ * Responsibilities:
+ *   1. Dedicated Storage Mode:
+ *      - Create unique app credentials Secret per ComputeInstance
+ *      - Render create-user Job to initialize MongoDB user
+ *      - Credentials isolated per tenant on same MongoDB instance
+ *   
+ *   2. Shared Storage Mode:
+ *      - Skip credential creation (use existing ConfigMap-based credentials)
+ *      - Allow legacy deployments to continue using shared MongoDB URI
+ *   
+ *   3. Migration Flow (Shared → Dedicated):
+ *      - Detect migration annotation or ConfigMap + dedicated StorageAccount
+ *      - Render migration Job with source (ConfigMap) and target (Secret) credentials
+ *      - Preserve ConfigMap as backup during migration
+ * 
+ * Key Design Points:
+ *   - Orthogonal to Storage/Compute composites (separation of concerns)
+ *   - Uses DecoratorController pattern for attachment lifecycle
+ *   - First-cycle-only credential generation (preserve existing Secrets)
+ *   - Migration triggered by annotation: nightscout.io/migrate-to-dedicated: "true"
+ */
+
+const crypto = require('crypto');
+const { ANNOTATIONS, LABELS, RESOURCE_TYPES } = require('./constants');
+const { 
+  generateSecurePassword, 
+  generateUsername, 
+  generateDatabaseName,
+  generateAppCredentials,
+  renderCreateUserJob,
+  renderAppCredentialsSecret 
+} = require('./resources');
+
+/**
+ * Create storage credentials decorator sync handler with pipeline pattern
+ */
+function createStorageCredentialsDecoratorSync(config) {
+  
+  /**
+   * Stage 1: Initialize context from webhook request
+   * Extracts ComputeInstance, related resources, and attachments
+   * Sets up req/res objects for pipeline
+   */
+  function initializeContext(req, res, next) {
+    const { object: computeInstance, related, attachments } = req.body;
+    
+    req.computeInstance = computeInstance;
+    req.related = related;
+    req.attachments = attachments;
+    req.tenantId = computeInstance.metadata.name;
+    req.namespace = computeInstance.metadata.namespace;
+    req.spec = computeInstance.spec || {};
+    req.status = computeInstance.status || {};
+    req.migrationRequested = req.computeInstance.metadata?.annotations?.['nightscout.io/migrate-to-dedicated'] === 'true';
+    
+    // Extract storage account reference (supports both spec and label)
+    req.storageAccountName = req.spec.storageAccountRef?.name;
+    req.storageAccountLabel = computeInstance.metadata.labels?.['storage.nightscout.org/account'];
+    
+    // Initialize response
+    res.attachments = [ ];
+    res.labels = { };
+    res.annotations = { };
+    
+    console.log('TENANT credentials decorator Storage credentials decorator sync for tenant:', req.tenantId);
+    
+    return next();
+  }
+  
+  /**
+   * Stage 2: Discover StorageAccount from relatedResources
+   * Supports both spec.storageAccountRef.name and label-based discovery
+   * Handles transient API failures by preserving existing attachments
+   */
+  function discoverStorageAccount(req, res, next) {
+    const storageAccount = findStorageAccount(
+      req.related,
+      req.storageAccountName,
+      req.storageAccountLabel
+    );
+    
+    if (!storageAccount) {
+      console.log(`  StorageAccount not found (name: ${req.storageAccountName}, label: ${req.storageAccountLabel})`);
+      console.log('  Preserving existing attachments to prevent deletion');
+      
+      // CRITICAL: Preserve existing attachments during transient API failures
+      // This prevents Metacontroller from deleting Secrets and Jobs
+      const preserved = collectExistingAttachments(req.attachments);
+      res.attachments.push(...preserved);
+      
+      // Early exit - skip remaining pipeline stages
+      res.send({ attachments: res.attachments });
+      return;
+    }
+    
+    req.storageAccount = storageAccount;
+    req.storageType = storageAccount.spec?.storageType;
+    req.credentialsRequested = req.storageType == 'dedicated' || req.migrationRequested;
+    req.storageAccountId = storageAccount.metadata.name; // TODO: look at annotation?
+    // req.databaseName = generateDatabaseName(req.storageAccountId);
+    req.databaseName = req.storageAccount.status.databaseName;
+    
+    console.log(`  Storage account: ${req.storageAccountId}, type: ${req.storageType}, database: ${req.databaseName}`);
+    console.log(`  Storage account:`, req.storageAccount);
+    req.mongoAuthName = req.storageAccount.status.connectionSecret;
+    
+    return next();
+  }
+  
+  /**
+   * Stage 3: Collect and index existing attachments
+   * Indexes Secrets and Jobs for efficient lookup
+   */
+  function collectAttachments(req, res, next) {
+    req.existingSecrets = req.attachments['Secret.v1'] || {};
+    req.existingJobs = req.attachments['Job.batch/v1'] || {};
+    
+    req.appCredentialsSecretName = `${req.tenantId}-app-credentials`;
+    req.existingSecret = req.existingSecrets[req.appCredentialsSecretName] || req.related['Secret.v1'][req.appCredentialsSecretName];
+    
+    console.log(`  Existing app-credentials Secret: ${req.existingSecret ? 'found' : 'not found'}`);
+    
+    return next();
+  }
+  
+  /**
+   * Stage 4: Plan credentials Secret (create/update/skip)
+   * Handles dedicated vs shared storage modes
+   * Protects existing Secrets from garbage collection
+   */
+  function planCredentialsSecret(req, res, next) {
+    // Skip for shared storage mode
+    if (!req.credentialsRequested) {
+      console.log(`  Shared storage mode - skipping credential creation`);
+      req.credentials = null;
+      return next();
+    }
+    console.log(`  Dedicated storage mode - managing app credentials`);
+
+    const secret = renderAppCredentialsSecret(
+      req.tenantId,
+      req.namespace,
+      req.databaseName,
+      req.existingSecret,
+      req.computeInstance.metadata.labels
+    );
+
+    res.attachments.push(secret);
+    return next();
+  }
+
+  /**
+   * Stage 5: Track user initialization Job completion
+   * Sets ns.mdn.io/user-initialized annotation on Secret when Job succeeds
+   * This ties Job lifecycle to Secret lifecycle
+   */
+  function trackUserInitialization(req, res, next) {
+    // Skip if no app-credentials Secret exists yet
+    if (!req.existingSecret) {
+      console.log(`  No Secret exists yet - skipping user initialization tracking`);
+      return next();
+    }
+    
+    // Check if user already initialized via Secret annotation
+    const userInitialized = req.existingSecret.metadata?.annotations?.['ns.mdn.io/user-initialized'];
+    
+    if (userInitialized) {
+      console.log(`  User already initialized at ${userInitialized}`);
+      return next();
+    }
+    
+    // Find create-user Job in related resources
+    const jobs = req.related['Job.batch/v1'] || {};
+    const createUserJobName = `${req.storageAccountId}-${req.tenantId}-create-user`;
+    const createUserJob = jobs[createUserJobName];
+    
+    if (!createUserJob) {
+      console.log(`  Create-user Job not found - initialization not started`);
+      return next();
+    }
+    
+    // Check if Job succeeded
+    const jobStatus = createUserJob.status || {};
+    const succeeded = (jobStatus.succeeded || 0) > 0;
+    
+    if (succeeded) {
+      console.log(`  CREATE-USER JOB SUCCEEDED - marking user initialized on Secret`);
+      
+      const initTimestamp = new Date().toISOString();
+      
+
+      // Update req.existingSecret so planUserInitJob sees the annotation in this cycle
+      req.existingSecret.metadata.annotations = req.existingSecret.metadata.annotations || {};
+      req.existingSecret.metadata.annotations['ns.mdn.io/user-initialized'] = initTimestamp;
+      
+
+    } else {
+      console.log(`  CREATE-USER JOB STATUS: active=${jobStatus.active || 0}, failed=${jobStatus.failed || 0}`);
+    }
+    
+    return next();
+  }
+  
+  /**
+   * Stage 6: Plan user initialization Job (create/skip)
+   * Only renders Job if user not initialized (checked via Secret annotation)
+   * Secret lifecycle controls Job lifecycle - if Secret deleted, Job reruns
+   */
+  function planUserInitJob(req, res, next) {
+    // Skip if shared storage (no app-credentials Secret)
+    if (!req.credentialsRequested) {
+      console.log(`  Shared storage mode - skipping user init Job`);
+      return next();
+    }
+
+    if (!req.existingSecret) {
+      console.log(`  No app credential secret - skipping user init Job`);
+      return next();
+    }
+    
+    // Check if Secret exists and has user-initialized annotation
+    // The annotation is set by trackUserInitialization when Job succeeds
+    const userInitialized = req.existingSecret?.metadata?.annotations?.['ns.mdn.io/user-initialized'];
+    
+    if (userInitialized) {
+      console.log(`  User already initialized at ${userInitialized} - skipping Job creation`);
+      return next();
+    }
+
+    // User not initialized - render create-user Job
+    // This handles both first-time creation and Secret recreation scenarios
+    console.log(`  User not initialized - rendering create-user Job`);
+    var mongoHostname = `mongo-${req.databaseName}`;
+
+    const createUserJob = renderCreateUserJob(
+      req.mongoAuthName,
+      req.existingSecret.metadata.name,
+      req.tenantId,
+      req.namespace,
+      req.storageAccountId,
+      mongoHostname,
+      config
+    );
+
+    res.attachments.push(createUserJob);
+
+    return next();
+  }
+
+  /**
+   * Stage 6: Plan migration Job (shared → dedicated storage transition)
+   * Detects migration annotation and renders migration Job
+   * Only executes if migration annotation is present
+   */
+  function planMigrationJob(req, res, next) {
+    // Check for migration annotation
+    const migrationRequested = req.computeInstance.metadata?.annotations?.['nightscout.io/migrate-to-dedicated'] === 'true';
+    
+    if (!migrationRequested) {
+      return next();
+    }
+    
+    console.log(`  Migration annotation detected - planning shared → dedicated migration`);
+    
+    // Check for durable completion marker (persists after Job TTL cleanup)
+    const migrationCompletedAnnotation = req.computeInstance.metadata?.annotations?.['nightscout.io/migration-completed'];
+    if (migrationCompletedAnnotation) {
+      console.log(`  Migration already completed at ${migrationCompletedAnnotation} - skipping Job recreation`);
+      return next();
+    }
+
+    // Check if migration Job currently exists and succeeded
+    const jobs = req.related['Job.batch/v1'] || {};
+    const migrationJobName = `${req.tenantId}-migrate-to-dedicated`;
+    const existingMigrationJob = jobs[migrationJobName];
+
+    if (existingMigrationJob) {
+      const jobStatus = existingMigrationJob.status || {};
+      const succeeded = (jobStatus.succeeded || 0) > 0;
+
+      if (succeeded) {
+        console.log(`  MIGRATION JOB SUCCEEDED - marking completion on Secret`);
+
+        // Set durable completion marker so we don't recreate after TTL cleanup
+        const completionTimestamp = new Date().toISOString();
+        res.annotations['nightscout.io/migration-completed'] = completionTimestamp;
+        return next();
+      }
+
+      console.log(`  Migration Job exists but not yet succeeded (active: ${jobStatus.active || 0}, failed: ${jobStatus.failed || 0})`);
+    }
+    
+    // Guard: Verify source ConfigMap exists (Gen3 tenant ConfigMap with MONGODB_URI)
+    const sourceConfigMapName = req.tenantId;
+    const sourceConfigMap = req.related['ConfigMap.v1']?.[sourceConfigMapName];
+    
+    if (!sourceConfigMap) {
+      console.log(`  WARNING: Migration requested but source ConfigMap '${sourceConfigMapName}' not found`);
+      console.log(`  Skipping migration Job - ConfigMap must exist for shared→dedicated migration`);
+      console.log("NOT IN RELATED", req.related);
+      return next();
+    }
+    
+    // Guard: Verify target Secret exists (Gen4 app-credentials Secret)
+    // Note: planMigrationJob runs BEFORE planCredentialsSecret in pipeline
+    // So we check req.existingSecret which is populated in collectAttachments
+    if (!req.existingSecret) {
+      console.log(`  WARNING: Migration requested but target Secret '${req.appCredentialsSecretName}' not found`);
+      console.log(`  Skipping migration Job - Secret will be created in next reconciliation cycle`);
+      return next();
+    }
+    
+    console.log(`  Prerequisites verified - rendering migration Job for tenant ${req.tenantId}`);
+    console.log(`    Source: ConfigMap/${sourceConfigMapName}`);
+    console.log(`    Target: Secret/${req.appCredentialsSecretName}`);
+    
+    const migrationJob = renderMigrationJob(
+      req.tenantId,
+      req.namespace,
+      req.storageAccountId,
+      req.databaseName,
+      req.computeInstance.metadata.labels,
+      config
+    );
+    
+    res.attachments.push(migrationJob);
+    
+    return next();
+  }
+  
+  /**
+   * Stage 7: Assemble final response
+   * Sends attachments back to Metacontroller
+   */
+  function assembleResponse(req, res, next) {
+    var response = { attachments: res.attachments };
+    if (Object.entries(res.annotations).length) {
+      response.annotations = res.annotations;
+    }
+    if (Object.entries(res.labels).length) {
+      response.labels = res.labels;
+    }
+    res.send(response);
+  }
+  
+  // Define pipeline stages
+  const pipeline = [
+    initializeContext,
+    discoverStorageAccount,
+    collectAttachments,
+    trackUserInitialization,
+    planUserInitJob,
+    planMigrationJob,
+    planCredentialsSecret,
+    assembleResponse
+  ];
+
+
+  function handle_customize (req, res, next) {
+    const { parent: computeInstance } = req.body;
+    
+    // Extract storage account ID from Secret labels
+    const storageAccountId = computeInstance.metadata.labels?.['storage.nightscout.org/account'];
+    const tenantId = computeInstance.metadata.labels?.['nightscout.io/tenant'];
+    
+    console.log(`CREDENTIAL decorator customize for compute: ${computeInstance.metadata.name}`);
+    console.log(`  Storage account: ${storageAccountId}`);
+    
+    if (!storageAccountId) {
+      // No storage account label - return empty related resources
+      res.send({ relatedResources: [] });
+      return next();
+    }
+    
+    // Define related resources to fetch
+    const relatedResources = [
+      // StorageAccount CRD - to check status conditions
+      {
+        apiVersion: 'nightscout.io/v1alpha1',
+        resource: 'storageaccounts',
+        labelSelector: {
+          matchLabels: {
+            'storage.nightscout.org/account': storageAccountId,
+          },
+        },
+      },
+      // Create-user Jobs
+      {
+        apiVersion: 'batch/v1',
+        resource: 'jobs',
+        labelSelector: {
+          matchLabels: {
+            'storage.nightscout.org/account': storageAccountId,
+            'nightscout.io/tenant': tenantId,
+            'ns.mdn.io/composite': 'storage-create-user',
+          },
+        },
+      },
+      // Migration Jobs (shared → dedicated storage transition)
+      {
+        apiVersion: 'batch/v1',
+        resource: 'jobs',
+        labelSelector: {
+          matchLabels: {
+            'storage.nightscout.org/account': storageAccountId,
+            'nightscout.io/tenant': tenantId,
+            'app.kubernetes.io/component': 'migration',
+          },
+        },
+      },
+      // App-credentials Secrets
+      {
+        apiVersion: 'v1',
+        resource: 'secrets',
+        labelSelector: {
+          matchLabels: {
+            'storage.nightscout.org/account': storageAccountId,
+            'ns.mdn.io/decorator': 'storage-credentials',
+            'nightscout.io/tenant': tenantId,
+          },
+        },
+      },
+      // Gen3 tenant ConfigMaps (for migration source credentials)
+      {
+        apiVersion: 'v1',
+        resource: 'configmaps',
+        labelSelector: {
+          matchLabels: {
+            'tenant': tenantId,
+          },
+        },
+      },
+    ];
+    
+    console.log(`  Requesting ${relatedResources.length} related resource types`);
+    
+    res.send({ relatedResources });
+    return next();
+  }
+
+  return { sync: pipeline, customize: handle_customize };
+
+  
+}
+
+// ============================================================================
+// Helper Functions
+// ============================================================================
+
+/**
+ * Find StorageAccount CRD from related resources
+ * Supports both spec.storageAccountRef.name and label-based discovery
+ */
+function findStorageAccount(related, storageAccountName, storageAccountLabel) {
+  if (!related || !related['StorageAccount.nightscout.io/v1alpha1']) {
+    return null;
+  }
+  
+  const storageAccounts = related['StorageAccount.nightscout.io/v1alpha1'];
+  
+  // Try direct name lookup first (spec.storageAccountRef.name)
+  if (storageAccountName && storageAccounts[storageAccountName]) {
+    return storageAccounts[storageAccountName];
+  }
+  
+  // Fallback: search by storage account label
+  if (storageAccountLabel) {
+    for (const [name, sa] of Object.entries(storageAccounts)) {
+      const saLabel = sa.metadata?.labels?.['storage.nightscout.org/account'];
+      if (saLabel === storageAccountLabel) {
+        console.log(`  Found StorageAccount by label: ${storageAccountLabel} (name: ${name})`);
+        return sa;
+      }
+    }
+  }
+  
+  return null;
+}
+
+/**
+ * Collect existing attachments to preserve during transient failures
+ * Prevents Metacontroller from deleting Secrets and Jobs when StorageAccount lookup fails
+ */
+function collectExistingAttachments(attachments) {
+  const preserved = [];
+  
+  if (!attachments) {
+    return preserved;
+  }
+  
+  // Preserve existing Secrets (app-credentials)
+  if (attachments['Secret.v1']) {
+    Object.values(attachments['Secret.v1']).forEach(secret => {
+      preserved.push(secret);
+    });
+  }
+  
+  // Preserve existing Jobs (user initialization, migration)
+  if (attachments['Job.batch/v1']) {
+    Object.values(attachments['Job.batch/v1']).forEach(job => {
+      preserved.push(job);
+    });
+  }
+  
+  return preserved;
+}
+
+/**
+ * Extract credentials from existing Secret
+ * Decodes BASE64-encoded data fields to reconstruct credential object
+ */
+function extractCredentialsFromSecret(secret) {
+  if (!secret || !secret.data) {
+    return null;
+  }
+  
+  const credentials = {};
+  const requiredFields = ['MONGO_USERNAME', 'MONGO_PASSWORD', 'MONGO_HOST', 'MONGO_PORT', 'MONGO_DATABASE', 'MONGODB_URI'];
+  
+  for (const field of requiredFields) {
+    if (!secret.data[field]) {
+      console.log(`  WARNING: Missing field ${field} in existing Secret`);
+      return null;
+    }
+    credentials[field] = Buffer.from(secret.data[field], 'base64').toString('utf-8');
+  }
+  
+  return credentials;
+}
+
+/**
+ * Render migration Job (shared → dedicated storage transition)
+ * Migrates data from shared MongoDB (ConfigMap-based) to dedicated storage
+ * 
+ * Source credentials: ${tenantId} ConfigMap (Gen3 legacy tenant ConfigMap with MONGODB_URI)
+ * Target credentials: ${tenantId}-app-credentials Secret (Gen4 per-tenant Secret with MONGO_*)
+ */
+function renderMigrationJob(tenantId, namespace, storageAccount, databaseName, labels, config) {
+  const jobName = `${tenantId}-migrate-to-dedicated`;
+  const migrationMethod = 'mongodump-restore';
+  
+  // Gen3 tenant ConfigMap name (contains legacy MONGODB_URI)
+  const sourceConfigMapName = tenantId;
+  
+  // Gen4 app-credentials Secret name
+  const targetSecretName = `${tenantId}-app-credentials`;
+  
+  return {
+    apiVersion: 'batch/v1',
+    kind: 'Job',
+    metadata: {
+      name: jobName,
+      namespace: namespace,
+      labels: {
+        ...labels,
+        'app.kubernetes.io/component': 'migration',
+        'app.kubernetes.io/managed-by': 'metacontroller',
+        'ns.mdn.io/decorator': 'storage-credentials',
+        'ns.mdn.io/migration-type': 'shared-to-dedicated',
+        'storage.nightscout.org/account': storageAccount
+      },
+      annotations: {
+        'ns.mdn.io/tenant': tenantId,
+        'ns.mdn.io/migration-method': migrationMethod,
+        'ns.mdn.io/migration-target-db': databaseName,
+        'ns.mdn.io/source-config': sourceConfigMapName
+      }
+    },
+    spec: {
+      ttlSecondsAfterFinished: config.jobs.ttlSecondsAfterFinished,
+      backoffLimit: config.jobs.backoffLimit,
+      template: {
+        metadata: {
+          labels: {
+            ...labels,
+            'app.kubernetes.io/component': 'migration',
+            'ns.mdn.io/decorator': 'storage-credentials'
+          }
+        },
+        spec: {
+          imagePullSecrets: config.jobs.imagePullSecrets,
+          restartPolicy: 'OnFailure',
+          // serviceAccountName: 'migration-job',
+          containers: [{
+            name: 'migration',
+            image: config.images.nsUtility,
+            imagePullPolicy: config.imagePullPolicies.nsUtility || 'IfNotPresent',
+            env: [
+              // Source: Gen3 tenant ConfigMap with MONGODB_URI
+              {
+                name: 'MIGRATION_SOURCE_URI',
+                valueFrom: {
+                  configMapKeyRef: {
+                    name: sourceConfigMapName,
+                    key: 'mongo'
+                  }
+                }
+              },
+              {
+                name: 'MONGO_COLLECTION',
+                valueFrom: {
+                  configMapKeyRef: {
+                    name: sourceConfigMapName,
+                    key: 'MONGO_COLLECTION'
+                  }
+                }
+              },
+              {
+                name: 'MONGO_TREATMENTS_COLLECTION',
+                valueFrom: {
+                  configMapKeyRef: {
+                    name: sourceConfigMapName,
+                    key: 'MONGO_TREATMENTS_COLLECTION'
+                  }
+                }
+              },
+              // Target: Gen4 app-credentials Secret with complete MongoDB URI
+              {
+                name: 'MIGRATION_TARGET_URI',
+                valueFrom: {
+                  secretKeyRef: {
+                    name: targetSecretName,
+                    key: 'MONGODB_URI'
+                  }
+                }
+              },
+              // Migration configuration
+              { name: 'MIGRATION_METHOD', value: migrationMethod },
+              { name: 'STORAGE_ACCOUNT', value: storageAccount },
+              { name: 'TENANT_ID', value: tenantId }
+            ],
+            command: config.commands.migration,
+            resources: {
+              requests: {
+                cpu: config.resources?.nsUtility?.cpuRequest || '100m',
+                memory: config.resources?.nsUtility?.memRequest || '256Mi'
+              },
+              limits: {
+                cpu: config.resources?.nsUtility?.cpuLimit || '500m',
+                memory: config.resources?.nsUtility?.memLimit || '512Mi'
+              }
+            }
+          }]
+        }
+      }
+    }
+  };
+}
+
+
+module.exports = { createStorageCredentialsDecoratorSync };

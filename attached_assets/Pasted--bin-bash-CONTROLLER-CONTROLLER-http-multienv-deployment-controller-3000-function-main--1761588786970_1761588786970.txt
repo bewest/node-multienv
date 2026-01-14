@@ -1,0 +1,201 @@
+#!/bin/bash
+
+CONTROLLER=${CONTROLLER-'http://multienv-deployment-controller:3000'}
+
+function main () {
+  op=${1-'help'}
+  
+  case $op in
+    bash)
+      shift
+      exec "$@"
+      ;;
+    help)
+      display_help
+      ;;
+    label)
+      add_label "$2" "$3" "$4"
+      ;;
+    check-label)
+      check_label "$2" "$3" "$4"
+      ;;
+    remove-label)
+      remove_label "$2" "$3"
+      ;;
+    check-srv)
+      check_srv "$2"
+      ;;
+    remove-from-runners)
+      remove_from_runners "$2"
+      ;;
+    get-deployment)
+      get_deployment "$2"
+      ;;
+    list_configmaps)
+      shift
+      list_configmaps $@
+      ;;
+    migrate_2024_deployable_tenant)
+      shift
+      migrate_2024_deployable_tenant $@
+      ;;
+    rollback_2024_deployable_tenant)
+      shift
+      rollback_2024_deployable_tenant "$@"
+      ;;
+    wait_for_srv_record)
+      shift
+      wait_for_srv_record "$@"
+      ;;
+    *)
+      echo "Invalid operation: $op"
+      display_help
+      exit 1
+      ;;
+  esac
+}
+
+function display_help() {
+  cat <<EOF
+Usage: $0 <operation> [args...]
+Operations:
+  bash               Start a bash shell
+  help               Display this help message
+  label              Add or update a label on a ConfigMap for a tenant
+  check-label        Check if a label exists and matches the expected value
+  remove-label       Remove a label from a ConfigMap
+  check-srv          Check SRV records in Consul for a tenant
+  remove-from-runners Remove a tenant environment from legacy runners
+  get-deployment     Retrieve the deployment configuration for a tenant
+  list_configmaps    List ConfigMaps matching a label selector
+  migrate_2024_deployable_tenant Migrate a tenant to a Kubernetes deployment
+  rollback_2024_deployable_tenant Roll back a tenant to the legacy runner
+	wait_for_srv_record Wait until the number of srv records matches arg2.
+
+EOF
+}
+
+function add_label() {
+  local tenant="$1"
+  local label="$2"
+  local value="$3"
+  [[ -z "$tenant" || -z "$label" ]] && echo "missing argument" && exit 1
+  curl -s -d "$label=$value" "$CONTROLLER/configmaps/$tenant/metadata/labels/$label" | json
+}
+
+function check_label() {
+  local tenant="$1"
+  local label="$2"
+  local expect="$3"
+  local value=$(curl -s "$CONTROLLER/configmaps/$tenant/metadata/labels/$label" | json -a)
+  echo "$value"
+  [[ -n "$expect" && "$expect" != "$value" ]] && exit 1 || exit 0
+  [[ -z "$value" ]] && exit 1
+}
+
+function remove_label() {
+  local tenant="$1"
+  local label="$2"
+  [[ -z "$tenant" || -z "$label" ]] && echo "missing argument" && exit 1
+  curl -s -X DELETE "$CONTROLLER/configmaps/$tenant/metadata/labels/$label" | json
+}
+
+function check_srv() {
+  local tenant="$1"
+  dig +short "$tenant.backends.service.consul" SRV | sort | uniq
+}
+
+function remove_from_runners() {
+  local tenant="$1"
+  curl -s -X DELETE "runners-[0-$(count_clusters)].runners:3000/environs/$tenant" | json
+}
+
+function get_deployment() {
+  local tenant="$1"
+  curl -s "$CONTROLLER/deployments/$tenant" | json
+}
+
+function list_configmaps() {
+  local labelSelector="$1"
+  curl -s "$CONTROLLER/configmaps?labelSelector=$labelSelector" \
+    | json -a response.body.items | json -a metadata.name
+}
+
+# Function to wait for SRV record count to match expected count
+function wait_for_srv_record() {
+  tenant=$1
+  expected_count=$2
+  max_retries=30
+  retries=0
+
+  echo "Waiting for SRV records to update for $tenant..."
+  while true; do
+    srv_count=$(check_srv $tenant | wc -l)
+    if [ "$srv_count" -eq "$expected_count" ]; then
+      echo "SRV records updated for $tenant. Expected count: $expected_count, Actual count: $srv_count"
+      break
+    else
+      echo "Current SRV record count: $srv_count. Waiting for update..."
+      sleep 2
+      ((retries++))
+      if [ "$retries" -ge "$max_retries" ]; then
+        echo "Timed out waiting for SRV record update."
+        exit 1
+      fi
+    fi
+  done
+}
+
+
+function ensure_tenant_migratable ( ) {
+  local tenant="$1"
+  add_label $tenant tenant $tenant
+
+}
+
+function migrate_2024_deployable_tenant ( ) {
+  local tenant="$1"
+  local from="$2"
+  local dest="$3"
+	current_tally=$(check_srv $tenant | wc -l)
+  added_tally_expected=$(($current_tally + 1))
+  ensure_tenant_migratable $tenant
+  add_label $tenant role config-as-deploy
+  wait_for_srv_record $tenant $added_tally_expected
+  add_label $tenant app deployment
+}
+
+function rollback_2024_deployable_tenant ( ) {
+  local tenant="$1"
+  local from="$2"
+  local dest="$3"
+	current_tally=$(check_srv $tenant | wc -l)
+  added_tally_expected=$(($current_tally + 1))
+  add_label $tenant app tenant
+  wait_for_srv_record $tenant $added_tally_expected
+  add_label $tenant role legacy
+}
+
+function migrate_batches ( ) {
+  local prefix=$1
+  mkdir dones
+  for batch in $prefix ; do
+    migrate_batch $batch
+  done
+
+}
+
+function migrate_batch ( ) {
+  local batch=$1
+  echo STARTING BATCH $batch $(wc -l $batch)
+  cat $batch | while read tenant; do
+    migrate_2024_deployable_tenant $tenant
+  done
+  echo FINISHED batch $batch $(wc -l $batch)
+  mv $batch dones/
+  echo "SLEEPING 30 seconds after batch"
+  sleep 30
+}
+
+
+main "$@"

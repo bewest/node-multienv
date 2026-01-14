@@ -1,0 +1,176 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: computeinstances.nightscout.io
+spec:
+  group: nightscout.io
+  names:
+    kind: ComputeInstance
+    plural: computeinstances
+    singular: computeinstance
+    shortNames:
+      - ci
+  scope: Namespaced
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      schema:
+        openAPIV3Schema:
+          type: object
+          required:
+            - spec
+            - metadata
+          properties:
+            apiVersion:
+              type: string
+            kind:
+              type: string
+            metadata:
+              type: object
+            spec:
+              type: object
+              required:
+                - storageAccountRef
+              properties:
+                selector:
+                  type: object
+                  description: Label selector for resources managed by this ComputeInstance
+                  properties:
+                    matchLabels:
+                      type: object
+                      additionalProperties:
+                        type: string
+                      description: Map of label key-value pairs that must match
+                    matchExpressions:
+                      type: array
+                      description: List of label selector requirements
+                      items:
+                        type: object
+                        required:
+                          - key
+                          - operator
+                        properties:
+                          key:
+                            type: string
+                          operator:
+                            type: string
+                            enum: [In, NotIn, Exists, DoesNotExist]
+                          values:
+                            type: array
+                            items:
+                              type: string
+                storageAccountRef:
+                  type: object
+                  description: Reference to StorageAccount for database connection
+                  required:
+                    - name
+                  properties:
+                    name:
+                      type: string
+                image:
+                  type: string
+                  description: Nightscout container image
+                replicas:
+                  type: integer
+                  default: 1
+                  minimum: 0
+                  description: Number of Nightscout pod replicas
+                tier:
+                  type: string
+                  description: Tenant tier for resource allocation (references ConfigMap)
+                resources:
+                  type: object
+                  description: Nightscout pod resource requests/limits
+                  properties:
+                    requests:
+                      type: object
+                      additionalProperties:
+                        type: string
+                    limits:
+                      type: object
+                      additionalProperties:
+                        type: string
+                cdc:
+                  type: object
+                  description: Change Data Capture configuration
+                  properties:
+                    enabled:
+                      type: boolean
+                      default: false
+                    kafkaTopic:
+                      type: string
+                healthcheck:
+                  type: object
+                  description: Health check sidecar configuration
+                  properties:
+                    enabled:
+                      type: boolean
+                      default: false
+                env:
+                  type: array
+                  description: Additional environment variables
+                  items:
+                    type: object
+                    properties:
+                      name:
+                        type: string
+                      value:
+                        type: string
+                      valueFrom:
+                        type: object
+            status:
+              type: object
+              properties:
+                observedGeneration:
+                  type: integer
+                  description: Generation observed by controller
+                phase:
+                  type: string
+                  description: Current phase (Pending, Provisioning, Ready, Failed)
+                conditions:
+                  type: array
+                  description: Kubernetes-standard status conditions
+                  items:
+                    type: object
+                    required:
+                      - type
+                      - status
+                    properties:
+                      type:
+                        type: string
+                      status:
+                        type: string
+                        enum: [True, False, Unknown]
+                      reason:
+                        type: string
+                      message:
+                        type: string
+                      lastTransitionTime:
+                        type: string
+                        format: date-time
+                appCredentialsSecret:
+                  type: string
+                  description: Name of Secret containing application MongoDB credentials
+                endpoints:
+                  type: object
+                  description: Nightscout application endpoints
+                  properties:
+                    public:
+                      type: string
+                    internal:
+                      type: string
+                orphanedResources:
+                  type: array
+                  description: Resources matching selector but not owned by this ComputeInstance
+                  items:
+                    type: object
+                    properties:
+                      kind:
+                        type: string
+                      name:
+                        type: string
+                      namespace:
+                        type: string

@@ -1,0 +1,40 @@
+apiVersion: metacontroller.k8s.io/v1alpha1
+kind: CompositeController
+metadata:
+  name: nightscout-tenant-controller
+spec:
+  generateSelector: true
+  parentResource:
+    apiVersion: v1
+    resource: configmaps
+    labelSelector:
+      matchLabels:
+        ns.mdn.io/enabled: "true"
+    revisionHistory:
+      fieldPaths:
+        - data
+  childResources:
+    - apiVersion: v1
+      resource: secrets
+    - apiVersion: v1
+      resource: services
+    - apiVersion: apps/v1
+      resource: statefulsets
+    - apiVersion: apps/v1
+      resource: deployments
+    - apiVersion: policy/v1
+      resource: poddisruptionbudgets
+    - apiVersion: kafka.strimzi.io/v1beta2
+      resource: kafkatopics
+    - apiVersion: kafka.strimzi.io/v1beta2
+      resource: kafkaconnectors
+  hooks:
+    sync:
+      webhook:
+        url: http://webhook-service.default.svc.cluster.local:3000/composite/sync
+        timeout: 30s
+    finalize:
+      webhook:
+        url: http://webhook-service.default.svc.cluster.local:3000/composite/finalize
+        timeout: 30s
+  resyncPeriodSeconds: 30

@@ -1,0 +1,40 @@
+modules = ["nodejs-20", "web", "bash"]
+run = "npm run start"
+
+[nix]
+channel = "stable-24_05"
+packages = ["python3", "tanka", "go-jsonnet"]
+
+[deployment]
+run = ["sh", "-c", "npm run start"]
+
+[agent]
+expertMode = true
+
+[workflows]
+runButton = "Project"
+
+[[workflows.workflow]]
+name = "Project"
+mode = "parallel"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "Webhook Server"
+
+[[workflows.workflow]]
+name = "Webhook Server"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "npm run webhook"
+waitForPort = 3000
+
+[workflows.workflow.metadata]
+outputType = "console"
+
+[[ports]]
+localPort = 3000
+externalPort = 3000

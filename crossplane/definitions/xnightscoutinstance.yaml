@@ -1,0 +1,37 @@
+
+apiVersion: apiextensions.crossplane.io/v1
+kind: CompositeResourceDefinition
+metadata:
+  name: xnightscoutinstances.nightscout.crossplane.io
+spec:
+  group: nightscout.crossplane.io
+  names:
+    kind: XNightscoutInstance
+    plural: xnightscoutinstances
+    singular: xnightscoutinstance
+  claimNames:
+    kind: NightscoutInstance
+    plural: nightscoutinstances
+  versions:
+    - name: v1alpha1
+      served: true
+      referenceable: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              properties:
+                parameters:
+                  type: object
+                  properties:
+                    WEB_NAME:
+                      type: string
+                      description: "The unique name for this Nightscout instance"
+                    storageSize:
+                      type: string
+                      default: "2Gi"
+                      description: "Size of persistent storage for MongoDB"
+                  required:
+                    - WEB_NAME

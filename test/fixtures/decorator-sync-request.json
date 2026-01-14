@@ -1,0 +1,34 @@
+{
+  "controller": {
+    "metadata": {
+      "name": "pvc-backup-decorator"
+    }
+  },
+  "object": {
+    "apiVersion": "v1",
+    "kind": "PersistentVolumeClaim",
+    "metadata": {
+      "name": "data-demo-mongo-0",
+      "namespace": "hosted-tenants",
+      "labels": {
+        "app.kubernetes.io/name": "mongodb",
+        "app.kubernetes.io/component": "database",
+        "app.kubernetes.io/part-of": "nightscout-tenant",
+        "app.kubernetes.io/instance": "demo",
+        "app.kubernetes.io/managed-by": "metacontroller",
+        "ns.mdn.io/tenant": "demo"
+      },
+      "annotations": {}
+    },
+    "spec": {
+      "accessModes": ["ReadWriteOnce"],
+      "resources": {
+        "requests": {
+          "storage": "10Gi"
+        }
+      },
+      "storageClassName": "standard"
+    }
+  },
+  "attachments": []
+}

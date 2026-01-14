@@ -1,0 +1,126 @@
+local multienv = (import 'multienv.libsonnet');
+local nodelocal = (import 'nodelocal.libsonnet');
+local metacontroller = (import 'metacontroller/metacontroller.libsonnet');
+local upgrades = (import 'lib-k8s-multienv/gen4.libsonnet');
+local config = (import 'lib-k8s-multienv/config.libsonnet');
+local consul = (import 'consul/custom.libsonnet');
+local spekt8 = (import 'spekt8/spekt8.libsonnet');
+{
+  _config+:: {
+    make_more_efficient: true
+  },
+  consul: consul {
+
+  },
+  gen4upgrades: {
+    _config+:: {
+      gen4+:: {
+        enabled: true,
+        webhook_name: 'multienv-metactl-webhooks',
+        webhook_replicas: 3,
+        storage_resync_seconds: 60,
+        compute_resync_seconds: 60,
+      }
+    },
+  } + config,
+  nodelocal: nodelocal {
+    _config+:: {
+      localIP: '169.254.20.10',
+      upstreamServers: ['10.245.0.10'],
+    }
+  },
+  metacontroller: metacontroller {
+  },
+  multienv: multienv {
+    _images+:: {
+      multienv: 'registry.digitalocean.com/staget1pal0/multienv:latest',
+
+    },
+    _config+:: {
+      workload: 'clone_nightscout',
+      registry_name: 'registry-staget1pal0',
+      imagePullSecrets: [
+        'registry-staget1pal0',
+        'staging-multienv-01',
+        'staging-multienv-02',
+      ],
+      limit_tenants_per_runner: true,
+      // 2Gb / 30 tenants = 0.066G/tenant
+      max_tenants_per_runner: '60',
+      memory_limit: '3.2Gi',
+      cpu_request: '1000m',
+      memory_request: '2.1Gi',
+      num_runners: 0,
+      num_green_runners: 0,
+      demuxer_search_tenant_cluster_tag: true,
+      use_deployment_controller: true,
+      use_metacontroller_crds: true,
+      use_deployment_operator: false,
+      combined_backends_resolvers: $._config.make_more_efficient,
+      use_nodelocal_dns: $._config.make_more_efficient,
+      MULTIENV_HEALTH_CHECK_SERVICE: (if $._config.make_more_efficient then 'http://multienv-deployment-controller.service.consul.:3000/' else 'http://multienv-deployment-controller:3000/'),
+      // combined_backends_resolvers: true,
+      // use_nodelocal_dns: true,
+      tenant_nodepool_target: 'bigger-tenant-runners',
+      ips: {
+        // consul: '10.244.3.133',
+        consul: 'hashicorp-consul-server.default.svc.cluster.local',
+        nodelocal: $.nodelocal._config.localIP,
+        kubedns: '10.245.0.10',
+      },
+    },
+    green: {
+      nginx_demuxers_green: multienv.nginx_demuxers.new('clusters-green', 3, 'cluster-green'),
+      nginx_demuxer_service_green: multienv.util.serviceFor(self.nginx_demuxers_green) +
+                                   {},
+      runners_container_green:: $.multienv.multienv_runners.spec.template.spec.containers[0] + multienv.core.v1.container.withEnvMap({ CLUSTER_SERVICE_NAME: 'cluster-green' }),
+      runners_green: $.multienv.multienv_runners.new('runners-green', $.multienv._config.num_green_runners) +
+                     { spec+: {
+                       template+: { spec+: { containers: [$.multienv.green.runners_container_green] } },
+                       serviceName: 'runners-green',
+                     } },
+
+      multienv_dispatcher_config_green: $.multienv.multienv_dispatcher_config.new('multienv-dispatcher-config-green', 'clusters-green.default.svc.cluster.local'),
+      multienv_dispatcher_container_green:: $.multienv.multienv.containers.dispatcher.new('multienv-dispatcher-green', self.multienv_dispatcher_config_green, $.multienv._config.dispatcher_parallel_updates),
+      multienv_dispatcher_green: $.multienv.multienv_dispatcher.new('multienv-dispatcher-green', 0, [self.multienv_dispatcher_container_green]),
+      multienv_runners_service_green: $.multienv.util.serviceFor(self.runners_green) +
+                                      { spec+: { clusterIP: 'None' } },
+
+
+    },
+    /*
+    */
+    green_disruption: {
+      apiVersion: 'policy/v1',
+      kind: 'PodDisruptionBudget',
+      metadata: {
+        name: 'green-runners-disruption',
+      },
+      spec: {
+        // maxUnavailable: 1,
+        minAvailable: 3,
+        selector: {
+          matchLabels: {
+            name: 'runners-green',
+          },
+        },
+      },
+    },
+    runners_disruption: {
+      apiVersion: 'policy/v1',
+      kind: 'PodDisruptionBudget',
+      metadata: {
+        name: 'runners-disruption',
+      },
+      spec: {
+        // maxUnavailable: 1,
+        minAvailable: 3,
+        selector: {
+          matchLabels: {
+            name: 'runners',
+          },
+        },
+      },
+    },
+  }
+} // + spekt8 { }

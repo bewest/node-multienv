@@ -1,0 +1,108 @@
+What we’re adding
+
+Controllers (via Metacontroller)
+	1.	CompositeController (parent = labeled ConfigMap)
+Renders all tenant resources:
+	•	Nightscout Deployment + Service
+	•	Mongo StatefulSet (1-replica RS) + headless Service
+	•	PodDisruptionBudgets, optional NetworkPolicy
+	•	Strimzi KafkaTopics (ns.<tenant>.entries, ns.<tenant>.treatments, dlq.ns.<tenant>)
+	•	Strimzi KafkaConnector (Mongo Source) per tenant (created only after Mongo is ready)
+	2.	DecoratorController (targets PVCs for tenant Mongo)
+	•	Adds backup annotations and a custom finalizer mdn.io/backup-protect
+	•	On delete: orchestrates VolumeSnapshot (and optional logical dump), then removes the finalizer
+
+⸻
+
+Webhook endpoints (single Node/Express app)
+	•	POST /composite/sync – render children (NS, Mongo, Topics, Connector)
+	•	POST /composite/finalize – pause & delete connector; optionally scale NS to 0
+	•	POST /decorator/sync – inject PVC annotations + finalizer
+	•	POST /decorator/finalize – snapshot/backup → remove PVC finalizer
+
+Repo: /cmd/webhook/ (Node/Express + @kubernetes/client-node)
+K8s manifests: /k8s/metactl/ (Composite & Decorator CRDs)
+Docs/Runbooks: /docs/ (how to test, SLOs, rollback)
+
+⸻
+
+Parent contract (ConfigMap → tenant spec)
+
+Selector: metadata.labels.ns.mdn.io/enabled: "true"
+Expected keys in data:
+	•	TENANT_ID: e.g., tenantA
+	•	NS_IMAGE: container image for Nightscout
+	•	MONGO_STORAGE_GI: e.g., "10"
+	•	MONGO_SC: storageClass, e.g., fast-encrypted
+	•	CDC knobs:
+	•	CDC_ENABLED: "true|false"
+	•	CDC_COLLECTIONS: "entries,treatments"
+	•	CDC_PARTITIONS_ENTRIES: "3"
+	•	CDC_PARTITIONS_TREATMENTS: "1"
+	•	CDC_RETENTION_MS: "604800000" (7d)
+	•	CDC_URI_KEY (if using Strimzi external config for Mongo URI): e.g., tenantA.uri
+
+⸻
+
+Children rendered by Composite /sync
+	1.	Secret ns-mongo-auth (user/pass; or mount external if you use certs/TLS)
+	2.	Service ns-mongo (headless)
+	3.	StatefulSet ns-mongo (replicas: 1)
+	•	volumeClaimTemplates (name: data, size: MONGO_STORAGE_GI, storageClassName: MONGO_SC)
+	•	initContainer runs rs.initiate() on first boot
+	4.	Deployment nightscout + Service nightscout
+	•	MONGO_CONNECTION env → mongodb://$(MONGO_USER):$(MONGO_PASS)@ns-mongo-0.ns-mongo:27017/ns?replicaSet=rs0
+	5.	PDBs for Mongo and Nightscout
+	6.	KafkaTopic CRs (Strimzi) – partitions/retention from ConfigMap
+	7.	KafkaConnector CR (Strimzi) – only when Mongo is Ready
+	•	class: com.mongodb.kafka.connect.MongoSourceConnector
+	•	connection.uri: inline or ${file:/opt/kafka/external-configuration/.../{{TENANT}}.uri}
+	•	pipeline: match allowed collections
+	•	topic.namespace.map: route ns.entries → ns.<tenant>.entries, etc.
+	•	errors.deadletterqueue.topic.name: dlq.ns.<tenant>
+
+Mongo readiness gate:
+	•	Wait for Mongo pod Ready==True (or set an RS-init status bit on first success) before emitting the KafkaConnector.
+
+Status fields set on parent (ConfigMap.status)
+	•	.status.mongo.ready: bool
+	•	.status.connector.name/state (read from Strimzi KafkaConnector.status if available)
+
+⸻
+
+Composite /finalize (tenant deletion flow)
+	1.	Patch KafkaConnector spec.pause: true → resync until tasks idle (or a few cycles)
+	2.	Delete KafkaConnector child
+	3.	Optionally scale nightscout Deployment to 0 (quiesce writes)
+	4.	Return (PVC deletion is gated by Decorator /finalize)
+
+⸻
+
+Decorator targets (PVC policy & retention)
+
+Selection: PersistentVolumeClaim with labels:
+app.kubernetes.io/name=ns-mongo, app.kubernetes.io/part-of=nightscout-tenant
+
+/decorator/sync
+	•	Ensure finalizer mdn.io/backup-protect present
+	•	Default annotations if missing:
+	•	ns.mdn.io/backup-policy: "snapshot" (snapshot|snapshot+logical|skip)
+	•	ns.mdn.io/backup-ttl: "30d"
+
+/decorator/finalize
+	•	If policy skip: return { finalizers: [] }
+	•	Else:
+	1.	Ensure a VolumeSnapshot exists for this PVC (create if missing)
+	2.	Wait until status.readyToUse == true
+	3.	(Optional) ensure a one-shot Job (logical dump) Succeeded
+	4.	Return { finalizers: [] } (removes mdn.io/backup-protect → PVC can delete)
+
+⸻
+
+Strimzi integration (once per cluster)
+	•	Kafka (or Redpanda) cluster + KafkaConnect CR (e.g., connect-cluster)
+	•	strimzi.io/use-connector-resources: "true" on KafkaConnect
+	•	Mongo Source connector plugin available to Connect
+	•	(Recommended) externalConfiguration.volumes to mount a Secret with per-tenant Mongo URIs
+
+Example connector snippet (externalized URI)

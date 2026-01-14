@@ -1,0 +1,162 @@
+
+
+const objectId = require('./object-id.js');
+const dnsFriendlyUID = require('./dns-friendly-uid.js');
+
+function record (store, wpid, name) {
+
+  var key = objectId( );
+  var internal_name = dnsFriendlyUID( );
+  var fields = {
+    key: key.toString( ),
+    wp_subscriber_id: wpid,
+    name: name,
+    compute: internal_name
+  };
+  return store('ResourceTrace').insert(fields)
+    .then(function ( ) {
+      return fetch(store, key);
+    });
+}
+
+function remove (store, key) {
+  return store('ResourceTrace')
+    .update({ lifecycle: 'removed', name: objectId() })
+    .where('key', key)
+    ;
+}
+
+function assign (store, key, updates) {
+  return store('ResourceTrace')
+    .where({key:  key})
+    .update(updates);
+    ;
+}
+
+function fetch (store, key) {
+  return store('ResourceTrace')
+    .where('key', key)
+    .first( )
+    .select('key', 'wp_subscriber_id', 'name', 'storage', 'compute', 'lifecycle', 'created_at', 'updated_at')
+    ;
+}
+
+function fetch_by_user (store, wpid) {
+  return store('ResourceTrace')
+    .where('wp_subscriber_id', wpid)
+    .select('key', 'wp_subscriber_id', 'name', 'storage', 'compute', 'lifecycle', 'created_at', 'updated_at')
+    ;
+}
+
+function fetch_by_compute (store, compute) {
+  return store('ResourceTrace')
+    .where('compute', compute)
+    .first( )
+    .select('key', 'wp_subscriber_id', 'name', 'storage', 'compute', 'lifecycle', 'created_at', 'updated_at')
+    ;
+}
+
+function fetch_by_nick (store, wpid, nick) {
+  return store('ResourceTrace')
+    .where({'wp_subscriber_id': wpid, name: nick })
+    .select('key', 'wp_subscriber_id', 'name', 'storage', 'compute', 'lifecycle', 'created_at', 'updated_at')
+    .first( )
+    ;
+}
+
+function resource (ctx) {
+  function api (ctx) {
+    // return resource(ctx);
+  };
+  
+  api.regenerate = async function (result, next) {
+    var opts = {
+      'name': result.compute,
+      'internal_name': result.compute,
+      'api_secret': objectId( ),
+      'INSECURE_USE_HTTP': true
+    };
+    await ctx.provisioner.post('/accounts/' + result.storage + '/sites', opts, function (err, req, res, site) {
+      console.log("REGENERATE PROVISIONER", err, res.body, site);
+      return assign(ctx.store, result.key, {lifecycle: 'active'}).then(function () {
+        return fetch(ctx.store, result.key).then(next);
+      });
+    });
+  }
+
+  api.repair_missing_storage = async function (result, next) {
+    return ctx.provisioner.post('/accounts', { }, function (err, req, res, obj) {
+      var opts = {
+        'name': result.compute,
+        'internal_name': result.compute,
+        'api_secret': objectId( ),
+        'INSECURE_USE_HTTP': true
+      };
+      return ctx.provisioner.post('/accounts/' + obj.account + '/sites', opts, function (err, req, res, site) {
+        return assign(ctx.store, result.key, {storage: obj.account, lifecycle: 'created'}).then(async function ( ) {
+          return fetch(ctx.store, result.key).then(next);
+        });
+      });
+    });
+  }
+
+  api.record = async function (wpid, name, next) {
+    await ctx.provisioner.post('/accounts', { }, function (err, req, res, obj) {
+      
+      console.log("provisioner result", obj);
+      return record(ctx.store, wpid, name).then(function (result) {
+        console.log("sqlit insert RESULT", result, arguments);
+        return assign(ctx.store, result.key, {storage: obj.account, lifecycle: 'created'}).then(async function ( ) {
+          var opts = {
+            'name': result.compute,
+            'internal_name': result.compute,
+            'api_secret': objectId( ),
+            'INSECURE_USE_HTTP': true
+          };
+          await ctx.provisioner.post('/accounts/' + obj.account + '/sites', opts, function (err, req, res, site) {
+            return assign(ctx.store, result.key, {lifecycle: 'active'}).then(function () {
+              return fetch(ctx.store, result.key).then(next);
+            });
+          });
+        });
+      });
+    });
+  }
+
+  api.fetch = function (key, done) {
+    return fetch(ctx.store, key);
+  }
+
+  api.remove = function (key, done) {
+    return remove(ctx.store, key);
+  }
+
+
+  api.fetch_by_user = function (wpid, done) {
+    return fetch_by_user(ctx.store, wpid);
+  }
+
+  api.fetch_by_compute = function (compute, done) {
+    return fetch_by_compute(ctx.store, compute);
+  }
+
+  api.fetch_by_nick = function (wpid, nick, done) {
+    return fetch_by_nick(ctx.store, wpid, nick);
+  }
+
+  return api;
+}
+
+module.exports = exports = resource;
+
+if (!module.parent) {
+
+
+  console.log(dnsFriendlyUID( ));
+  console.log(dnsFriendlyUID( ));
+  console.log(dnsFriendlyUID( ));
+  console.log(dnsFriendlyUID( ));
+  console.log(objectId( ));
+
+}
+

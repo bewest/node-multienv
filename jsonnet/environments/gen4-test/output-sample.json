@@ -1,0 +1,964 @@
+{
+  "advanced_rbac": {
+    "healthcheck_binding": {
+      "apiVersion": "rbac.authorization.k8s.io/v1",
+      "kind": "ClusterRoleBinding",
+      "metadata": {
+        "name": "consul-healthcheck"
+      },
+      "roleRef": {
+        "apiGroup": "rbac.authorization.k8s.io",
+        "kind": "ClusterRole",
+        "name": "consul-healthcheck"
+      },
+      "subjects": [
+        {
+          "kind": "ServiceAccount",
+          "name": "consul-healthcheck",
+          "namespace": "default"
+        }
+      ]
+    },
+    "healthcheck_role": {
+      "apiVersion": "rbac.authorization.k8s.io/v1",
+      "kind": "ClusterRole",
+      "metadata": {
+        "name": "consul-healthcheck"
+      },
+      "rules": [
+        {
+          "apiGroups": [
+            ""
+          ],
+          "resources": [
+            "configmaps",
+            "services",
+            "endpoints",
+            "pods"
+          ],
+          "verbs": [
+            "get",
+            "list",
+            "watch"
+          ]
+        },
+        {
+          "apiGroups": [
+            "apps"
+          ],
+          "resources": [
+            "deployments",
+            "statefulsets"
+          ],
+          "verbs": [
+            "get",
+            "list",
+            "watch"
+          ]
+        }
+      ]
+    },
+    "healthcheck_sa": {
+      "apiVersion": "v1",
+      "kind": "ServiceAccount",
+      "metadata": {
+        "name": "consul-healthcheck",
+        "namespace": "default"
+      }
+    },
+    "provisioner_binding": {
+      "apiVersion": "rbac.authorization.k8s.io/v1",
+      "kind": "ClusterRoleBinding",
+      "metadata": {
+        "name": "deployment-server"
+      },
+      "roleRef": {
+        "apiGroup": "rbac.authorization.k8s.io",
+        "kind": "ClusterRole",
+        "name": "deployment-server"
+      },
+      "subjects": [
+        {
+          "kind": "ServiceAccount",
+          "name": "deployment-server",
+          "namespace": "default"
+        }
+      ]
+    },
+    "provisioner_role": {
+      "apiVersion": "rbac.authorization.k8s.io/v1",
+      "kind": "ClusterRole",
+      "metadata": {
+        "name": "deployment-server"
+      },
+      "rules": [
+        {
+          "apiGroups": [
+            ""
+          ],
+          "resources": [
+            "configmaps"
+          ],
+          "verbs": [
+            "get",
+            "list",
+            "watch",
+            "create",
+            "update",
+            "patch",
+            "delete"
+          ]
+        },
+        {
+          "apiGroups": [
+            ""
+          ],
+          "resources": [
+            "secrets"
+          ],
+          "verbs": [
+            "get",
+            "list",
+            "watch",
+            "create",
+            "update",
+            "patch",
+            "delete"
+          ]
+        },
+        {
+          "apiGroups": [
+            ""
+          ],
+          "resources": [
+            "services",
+            "pods"
+          ],
+          "verbs": [
+            "get",
+            "list",
+            "watch"
+          ]
+        },
+        {
+          "apiGroups": [
+            "apps"
+          ],
+          "resources": [
+            "deployments",
+            "statefulsets"
+          ],
+          "verbs": [
+            "get",
+            "list",
+            "watch"
+          ]
+        }
+      ]
+    },
+    "provisioner_sa": {
+      "apiVersion": "v1",
+      "kind": "ServiceAccount",
+      "metadata": {
+        "name": "deployment-server",
+        "namespace": "default"
+      }
+    },
+    "webhook_binding": {
+      "apiVersion": "rbac.authorization.k8s.io/v1",
+      "kind": "ClusterRoleBinding",
+      "metadata": {
+        "name": "webhook-metacontroller"
+      },
+      "roleRef": {
+        "apiGroup": "rbac.authorization.k8s.io",
+        "kind": "ClusterRole",
+        "name": "webhook-metacontroller"
+      },
+      "subjects": [
+        {
+          "kind": "ServiceAccount",
+          "name": "webhook-metacontroller",
+          "namespace": "default"
+        }
+      ]
+    },
+    "webhook_role": {
+      "apiVersion": "rbac.authorization.k8s.io/v1",
+      "kind": "ClusterRole",
+      "metadata": {
+        "name": "webhook-metacontroller"
+      },
+      "rules": [
+        {
+          "apiGroups": [
+            ""
+          ],
+          "resources": [
+            "configmaps",
+            "secrets",
+            "services",
+            "persistentvolumeclaims"
+          ],
+          "verbs": [
+            "get",
+            "list",
+            "watch",
+            "create",
+            "update",
+            "patch"
+          ]
+        },
+        {
+          "apiGroups": [
+            "apps"
+          ],
+          "resources": [
+            "deployments",
+            "statefulsets"
+          ],
+          "verbs": [
+            "get",
+            "list",
+            "watch",
+            "create",
+            "update",
+            "patch"
+          ]
+        },
+        {
+          "apiGroups": [
+            "policy"
+          ],
+          "resources": [
+            "poddisruptionbudgets"
+          ],
+          "verbs": [
+            "get",
+            "list",
+            "watch",
+            "create",
+            "update",
+            "patch"
+          ]
+        },
+        {
+          "apiGroups": [
+            "kafka.strimzi.io"
+          ],
+          "resources": [
+            "kafkatopics",
+            "kafkaconnectors"
+          ],
+          "verbs": [
+            "get",
+            "list",
+            "watch",
+            "create",
+            "update",
+            "patch"
+          ]
+        },
+        {
+          "apiGroups": [
+            "snapshot.storage.k8s.io"
+          ],
+          "resources": [
+            "volumesnapshots"
+          ],
+          "verbs": [
+            "get",
+            "list",
+            "watch",
+            "create",
+            "update",
+            "patch"
+          ]
+        },
+        {
+          "apiGroups": [
+            "batch"
+          ],
+          "resources": [
+            "jobs"
+          ],
+          "verbs": [
+            "get",
+            "list",
+            "watch",
+            "create",
+            "update",
+            "patch"
+          ]
+        }
+      ]
+    },
+    "webhook_sa": {
+      "apiVersion": "v1",
+      "kind": "ServiceAccount",
+      "metadata": {
+        "name": "webhook-metacontroller",
+        "namespace": "default"
+      }
+    }
+  },
+  "advanced_webhooks": {
+    "healthcheck": {
+      "deployment": {
+        "apiVersion": "apps/v1",
+        "kind": "Deployment",
+        "metadata": {
+          "labels": {
+            "app": "multienv-healthcheck"
+          },
+          "name": "multienv-healthcheck",
+          "namespace": "default"
+        },
+        "spec": {
+          "replicas": 10,
+          "selector": {
+            "matchLabels": {
+              "app": "multienv-healthcheck"
+            }
+          },
+          "template": {
+            "metadata": {
+              "labels": {
+                "app": "multienv-healthcheck"
+              }
+            },
+            "spec": {
+              "containers": [
+                {
+                  "env": [
+                    {
+                      "name": "PORT",
+                      "value": "3000"
+                    },
+                    {
+                      "name": "RUNTIME_MODE",
+                      "value": "healthcheck"
+                    }
+                  ],
+                  "image": "registry.digitalocean.com/staget1pal0/multienv:latest",
+                  "livenessProbe": {
+                    "httpGet": {
+                      "path": "/health",
+                      "port": 3000
+                    },
+                    "initialDelaySeconds": 10,
+                    "periodSeconds": 10
+                  },
+                  "name": "webhook",
+                  "ports": [
+                    {
+                      "containerPort": 3000,
+                      "name": "http"
+                    }
+                  ],
+                  "readinessProbe": {
+                    "httpGet": {
+                      "path": "/health",
+                      "port": 3000
+                    },
+                    "initialDelaySeconds": 5,
+                    "periodSeconds": 5
+                  },
+                  "resources": {
+                    "limits": {
+                      "cpu": "200m",
+                      "memory": "256Mi"
+                    },
+                    "requests": {
+                      "cpu": "50m",
+                      "memory": "64Mi"
+                    }
+                  }
+                }
+              ],
+              "serviceAccountName": "consul-healthcheck"
+            }
+          }
+        }
+      },
+      "service": {
+        "apiVersion": "v1",
+        "kind": "Service",
+        "metadata": {
+          "name": "multienv-healthcheck",
+          "namespace": "default"
+        },
+        "spec": {
+          "ports": [
+            {
+              "name": "http",
+              "port": 3000,
+              "targetPort": 3000
+            }
+          ],
+          "selector": {
+            "app": "multienv-healthcheck"
+          },
+          "type": "ClusterIP"
+        }
+      }
+    },
+    "provisioner": {
+      "deployment": {
+        "apiVersion": "apps/v1",
+        "kind": "Deployment",
+        "metadata": {
+          "labels": {
+            "app": "multienv-provisioner"
+          },
+          "name": "multienv-provisioner",
+          "namespace": "default"
+        },
+        "spec": {
+          "replicas": 3,
+          "selector": {
+            "matchLabels": {
+              "app": "multienv-provisioner"
+            }
+          },
+          "template": {
+            "metadata": {
+              "labels": {
+                "app": "multienv-provisioner"
+              }
+            },
+            "spec": {
+              "containers": [
+                {
+                  "env": [
+                    {
+                      "name": "PORT",
+                      "value": "3000"
+                    },
+                    {
+                      "name": "RUNTIME_MODE",
+                      "value": "provisioner"
+                    }
+                  ],
+                  "image": "registry.digitalocean.com/staget1pal0/multienv:latest",
+                  "livenessProbe": {
+                    "httpGet": {
+                      "path": "/health",
+                      "port": 3000
+                    },
+                    "initialDelaySeconds": 10,
+                    "periodSeconds": 10
+                  },
+                  "name": "webhook",
+                  "ports": [
+                    {
+                      "containerPort": 3000,
+                      "name": "http"
+                    }
+                  ],
+                  "readinessProbe": {
+                    "httpGet": {
+                      "path": "/health",
+                      "port": 3000
+                    },
+                    "initialDelaySeconds": 5,
+                    "periodSeconds": 5
+                  },
+                  "resources": {
+                    "limits": {
+                      "cpu": "1000m",
+                      "memory": "1Gi"
+                    },
+                    "requests": {
+                      "cpu": "200m",
+                      "memory": "256Mi"
+                    }
+                  }
+                }
+              ],
+              "serviceAccountName": "deployment-server"
+            }
+          }
+        }
+      },
+      "service": {
+        "apiVersion": "v1",
+        "kind": "Service",
+        "metadata": {
+          "name": "multienv-provisioner",
+          "namespace": "default"
+        },
+        "spec": {
+          "ports": [
+            {
+              "name": "http",
+              "port": 3000,
+              "targetPort": 3000
+            }
+          ],
+          "selector": {
+            "app": "multienv-provisioner"
+          },
+          "type": "ClusterIP"
+        }
+      }
+    },
+    "webhook": {
+      "deployment": {
+        "apiVersion": "apps/v1",
+        "kind": "Deployment",
+        "metadata": {
+          "labels": {
+            "app": "multienv-webhook"
+          },
+          "name": "multienv-webhook",
+          "namespace": "default"
+        },
+        "spec": {
+          "replicas": 2,
+          "selector": {
+            "matchLabels": {
+              "app": "multienv-webhook"
+            }
+          },
+          "template": {
+            "metadata": {
+              "labels": {
+                "app": "multienv-webhook"
+              }
+            },
+            "spec": {
+              "containers": [
+                {
+                  "env": [
+                    {
+                      "name": "PORT",
+                      "value": "3000"
+                    },
+                    {
+                      "name": "RUNTIME_MODE",
+                      "value": "webhook"
+                    }
+                  ],
+                  "image": "registry.digitalocean.com/staget1pal0/multienv:latest",
+                  "livenessProbe": {
+                    "httpGet": {
+                      "path": "/health",
+                      "port": 3000
+                    },
+                    "initialDelaySeconds": 10,
+                    "periodSeconds": 10
+                  },
+                  "name": "webhook",
+                  "ports": [
+                    {
+                      "containerPort": 3000,
+                      "name": "http"
+                    }
+                  ],
+                  "readinessProbe": {
+                    "httpGet": {
+                      "path": "/health",
+                      "port": 3000
+                    },
+                    "initialDelaySeconds": 5,
+                    "periodSeconds": 5
+                  },
+                  "resources": {
+                    "limits": {
+                      "cpu": "500m",
+                      "memory": "512Mi"
+                    },
+                    "requests": {
+                      "cpu": "100m",
+                      "memory": "128Mi"
+                    }
+                  }
+                }
+              ],
+              "serviceAccountName": "webhook-metacontroller"
+            }
+          }
+        }
+      },
+      "service": {
+        "apiVersion": "v1",
+        "kind": "Service",
+        "metadata": {
+          "name": "multienv-webhook",
+          "namespace": "default"
+        },
+        "spec": {
+          "ports": [
+            {
+              "name": "http",
+              "port": 3000,
+              "targetPort": 3000
+            }
+          ],
+          "selector": {
+            "app": "multienv-webhook"
+          },
+          "type": "ClusterIP"
+        }
+      }
+    }
+  },
+  "simple_deployment": {
+    "clusterRole": {
+      "apiVersion": "rbac.authorization.k8s.io/v1",
+      "kind": "ClusterRole",
+      "metadata": {
+        "name": "webhook-metacontroller"
+      },
+      "rules": [
+        {
+          "apiGroups": [
+            ""
+          ],
+          "resources": [
+            "configmaps",
+            "secrets",
+            "services",
+            "persistentvolumeclaims"
+          ],
+          "verbs": [
+            "get",
+            "list",
+            "watch",
+            "create",
+            "update",
+            "patch"
+          ]
+        },
+        {
+          "apiGroups": [
+            "apps"
+          ],
+          "resources": [
+            "deployments",
+            "statefulsets"
+          ],
+          "verbs": [
+            "get",
+            "list",
+            "watch",
+            "create",
+            "update",
+            "patch"
+          ]
+        },
+        {
+          "apiGroups": [
+            "policy"
+          ],
+          "resources": [
+            "poddisruptionbudgets"
+          ],
+          "verbs": [
+            "get",
+            "list",
+            "watch",
+            "create",
+            "update",
+            "patch"
+          ]
+        },
+        {
+          "apiGroups": [
+            "kafka.strimzi.io"
+          ],
+          "resources": [
+            "kafkatopics",
+            "kafkaconnectors"
+          ],
+          "verbs": [
+            "get",
+            "list",
+            "watch",
+            "create",
+            "update",
+            "patch"
+          ]
+        },
+        {
+          "apiGroups": [
+            "snapshot.storage.k8s.io"
+          ],
+          "resources": [
+            "volumesnapshots"
+          ],
+          "verbs": [
+            "get",
+            "list",
+            "watch",
+            "create",
+            "update",
+            "patch"
+          ]
+        },
+        {
+          "apiGroups": [
+            "batch"
+          ],
+          "resources": [
+            "jobs"
+          ],
+          "verbs": [
+            "get",
+            "list",
+            "watch",
+            "create",
+            "update",
+            "patch"
+          ]
+        }
+      ]
+    },
+    "clusterRoleBinding": {
+      "apiVersion": "rbac.authorization.k8s.io/v1",
+      "kind": "ClusterRoleBinding",
+      "metadata": {
+        "name": "webhook-metacontroller"
+      },
+      "roleRef": {
+        "apiGroup": "rbac.authorization.k8s.io",
+        "kind": "ClusterRole",
+        "name": "webhook-metacontroller"
+      },
+      "subjects": [
+        {
+          "kind": "ServiceAccount",
+          "name": "webhook-metacontroller",
+          "namespace": "default"
+        }
+      ]
+    },
+    "metacontroller": {
+      "compute": {
+        "apiVersion": "metacontroller.k8s.io/v1alpha1",
+        "kind": "CompositeController",
+        "metadata": {
+          "name": "compute-composite"
+        },
+        "spec": {
+          "childResources": [
+            {
+              "apiVersion": "apps/v1",
+              "resource": "deployments"
+            },
+            {
+              "apiVersion": "v1",
+              "resource": "services"
+            },
+            {
+              "apiVersion": "kafka.strimzi.io/v1beta2",
+              "resource": "kafkatopics"
+            },
+            {
+              "apiVersion": "kafka.strimzi.io/v1beta2",
+              "resource": "kafkaconnectors"
+            },
+            {
+              "apiVersion": "policy/v1",
+              "resource": "poddisruptionbudgets"
+            }
+          ],
+          "generateSelector": true,
+          "hooks": {
+            "sync": {
+              "webhook": {
+                "url": "http://gen4-webhooks.default.svc.cluster.local:3000/sync-compute"
+              }
+            }
+          },
+          "parentResource": {
+            "apiVersion": "v1",
+            "resource": "configmaps"
+          },
+          "resyncPeriodSeconds": 60
+        }
+      },
+      "pvcBackup": {
+        "apiVersion": "metacontroller.k8s.io/v1alpha1",
+        "kind": "DecoratorController",
+        "metadata": {
+          "name": "pvc-backup-decorator"
+        },
+        "spec": {
+          "hooks": {
+            "sync": {
+              "webhook": {
+                "url": "http://gen4-webhooks.default.svc.cluster.local:3000/sync-pvc-decorator"
+              }
+            }
+          },
+          "resources": [
+            {
+              "apiVersion": "v1",
+              "labelSelector": {
+                "matchLabels": {
+                  "app.kubernetes.io/component": "database"
+                }
+              },
+              "resource": "persistentvolumeclaims"
+            }
+          ],
+          "resyncPeriodSeconds": 120
+        }
+      },
+      "storage": {
+        "apiVersion": "metacontroller.k8s.io/v1alpha1",
+        "kind": "CompositeController",
+        "metadata": {
+          "name": "storage-composite"
+        },
+        "spec": {
+          "childResources": [
+            {
+              "apiVersion": "apps/v1",
+              "resource": "statefulsets"
+            },
+            {
+              "apiVersion": "v1",
+              "resource": "services"
+            },
+            {
+              "apiVersion": "v1",
+              "resource": "secrets"
+            },
+            {
+              "apiVersion": "batch/v1",
+              "resource": "jobs"
+            },
+            {
+              "apiVersion": "policy/v1",
+              "resource": "poddisruptionbudgets"
+            }
+          ],
+          "generateSelector": true,
+          "hooks": {
+            "sync": {
+              "webhook": {
+                "url": "http://gen4-webhooks.default.svc.cluster.local:3000/sync-storage"
+              }
+            }
+          },
+          "parentResource": {
+            "apiVersion": "v1",
+            "resource": "secrets"
+          },
+          "resyncPeriodSeconds": 60
+        }
+      }
+    },
+    "serviceAccount": {
+      "apiVersion": "v1",
+      "kind": "ServiceAccount",
+      "metadata": {
+        "name": "webhook-metacontroller",
+        "namespace": "default"
+      }
+    },
+    "webhook": {
+      "deployment": {
+        "apiVersion": "apps/v1",
+        "kind": "Deployment",
+        "metadata": {
+          "labels": {
+            "app": "gen4-webhooks"
+          },
+          "name": "gen4-webhooks",
+          "namespace": "default"
+        },
+        "spec": {
+          "replicas": 3,
+          "selector": {
+            "matchLabels": {
+              "app": "gen4-webhooks"
+            }
+          },
+          "template": {
+            "metadata": {
+              "labels": {
+                "app": "gen4-webhooks"
+              }
+            },
+            "spec": {
+              "containers": [
+                {
+                  "env": [
+                    {
+                      "name": "PORT",
+                      "value": "3000"
+                    },
+                    {
+                      "name": "RUNTIME_MODE",
+                      "value": "all"
+                    }
+                  ],
+                  "image": "registry.digitalocean.com/staget1pal0/multienv:latest",
+                  "livenessProbe": {
+                    "httpGet": {
+                      "path": "/health",
+                      "port": 3000
+                    },
+                    "initialDelaySeconds": 10,
+                    "periodSeconds": 10
+                  },
+                  "name": "webhook",
+                  "ports": [
+                    {
+                      "containerPort": 3000,
+                      "name": "http"
+                    }
+                  ],
+                  "readinessProbe": {
+                    "httpGet": {
+                      "path": "/health",
+                      "port": 3000
+                    },
+                    "initialDelaySeconds": 5,
+                    "periodSeconds": 5
+                  },
+                  "resources": {
+                    "limits": {
+                      "cpu": "500m",
+                      "memory": "512Mi"
+                    },
+                    "requests": {
+                      "cpu": "100m",
+                      "memory": "128Mi"
+                    }
+                  }
+                }
+              ],
+              "serviceAccountName": "webhook-metacontroller"
+            }
+          }
+        }
+      },
+      "service": {
+        "apiVersion": "v1",
+        "kind": "Service",
+        "metadata": {
+          "name": "gen4-webhooks",
+          "namespace": "default"
+        },
+        "spec": {
+          "ports": [
+            {
+              "name": "http",
+              "port": 3000,
+              "targetPort": 3000
+            }
+          ],
+          "selector": {
+            "app": "gen4-webhooks"
+          },
+          "type": "ClusterIP"
+        }
+      }
+    }
+  }
+}

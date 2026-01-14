@@ -1,0 +1,122 @@
+# Annotation-Driven Migration Example
+# Shows how to migrate from shared MongoDB to dedicated StatefulSet
+
+---
+# Step 1: Initial state - shared storage Secret
+# This is what the migration utility creates for existing 1300 sites
+
+apiVersion: v1
+kind: Secret
+metadata:
+  name: storage-demo-shared
+  namespace: hosted-tenants
+  labels:
+    ns.mdn.io/composite: storage
+    storage.nightscout.org/account: demo-shared
+  annotations:
+    ns.mdn.io/storage-type: shared  # ← No StatefulSet created
+    ns.mdn.io/created-at: "2025-01-15T00:00:00Z"
+type: Opaque
+stringData:
+  # Shared MongoDB connection details
+  mongoHost: "shared-mongodb.database.svc.cluster.local"
+  username: "shared-user"
+  password: "shared-password"
+  database: "nightscout"
+
+---
+# Step 2: Trigger migration by adding annotations
+# kubectl annotate secret storage-demo-shared \
+#   ns.mdn.io/migration-needed=true \
+#   ns.mdn.io/migration-source-uri=mongodb://shared-user:shared-password@shared-mongodb:27017/nightscout
+
+apiVersion: v1
+kind: Secret
+metadata:
+  name: storage-demo-migrating
+  namespace: hosted-tenants
+  labels:
+    ns.mdn.io/composite: storage
+    storage.nightscout.org/account: demo-migrating
+  annotations:
+    # Change storage type to trigger StatefulSet creation
+    ns.mdn.io/storage-type: dedicated  # ← StatefulSet will be created
+    
+    # Add migration annotations
+    ns.mdn.io/migration-needed: "true"  # ← Triggers migration Job
+    ns.mdn.io/migration-source-uri: "mongodb://shared-user:shared-password@shared-mongodb.database.svc.cluster.local:27017/nightscout"
+    
+    # Optional migration configuration
+    ns.mdn.io/migration-image: "mongo:6"
+    ns.mdn.io/migration-method: "mongodump-restore"
+    
+    ns.mdn.io/created-at: "2025-01-15T00:00:00Z"
+type: Opaque
+stringData:
+  # New dedicated MongoDB configuration
+  replicas: "1"
+  storageGi: "2"
+  mongoImage: "mongo:6"
+  imagePullPolicy: "IfNotPresent"
+  cpuRequest: "100m"
+  cpuLimit: "500m"
+  memRequest: "256Mi"
+  memLimit: "512Mi"
+  
+  # New credentials for dedicated MongoDB
+  username: "nsuser"
+  password: "new-dedicated-password"
+  database: "nightscout"
+
+---
+# Step 3: After migration completes, annotation is added
+# Storage controller adds this annotation when Job succeeds
+
+apiVersion: v1
+kind: Secret
+metadata:
+  name: storage-demo-complete
+  namespace: hosted-tenants
+  labels:
+    ns.mdn.io/composite: storage
+    storage.nightscout.org/account: demo-complete
+  annotations:
+    ns.mdn.io/storage-type: dedicated
+    ns.mdn.io/migration-needed: "true"
+    ns.mdn.io/migration-source-uri: "mongodb://shared-user:shared-password@shared-mongodb:27017/nightscout"
+    ns.mdn.io/migration-complete: "true"  # ← Prevents re-running migration
+    ns.mdn.io/migration-completed-at: "2025-01-15T12:30:00Z"
+    ns.mdn.io/created-at: "2025-01-15T00:00:00Z"
+type: Opaque
+stringData:
+  replicas: "1"
+  storageGi: "2"
+  mongoImage: "mongo:6"
+  username: "nsuser"
+  password: "dedicated-password"
+  database: "nightscout"
+
+---
+# Lifecycle diagram:
+#
+# 1. Shared Storage (initial)
+#    ├─ storage-type: shared
+#    └─ No StatefulSet created
+#
+# 2. Add migration annotations
+#    ├─ storage-type: dedicated → StatefulSet created
+#    ├─ migration-needed: true → Migration Job created
+#    └─ migration-source-uri: <source>
+#
+# 3. Migration runs
+#    ├─ StatefulSet becomes ready
+#    ├─ Migration Job copies data
+#    └─ Status updated with migration progress
+#
+# 4. Migration completes
+#    ├─ migration-complete: true (added by webhook)
+#    ├─ Migration Job removed (TTL)
+#    └─ Tenant now uses dedicated MongoDB
+#
+# 5. Compute ConfigMap unaffected
+#    └─ Still references same storage.nightscout.org/account

@@ -1,0 +1,88 @@
+{
+  "controller": {
+    "metadata": {
+      "name": "tenant-controller"
+    }
+  },
+  "parent": {
+    "apiVersion": "v1",
+    "kind": "ConfigMap",
+    "metadata": {
+      "name": "demo-config",
+      "namespace": "hosted-tenants",
+      "generation": 5,
+      "labels": {
+        "ns.mdn.io/enabled": "true",
+        "ns.mdn.io/tier": "basic"
+      }
+    },
+    "data": {
+      "TENANT_ID": "demo",
+      "NS_IMAGE": "nightscout/cgm-remote-monitor:latest",
+      "MONGO_IMAGE": "mongo:6",
+      "MONGO_REPLICAS": "1",
+      "NS_REPLICAS": "2",
+      "CDC_ENABLED": "true"
+    }
+  },
+  "children": {
+    "Secret.v1": {
+      "demo-mongo-auth": {
+        "apiVersion": "v1",
+        "kind": "Secret",
+        "metadata": {
+          "name": "demo-mongo-auth",
+          "namespace": "hosted-tenants"
+        },
+        "data": {}
+      },
+      "external-api-key": {
+        "apiVersion": "v1",
+        "kind": "Secret",
+        "metadata": {
+          "name": "external-api-key",
+          "namespace": "hosted-tenants",
+          "labels": {
+            "created-by": "external-operator"
+          }
+        },
+        "data": {
+          "key": "ZXh0ZXJuYWwta2V5"
+        }
+      }
+    },
+    "StatefulSet.apps/v1": {
+      "demo-mongo": {
+        "apiVersion": "apps/v1",
+        "kind": "StatefulSet",
+        "metadata": {
+          "name": "demo-mongo",
+          "namespace": "hosted-tenants"
+        },
+        "spec": {
+          "replicas": 1
+        },
+        "status": {
+          "replicas": 1,
+          "readyReplicas": 1
+        }
+      }
+    },
+    "ConfigMap.v1": {
+      "external-config": {
+        "apiVersion": "v1",
+        "kind": "ConfigMap",
+        "metadata": {
+          "name": "external-config",
+          "namespace": "hosted-tenants",
+          "labels": {
+            "created-by": "external-tool"
+          }
+        },
+        "data": {
+          "setting": "value"
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,14 @@
+Labels:           app.kubernetes.io/component=tenant-pod                                                                                          
+                  app.kubernetes.io/instance=razzles2                                                                                             
+                  app.kubernetes.io/managed-by=metacontroller                                                                                     
+                  app.kubernetes.io/name=nightscout-tenant                                                                                        
+                  app.kubernetes.io/part-of=nightscout-tenant                                                                                     
+                  controller-uid=7dad0d21-4523-44a5-af8d-55672d7f6858                                                                             
+                  ns.mdn.io/storage=razzles2                                                                                                      
+                  ns.mdn.io/tenant=foo                                                                                                            
+Annotations:      metacontroller.k8s.io/last-applied-configuration:                                                                               
+                    {"apiVersion":"v1","kind":"Pod","metadata":{"annotations":{"ns.mdn.io/container-count":"1","ns.mdn.io/user-initialized":"false
+"},"labels":...                                                                                                                                   
+                  ns.mdn.io/container-count: 1                                                                                                    
+                  ns.mdn.io/user-initialized: false                                                                                               
+Status:           Pending                                                                         

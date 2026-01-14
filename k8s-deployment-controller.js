@@ -1,10 +1,10 @@
-
 var restify = require('restify');
 var bunyan = require('bunyan');
 var _ = require('lodash');
 var Consul = require('consul');
 var url = require('url');
 var dns = require('dns');
+var objectId = require('./lib/object-id');
 
 function configure (opts) {
 
@@ -54,7 +54,7 @@ function configure (opts) {
       selector: {
         matchLabels: {
           internal_name: data.WEB_NAME
-          
+
         }
       },
       template: {
@@ -113,6 +113,88 @@ function configure (opts) {
     }
     };
 
+    var healthCheckEnabled = 'pod' == opts.tenant.healthcheck_style;
+    if (healthCheckEnabled) {
+      var tenant_opts = opts.tenant;
+      var healthCheckImage = opts.tenant.healthcheck_image;
+      var healthCheckCommand = opts.tenant.healthcheck_command;
+      var healthCheckImagePullPolicy = 'IfNotPresent';
+      var healthCheckPort = 3000;
+      var healthCheckCpuRequest = opts.tenant.healthcheck_cpu_request;
+      var healthCheckMemRequest = opts.tenant.healthcheck_mem_request;
+      var healthCheckCpuLimit = opts.tenant.healthcheck_cpu_limit;
+      var healthCheckMemLimit = opts.tenant.healthcheck_mem_limit;
+
+      template.spec.template.spec.containers.push({
+        name: 'pod-healthcheck',
+        image: healthCheckImage,
+        args: [healthCheckCommand],
+        imagePullPolicy: healthCheckImagePullPolicy,
+        ports: [
+          {
+            containerPort: healthCheckPort,
+            name: 'healthcheck'
+          }
+        ],
+        env: [
+          {
+            name: 'PORT',
+            value: String(healthCheckPort)
+          },
+          {
+            name: 'POD_UID',
+            valueFrom: {
+              fieldRef: {
+                fieldPath: 'metadata.uid'
+              }
+            }
+          },
+          {
+            name: 'POD_IP',
+            valueFrom: {
+              fieldRef: {
+                fieldPath: 'status.podIP'
+              }
+            }
+          },
+          {
+            name: 'POD_NAME',
+            valueFrom: {
+              fieldRef: {
+                fieldPath: 'metadata.name'
+              }
+            }
+          },
+          {
+            name: 'POD_NAMESPACE',
+            valueFrom: {
+              fieldRef: {
+                fieldPath: 'metadata.namespace'
+              }
+            }
+          },
+          {
+            name: 'NODE_NAME',
+            valueFrom: {
+              fieldRef: {
+                fieldPath: 'spec.nodeName'
+              }
+            }
+          }
+        ],
+        resources: {
+          requests: {
+            cpu: healthCheckCpuRequest,
+            memory: healthCheckMemRequest
+          },
+          limits: {
+            cpu: healthCheckCpuLimit,
+            memory: healthCheckMemLimit
+          }
+        }
+      });
+    }
+
     if (opts.MULTIENV_TENANT_NODEPOOL_TARGET) {
       template.spec.template.spec.nodeSelector = {
         'doks.digitalocean.com/node-pool': opts.MULTIENV_TENANT_NODEPOOL_TARGET
@@ -139,34 +221,17 @@ function configure (opts) {
     res.result.custom_env = res.result.data;
     res.result.state = 'persisted';
     delete res.result.data;
-    /*
-    var v = {
-      id: worker.id || null
-    , custom_env: worker.custom_env
-    , state: worker.state || 'missing'
-    , isDead: worker.isDead && worker.isDead( )
-    // , url: "http://" + [ 'localhost', worker.custom_env.PORT ].join(':') + '/'
-    // , status_url: "http://" + [ 'localhost', worker.custom_env.PORT ].join(':') + '/api/v1/status.json'
-    };
-    */
     next( );
   }
 
   function create_deployment (req, res, next) {
     var msg = {status: 'create or update starting' };
+
     appsApi.readNamespacedDeployment(req.params.name, selected_namespace).then(function (result) {
       msg.status = "readNamespacedDeployment result"
       msg.result = result;
       console.log("replace or create", msg);
       var body = result.body;
-      /*
-      if (req.params.field && req.deployment.data[req.params.field]) {
-        body.data[req.params.field] = req.deployment.data[req.params.field];
-      } else {
-        body.data = req.deployment.data;
-      }
-      */
-      // console.log("READ before update", req.deployment.data, body);
       console.log("before update", req.suggestion);
       appsApi.replaceNamespacedDeployment(body.metadata.name, selected_namespace, body).then(function (result) {
         msg.status = "replaceNamespacedDeployment result"
@@ -185,7 +250,6 @@ function configure (opts) {
         var body = result.body;
         res.header('Location', '/environs/' + body.metadata.name);
         res.deployment = result.body;
-        // res.result = result.body.data;
         next( );
       }).catch(function (err) {
         console.log('error creating config map', err);
@@ -221,7 +285,6 @@ function configure (opts) {
     } else {
       res.result = doc;
     }
-    // res.result = doc[req.params.section][req.params.field];
     next( );
   }
 
@@ -248,11 +311,6 @@ function configure (opts) {
 
   function suggest_deployment_template_params (req, res, next) {
     console.log("INCOMING UPDATE", req.body);
-    // TODO: inspect annotations and/or labels to see if this configmap or
-    // secret should be added.
-    // or if the deployment should be restarted.
-    // TODO: inspect annotation or labels to determine the tenant's name if
-    // this is a supplementary secret or configmap.
     var data = _.extend({ WEB_NAME: req.body.object.metadata.name }, req.query);
     data = _.extend(data, req.body);
     req.suggestion = data;
@@ -263,31 +321,22 @@ function configure (opts) {
   function handle_sync_addition (req, res, next) {
     const deploymentName = req.deployment.metadata.name;
 
+    console.log('TRY SYNC ADDITION', req.deployment);
     appsApi.createNamespacedDeployment(selected_namespace, req.deployment).then(function (result) {
       res.result = result;
       return next( );
     }).catch((err) => {
-      // maybe previously existed but we are adding a new type of config or are
-      // transitioning configmaps in or out of labels configured for different
-      // watches to facilitate a hybrid or migrating environment.
-      // TODO: consider creating a list of patches to add or remove configmaps
-      // based on inspected labels and annotations to help support migrations
-      // or hybrid environments.
+      console.log('FAILED SYNC ADDITION', err);
       const patch = [{
         op: "add",
         path: "/spec/template/metadata/annotations/updated-at",
-        // path: "/spec/template/metadata/annotations",
-        // path: "/metadata/annotations/updated-at",
-        // value: { "updated-at": new Date().toISOString() }
         value: new Date().toISOString()
       }];
       console.log("ATTEMPT TO PATCH DEPLOYMENT THAT COULD NOT BE CREATED", deploymentName, req.deployment, patch, err.response.body);
-     // Perform the patch operation
      var options = { headers: { "Content-Type": "application/json-patch+json" } };
      appsApi.patchNamespacedDeployment(deploymentName, selected_namespace, patch, undefined, undefined, undefined, undefined, undefined, options)
        .then((result) => {
-				console.log(`deployment ${req.deployment.metadata.name} updated for rolling restart`);
-        // res.result = deployment
+        console.log(`deployment ${req.deployment.metadata.name} updated for rolling restart`);
         res.result = result;
         next( );
       }).catch((err) => {
@@ -302,23 +351,25 @@ function configure (opts) {
     console.log("INCOMING UPDATE", req.body);
     var annotations = req.body.object.metadata.annotations || { };
     var targetDeployment = annotations['tenant'] || req.body.object.metadata.name;
-		appsApi.readNamespacedDeployment(targetDeployment, selected_namespace).then((deployment) => {
+                appsApi.readNamespacedDeployment(targetDeployment, selected_namespace).then((deployment) => {
       const patch = [{
-				op: "add",
-				path: "/spec/template/metadata/annotations/updated-at",
-				value: new Date().toISOString()
-			}];
+                                op: "add",
+                                path: "/spec/template/metadata/annotations/updated-at",
+                                value: new Date().toISOString()
+                        }];
       var options = { headers: { "Content-Type": "application/json-patch+json" } };
       appsApi.patchNamespacedDeployment(targetDeployment, selected_namespace, patch, undefined, undefined, undefined, undefined, undefined, options)
       .then((result) => {
-				console.log(`deployment ${targetDeployment} updated for rolling restart`);
-        // res.result = deployment
+        console.log(`deployment ${targetDeployment} updated for rolling restart`);
         res.result = result;
         next( );
       }).catch((err) => {
         console.error("Error updating deployment", err);
         next(err);
       });
+    }).catch((err) => {
+      console.error("Error could not read what should be an existing deployment", err);
+      next(err);
     });
   }
 
@@ -366,11 +417,9 @@ function configure (opts) {
     , metadata: { name: data.WEB_NAME,
       annotations: {
         ...opts.default.configmap.annotations
-        // 'managed-by': 'multienv/k8s-deployment-controller'
       },
       labels: {
         ...opts.default.configmap.labels
-        // managed: 'multienv', app: 'tenant'
       }
     }
     , data: data
@@ -448,6 +497,141 @@ function configure (opts) {
     }).catch(next);
   }
 
+  // Secret handlers (mirror ConfigMap pattern)
+  function list_secrets (req, res, next) {
+    var params = {
+      continue: req.query.continue,
+      limit: req.query.limit
+    };
+    var fieldSelector = req.query.fieldSelector;
+    var labelSelector = req.query.labelSelector;
+    var resourceVersion = null;
+    k8s.listNamespacedSecret(selected_namespace, false, false, params.continue, fieldSelector, labelSelector, params.limit, resourceVersion).then(function (result, resp) {
+      res.result = result;
+      next( );
+    }).catch(next);
+  }
+
+  function template_secret (data) {
+    return {
+      kind: "Secret",
+      metadata: {
+        name: data.WEB_NAME || data.name,
+        annotations: data.annotations || {},
+        labels: data.labels || {
+          'ns.mdn.io/composite': 'storage',
+          'storage.nightscout.org/account': data.WEB_NAME || data.name
+        }
+      },
+      stringData: data.stringData || data.data || {}
+    };
+  }
+
+  function suggest_secret (req, res, next) {
+    req.secret = template_secret(req.suggestion);
+    next( );
+  }
+
+  function fetch_secret (req, res, next) {
+    k8s.readNamespacedSecret(req.params.name, selected_namespace).then(function (result) {
+      res.result = result.body;
+      next( );
+    }).catch(next);
+  }
+
+  function create_or_update_secret (req, res, next) {
+    var msg = {status: 'create or update starting' };
+    k8s.readNamespacedSecret(req.params.name, selected_namespace).then(function (result) {
+      msg.status = "readNamespacedSecret result"
+      msg.result = result;
+      console.log("replace or create secret", msg);
+      var body = result.body;
+      
+      // Update data field if specific field requested
+      if (req.params.field && req.secret.stringData && req.secret.stringData[req.params.field]) {
+        if (!body.stringData) body.stringData = {};
+        body.stringData[req.params.field] = req.secret.stringData[req.params.field];
+      } else if (req.secret.stringData) {
+        body.stringData = req.secret.stringData;
+      }
+      
+      // Merge annotations and labels
+      body.metadata.annotations = _.extend(body.metadata.annotations || {}, req.secret.metadata.annotations || {});
+      body.metadata.labels = _.extend(body.metadata.labels || {}, req.secret.metadata.labels || {});
+      
+      console.log("before update secret", req.secret.stringData, body);
+      k8s.replaceNamespacedSecret(body.metadata.name, selected_namespace, body).then(function (result) {
+        msg.status = "replaceNamespacedSecret result"
+        msg.result = result;
+        console.log("replace secret result", msg);
+        res.header('Location', '/secrets/' + body.metadata.name);
+        res.result = result.body;
+        next( );
+      }).catch(next);
+    }).catch(function (err) {
+      if (err.response && err.response.statusCode === 404) {
+        console.log("Secret not found, creating new", req.secret);
+        k8s.createNamespacedSecret(selected_namespace, req.secret).then(function (result) {
+          msg.status = "createNamespacedSecret result"
+          msg.result = result;
+          console.log("created secret", msg);
+          res.header('Location', '/secrets/' + req.secret.metadata.name);
+          res.result = result.body;
+          next( );
+        }).catch(function (err) {
+          console.log('error creating secret', err);
+          next(err);
+        });
+      } else {
+        next(err);
+      }
+    });
+  }
+
+  function delete_secret (req, res, next) {
+    k8s.deleteNamespacedSecret(req.params.name, selected_namespace).then(function (result) {
+      res.json(req.params.name);
+      res.status(204);
+      res.end( );
+      next( );
+    }).catch(next);
+  }
+
+  function patch_secret_metadata (req, res, next) {
+    var targetSecret = req.params.name;
+    var patch = { metadata: { } };
+    if (req.params.field && req.body[req.params.field]) {
+      patch.metadata[req.params.section] = _.extend(patch.metadata[req.params.section], { [req.params.field]:  req.body[req.params.field] });
+    } else {
+      patch.metadata[req.params.section] = req.body;
+    }
+    var options = { headers: { "Content-Type": "application/merge-patch+json" } };
+    k8s.patchNamespacedSecret(targetSecret, selected_namespace, patch, undefined, undefined, undefined, undefined, undefined, options)
+    .then(function (result) {
+      res.result = result.body;
+      next( );
+    }).catch(function (err) {
+      console.log("ERROR PATCHING SECRET", err, err.response);
+      next(err);
+    });
+  }
+
+  function patch_secret_remove_field (req, res, next) {
+    var targetSecret = req.params.name;
+    var patch = { metadata: { } };
+    patch.metadata[req.params.section] = { [req.params.field]:  null };
+    var options = { headers: { "Content-Type": "application/merge-patch+json" } };
+    k8s.patchNamespacedSecret(targetSecret, selected_namespace, patch, undefined, undefined, undefined, undefined, undefined, options)
+    .then(function (result) {
+      res.status(204);
+      res.end( );
+      next( );
+    }).catch(function (err) {
+      console.log("ERROR PATCHING SECRET", err, err.response);
+      next(err);
+    });
+  }
+
   function patch_configmap_remove_field (req, res, next) {
     var targetConfigMap = req.params.name;
     var patch = { metadata: { } };
@@ -455,8 +639,6 @@ function configure (opts) {
     var options = { headers: { "Content-Type": "application/merge-patch+json" } };
     k8s.patchNamespacedConfigMap(targetConfigMap, selected_namespace, patch, undefined, undefined, undefined, undefined, undefined, options)
     .then(function (result) {
-      // res.result = null;
-
       res.status(204);
       res.end( );
       next( );
@@ -500,10 +682,47 @@ function configure (opts) {
 
   server.get('/deployments/:name', fetch_deployment, format_multienv_compatible_result, format_result );
   server.post('/deployments/:name', suggest, suggest_deployment, create_deployment, format_multienv_compatible_result, format_result);
-  // server.get('/deployments/:name/env/:field', fetch_deployment, select_field, format_result );
   server.get('/deployments/:name/env', fetch_deployment, select_env, format_result );
   server.del('/deployments/:name', delete_deployment);
   server.get('/deployments', list_deployments, format_result);
+
+  const createMetacontrollerRoutes = require('./lib/webhook/tenant-webhook-handler');
+  const customizeRoute = require('./lib/routes/metacontroller/customize');
+  const createDeploymentRoutes = require('./lib/routes/deployments');
+  const createConfigMapRoutes = require('./lib/routes/configmaps');
+  const createHealthRoutes = require('./lib/routes/health');
+  const createInstanceRoutes = require('./lib/routes/instances');
+  const createStorageAccountRoutes = require('./lib/routes/storage-accounts');
+  const createComputeInstanceRoutes = require('./lib/routes/compute-instances');
+  const createNightscoutTenantRoutes = require('./lib/routes/nightscout-tenant');
+
+  const storageDecorator = require('./lib/webhook/storage-decorator-handler.js')(opts);
+  const metacontrollerRoutes = createMetacontrollerRoutes(opts);
+  const deploymentRoutes = createDeploymentRoutes(k8s, selected_namespace, opts);
+  const configMapRoutes = createConfigMapRoutes(k8s, selected_namespace, opts);
+  const healthRoutes = createHealthRoutes(k8s, selected_namespace);
+  const instanceRoutes = createInstanceRoutes(opts.kc, selected_namespace);
+  const storageAccountRoutes = createStorageAccountRoutes(opts.kc, selected_namespace, opts);
+  const computeInstanceRoutes = createComputeInstanceRoutes(opts.kc, selected_namespace);
+  const nightscoutTenantRoutes = createNightscoutTenantRoutes(opts.kc, selected_namespace, opts);
+
+  // Deployment routes
+  // server.get('/deployments/:name', deploymentRoutes.fetchDeployment, format_result);
+  // server.del('/deployments/:name', deploymentRoutes.deleteDeployment);
+  // server.get('/deployments', deploymentRoutes.listDeployments, format_result);
+
+  // ConfigMap routes  
+  // server.get('/configmaps/:name', configMapRoutes.fetchConfigMap, format_result);
+  // server.post('/configmaps/:name', suggest, suggest_config_map, configMapRoutes.createOrUpdateConfigMap, format_result);
+  // server.del('/configmaps/:name', configMapRoutes.deleteConfigMap);
+  // server.get('/configmaps', configMapRoutes.listConfigMaps, format_result);
+
+  // MetaController webhook endpoints
+  server.post('/metacontroller/sync', metacontrollerRoutes);
+  server.post('/metacontroller/customize', customizeRoute);
+  server.post('/metacontroller/storage/sync', storageDecorator.handle_webhook);
+  server.post('/metacontroller/storage/customize', storageDecorator.handle_customize);
+  // server.post('/metacontroller/migration/sync', metacontrollerRoutes.handleMigrationSync);
 
   server.post('/sync/additions', suggest_deployment_template_params, suggest_deployment, handle_sync_addition, format_result);
   server.post('/sync/updates', handle_sync_updates, format_result);
@@ -514,7 +733,6 @@ function configure (opts) {
   server.post('/consul/sync/deletions', sync_consul_deletion);
 
   function sync_consul_addition (req, res, next) {
-
     console.log("NOTHING TO DO WITH CONSUL SINCE POD IS NOT RUNNING", req.body);
     next( );
   }
@@ -541,52 +759,69 @@ function configure (opts) {
   }
 
   function sync_consul_update (req, res, next) {
-		const serviceData = req.body.object;
+    const serviceData = req.body.object;
     if (serviceData.status.phase != 'Running') {
       console.log("NOTHING TO DO SINCE POD IS NOT RUNNING", req.body);
       return next( );
     }
-		const tenantName = serviceData.metadata.labels.tenant;
-		const serviceID = `${tenantName}-${serviceData.metadata.namespace}`;
+    const tenantName = serviceData.metadata.labels.tenant;
+    const serviceID = `${tenantName}-${serviceData.metadata.namespace}`;
     var id = serviceData.metadata.uid;
     var host = serviceData.status.podIP;
     var healthCheckService = url.parse(opts.MULTIENV_HEALTH_CHECK_SERVICE);
     var validPodCheckUrl = url.format({ protocol: healthCheckService.protocol, hostname: healthCheckService.hostname, port: healthCheckService.port,  pathname: ('/healthchecks/pod/' + tenantName + '/assigned/podIP/' + host)});
+    if (opts.tenant.healthcheck_style == 'pod') {
+      validPodCheckUrl = url.format({ protocol: healthCheckService.protocol, hostname: host, port: healthCheckService.port,  pathname: ('/healthchecks/pod/' + tenantName + '/assigned/POD_UID/' + id)});
+    }
     var port = 1337;
-		var insert = {
-			name: 'backends',
-			address: host,
-			port: port,
-			id: id,
-			tags: [ tenantName, serviceID, 'tenant', 'backend' ],
-			checks: [
-        {
-				name: "EndpointAvailable",
-				ttl: '30s',
-				interval: '10s',
-				http: url.format({protocol: 'http', hostname: host, port: port,  pathname: '/api/v1/status.txt'}),
-				deregister_critical_service_after: '20s'
-			},
-			{
-				name: "ValidPodName",
-				ttl: '10s',
-				interval: '5s',
-				http: validPodCheckUrl,
-				failures_before_critical: 1,
-				deregister_critical_service_after: '5s'
-			},
-			/*
-			{
-				name: "ValidExpectedPort",
-				ttl: '10s',
-				interval: '5s',
-				http: url.format({protocol: 'http', hostname: host, port: multienv.port,  pathname: ('/environs/' + name + '/assigned/PORT/' + port)}),
-				failures_before_critical: 1,
-				deregister_critical_service_after: '1m'
-			},
-			*/
-			]
-		};
+    var checks = [ {
+        name: "EndpointAvailable",
+        ttl: '30s',
+        interval: '10s',
+        http: url.format({protocol: 'http', hostname: host, port: port,  pathname: '/api/v1/status.txt'}),
+        deregister_critical_service_after: '20s'
+      },
+      {
+        name: "ValidPodName",
+        ttl: '10s',
+        interval: '5s',
+        http: validPodCheckUrl,
+        failures_before_critical: 1,
+        deregister_critical_service_after: '5s'
+      },
+    ];
+    if (serviceData.metadata?.annotations?.['ns.mdn.io/healthCheck'] == 'pod') {
+      checks = [{
+        name: "ValidPodName",
+        ttl: '10s',
+        interval: '5s',
+        http: validPodCheckUrl,
+        failures_before_critical: 1,
+        deregister_critical_service_after: '5s'
+      }];
+      if (serviceData.metadata?.annotations?.['ns.mdn.io/compute-runtime'] == 'enabled') {
+        checks.push({
+        name: "EndpointAvailable",
+        ttl: '30s',
+        interval: '10s',
+        http: url.format({protocol: 'http', hostname: host, port: port,  pathname: '/api/v1/status.txt'}),
+        deregister_critical_service_after: '20s'
+      }
+        );
+      }
+      if (serviceData.metadata?.annotations?.['ns.mdn.io/storage-runtime'] == 'enabled') {
+        // checks.push();
+      }
+    }
+
+    var insert = {
+      name: 'backends',
+      address: host,
+      port: port,
+      id: id,
+      tags: [ tenantName, serviceID, 'tenant', 'backend' ],
+      checks
+    };
     consul.agent.service.register(insert, function (err, body, resp) {
       console.log("CREATED BACKEND SITE IN CONSUL", err, insert);
       if (err) {
@@ -598,9 +833,9 @@ function configure (opts) {
   }
 
   function sync_consul_deletion (req, res, next) {
-		const serviceData = req.body.object;
+                const serviceData = req.body.object;
 
-		const tenantName = serviceData.metadata.tenant;
+                const tenantName = serviceData.metadata.tenant;
     var id = serviceData.metadata.uid;
     consul.agent.service.deregister(id, function (err, body, resp) {
       console.log("REMOVED BACKEND SITE FROM CONSUL", id, err, body);
@@ -623,12 +858,210 @@ function configure (opts) {
   server.del('/configmaps/:name', delete_configmap);
   server.get('/configmaps', list_configmaps, format_result);
 
+  // Secret endpoints (mirror ConfigMap API)
+  server.get('/secrets/:name', fetch_secret, format_result );
+  server.post('/secrets/:name', suggest, suggest_secret, create_or_update_secret, format_result);
+  server.get('/secrets/:name/metadata/:section', fetch_secret, select_metadata_field, format_result );
+  server.get('/secrets/:name/metadata/:section/:field', fetch_secret, select_metadata_field, format_result );
+  server.post('/secrets/:name/metadata/:section/:field', fetch_secret, patch_secret_metadata, format_result );
+  server.del('/secrets/:name/metadata/:section/:field', fetch_secret, patch_secret_remove_field);
+  
+  server.get('/secrets/:name/data/:field', fetch_secret, select_field, format_result );
+  server.get('/secrets/:name/data', fetch_secret, select_env, format_result );
+  server.post('/secrets/:name/data/:field', suggest, suggest_secret, create_or_update_secret, select_data_field, format_result );
+  server.del('/secrets/:name', delete_secret);
+  server.get('/secrets', list_secrets, format_result);
+
   server.get('/environs/:name', fetch_deployment, fetch_config_map, format_multienv_compatible_result, format_result );
   server.post('/environs/:name', suggest, suggest_config_map, create_or_update_configmap, format_multienv_compatible_result, format_result);
   server.get('/environs/:name/env/:field', fetch_config_map, select_field, format_result );
   server.get('/environs/:name/env', fetch_config_map, select_env, format_result );
   server.post('/environs/:name/env/:field', suggest, suggest_config_map, create_or_update_configmap, select_data_field, format_result );
   server.del('/environs/:name', delete_configmap);
+
+  function template_initial_storage_secret (accountId, storageType, tier) {
+    const secretName = `${accountId}-mongo-auth`;
+    
+    // Create K8s secret with provisioning root MongoDB credentials
+    // This Secret triggers the storage composite controller via ns.mdn.io/composite label
+    const secret = {
+      apiVersion: 'v1',
+      kind: 'Secret',
+      metadata: {
+        name: secretName,
+        labels: {
+          'app.kubernetes.io/managed-by': 'metacontroller',
+          'storage.nightscout.org/account': accountId,
+          'ns.mdn.io/composite': 'storage'
+        },
+        annotations: {
+          'ns.mdn.io/storage-type': storageType || opts.DEFAULT_STORAGE_TYPE || 'shared',
+          'ns.mdn.io/tier': tier || opts.DEFAULT_TIER || 'basic',
+          'ns.mdn.io/created-at': new Date().toISOString()
+        }
+      },
+      stringData: {
+        MONGO_INITDB_ROOT_USERNAME: `admin_${accountId}`,
+        MONGO_INITDB_ROOT_PASSWORD: objectId(),
+        // Use 'admin' database for root credentials initialization
+        // The storage composite webhook will generate app-credentials Secret
+        // with the actual database name (e.g., ns-a3f7) for application access
+        MONGO_INITDB_DATABASE: 'admin'
+      }
+    };
+    return secret;
+  }
+
+  function template_compute_configmap(tenantId, accountId, configData) {
+    // Create K8s ConfigMap for compute resources
+    // This ConfigMap triggers the compute composite controller via ns.mdn.io/composite label
+    const configMap = {
+      apiVersion: 'v1',
+      kind: 'ConfigMap',
+      metadata: {
+        name: tenantId,
+        labels: {
+          'app.kubernetes.io/managed-by': 'metacontroller',
+          'ns.mdn.io/composite': 'compute',
+          'ns.mdn.io/tenant': tenantId,
+          'storage.nightscout.org/account': accountId,
+          ...opts.default.configmap.labels
+        },
+        annotations: {
+          'ns.mdn.io/created-at': new Date().toISOString(),
+          ...opts.default.configmap.annotations
+        }
+      },
+      data: {
+        TENANT_ID: tenantId,
+        WEB_NAME: tenantId,
+        ...configData
+      }
+    };
+    return configMap;
+  }
+
+  function handle_new_provisioner_account_webhook (req, res, next) {
+    const accountId = req.params.account || objectId();
+    const storageType = req.body?.storageType || req.body?.storage_type;
+    const tier = req.body?.tier;
+    
+    const secretName = `${accountId}-mongo-auth`;
+    var secret = template_initial_storage_secret(accountId, storageType, tier);
+    
+    // Idempotent: try to get existing secret first
+    k8s.readNamespacedSecret(secretName, selected_namespace)
+      .then((existing) => {
+        // Secret exists, update it
+        console.log("UPDATING EXISTING PROVISIONER ACCOUNT SECRET", secretName);
+        return k8s.replaceNamespacedSecret(secretName, selected_namespace, secret);
+      })
+      .catch((err) => {
+        // Secret doesn't exist (404), create it
+        if (err.statusCode === 404 || err.response?.statusCode === 404) {
+          console.log("CREATING NEW PROVISIONER ACCOUNT SECRET", secretName);
+          return k8s.createNamespacedSecret(selected_namespace, secret);
+        }
+        throw err;
+      })
+      .then((result) => {
+        console.log("PROVISIONER ACCOUNT SECRET READY", secretName);
+        res.json({
+          account: accountId,
+          storageType: secret.metadata.annotations['ns.mdn.io/storage-type'],
+          tier: secret.metadata.annotations['ns.mdn.io/tier'],
+          resource: result.body
+        });
+        next();
+      })
+      .catch(next);
+  }
+
+  function handle_new_site_webhook(req, res, next) {
+    const accountId = req.params.account;
+    const bodyInternalName = req.body?.internal_name;
+    const urlParamName = req.params.name || req.query.name;
+    const tenantId = bodyInternalName || urlParamName;
+    
+    if (!tenantId) {
+      return next(new restify.errors.BadRequestError(
+        'Tenant name required in URL parameter or body.internal_name'
+      ));
+    }
+    
+    const configData = { ...req.body };
+    delete configData.internal_name; // Remove metadata field
+    
+    const configMap = template_compute_configmap(tenantId, accountId, configData);
+    
+    // Idempotent: create or update ConfigMap
+    k8s.readNamespacedConfigMap(tenantId, selected_namespace)
+      .then((existing) => {
+        // ConfigMap exists, update it
+        console.log("UPDATING EXISTING SITE CONFIGMAP", tenantId);
+        return k8s.replaceNamespacedConfigMap(tenantId, selected_namespace, configMap);
+      })
+      .catch((err) => {
+        // ConfigMap doesn't exist (404), create it
+        if (err.statusCode === 404 || err.response?.statusCode === 404) {
+          console.log("CREATING NEW SITE CONFIGMAP", tenantId);
+          return k8s.createNamespacedConfigMap(selected_namespace, configMap);
+        }
+        throw err;
+      })
+      .then((result) => {
+        console.log("SITE CONFIGMAP READY", tenantId);
+        res.json({
+          tenant: tenantId,
+          compute: tenantId,
+          account: accountId,
+          resource: result.body
+        });
+        next();
+      })
+      .catch(next);
+  }
+
+  // Legacy Gen 3 Account and site provisioning endpoints (Secret/ConfigMap based)
+  // Kept for backward compatibility during migration
+  server.post('/accounts-legacy', handle_new_provisioner_account_webhook);
+  server.post('/accounts-legacy/:account', handle_new_provisioner_account_webhook);
+  server.post('/accounts-legacy/:account/sites/:name', handle_new_site_webhook);
+  server.post('/accounts-legacy/:account/sites', handle_new_site_webhook);
+
+  // Gen 4 Account and site provisioning endpoints (CRD based)
+  // StorageAccount CRD endpoints
+  server.post('/accounts', storageAccountRoutes.createOrUpdateStorageAccount);
+  server.post('/accounts/:account', storageAccountRoutes.createOrUpdateStorageAccount);
+  server.get('/accounts/:account', storageAccountRoutes.getStorageAccount);
+  server.get('/accounts', storageAccountRoutes.listStorageAccounts, format_result);
+  server.del('/accounts/:account', storageAccountRoutes.deleteStorageAccount);
+
+  // ComputeInstance CRD endpoints
+  server.post('/accounts/:account/sites/:name', computeInstanceRoutes.createOrUpdateComputeInstance, format_result);
+  server.post('/accounts/:account/sites', computeInstanceRoutes.createOrUpdateComputeInstance, format_result);
+  server.get('/accounts/:account/sites/:name', computeInstanceRoutes.getComputeInstance, format_result);
+  server.get('/accounts/:account/sites', computeInstanceRoutes.listComputeInstances, format_result);
+  server.del('/accounts/:account/sites/:name', computeInstanceRoutes.deleteComputeInstance);
+
+
+  // Gen 5 NightscoutTenant CRD endpoints (unified tenant resource)
+  // Two-phase provisioning: storage first, then compute activation
+  server.post('/tenants', nightscoutTenantRoutes.createOrUpdateAccount);
+  server.post('/tenants/:account', nightscoutTenantRoutes.createOrUpdateAccount);
+  server.get('/tenants/:account', nightscoutTenantRoutes.getTenant);
+  server.get('/tenants', nightscoutTenantRoutes.listTenants);
+  server.del('/tenants/:account', nightscoutTenantRoutes.deleteTenant);
+  
+  // Gen 5 Site provisioning (compute activation via ConfigMap)
+  server.post('/tenants/:account/sites/:site', nightscoutTenantRoutes.createOrUpdateSite);
+  server.del('/tenants/:account/sites/:site', nightscoutTenantRoutes.deleteSite);
+
+  // Old instances endpoints (nightscout.k8s/v1alpha1 - deprecated)
+  server.get('/instances/:name', instanceRoutes.fetchInstance, format_result);
+  server.post('/instances/:name', instanceRoutes.createOrUpdateInstance, format_result);
+  server.del('/instances/:name', instanceRoutes.deleteInstance);
+  server.get('/instances', instanceRoutes.listInstances, format_result);
 
   server.get('/healthchecks/pod/:name/assigned/podIP/:ip', assigned_ip_name_health_check);
   server.get('/healthchecks/controller/self/:instance', function (req, res, next) {
@@ -653,8 +1086,12 @@ if (!module.parent) {
   var MULTIENV_SELF_REGISTRATION_NAME = (process.env.MULTIENV_SELF_REGISTRATION_NAME || 'multienv-deployment-controller');
   var MULTIENV_SELF_ADDRESS = (process.env.POD_IP || process.env.HOSTNAME);
   var CONSUL = process.env.CONSUL || 'http://consul.service.consul';
+  var DEFAULT_STORAGE_TYPE = process.env.DEFAULT_STORAGE_TYPE || 'shared';
+  var DEFAULT_TIER = process.env.DEFAULT_TIER || 'basic';
   var config = {
     MULTIENV_K8S_NAMESPACE: process.env.MULTIENV_K8S_NAMESPACE || 'default',
+    DEFAULT_STORAGE_TYPE: DEFAULT_STORAGE_TYPE,
+    DEFAULT_TIER: DEFAULT_TIER,
     MULTIENV_TENANT_NODEPOOL_TARGET: process.env.MULTIENV_TENANT_NODEPOOL_TARGET || 'bigger-tenant-runners',
     MULTIENV_TENANT_REQUESTS_ENABLE: (process.env.MULTIENV_TENANT_REQUESTS_ENABLE ||'1') != 'false',
     MULTIENV_TENANT_LIMITS_ENABLE: (process.env.MULTIENV_TENANT_LIMITS_ENABLE ||'1') != 'false',
@@ -667,7 +1104,26 @@ if (!module.parent) {
       cpu: process.env.MULTIENV_TENANT_LIMITS_CPU || '500m',
       memory: process.env.MULTIENV_TENANT_LIMITS_MEMORY || '500Mi'
     }
+  , tenant: {
+    healthcheck_style: process.env.MULTIENV_TENANT_HEALTHCHECK || 'pod',
+    healthcheck_image: process.env.MULTIENV_TENANT_HEALTHCHECK_IMAGE || 'multienv',
+    healthcheck_command: process.env.MULTIENV_TENANT_HEALTHCHECK_COMMAND || 'tenant-pod-healthcheck',
+    healthcheck_cpu_request: process.env.MULTIENV_TENANT_HEALTHCHECK_CPU_REQUEST || '5m',
+    healthcheck_mem_request: process.env.MULTIENV_TENANT_HEALTHCHECK_MEM_REQUEST || '50Mi',
+    healthcheck_cpu_limit: process.env.MULTIENV_TENANT_HEALTHCHECK_CPU_LIMIT || '100m',
+    healthcheck_mem_limit: process.env.MULTIENV_TENANT_HEALTHCHECK_MEM_LIMIT || '250Mi',
+    storage_init_job_image: process.env.MULTIENV_TENANT_STORAGE_INIT_JOB_IMAGE || 'multienv',
+    storage_init_job_command: process.env.MULTIENV_TENANT_STORAGE_INIT_JOB_COMMAND || 'initialize-tenant-storage',
+    storage_provisioner_image: process.env.MULTIENV_TENANT_STORAGE_PROVISIONER_IMAGE || 'provisioner',
+    storage_migration_job_image: process.env.MULTIENV_TENANT_STORAGE_MIGRATION_JOB_IMAGE || 'provisioner',
+    storage_migration_job_command: process.env.MULTIENV_TENANT_STORAGE_MIGRATION_JOB_COMMAND || 'initialize-tenant-storage',
+    tenant_app_image: process.env.MULTIENV_TENANT_APP_IMAGE || 'nightscout',
+    storage_image: process.env.MULTIENV_TENANT_STORAGE_IMAGE || 'mongo'
+  }
   , default: {
+    provisioner: {
+      storageType: process.env.MULTIENV_DEFAULT_PROVISIONER_STORAGE_TYPE || 'shared', // shared or dedicated
+    },
     deployment: {
       annotations: {
         'managed-by': MULTIENV_MANAGED_BY,
@@ -692,6 +1148,7 @@ if (!module.parent) {
   var boot = require('bootevent')( );
   boot.acquire(function k8s (ctx, next) {
     var my = this;
+    ctx.kc = require('./lib/k8s').get_kc({cluster: !k8s_local});
     ctx.k8s = require('./lib/k8s')({cluster: !k8s_local});
     ctx.appsApi = require('./lib/k8s').get_appsApi({cluster: !k8s_local});
     ctx.k8s.getAPIResources( ).then(function (res) {
@@ -733,10 +1190,9 @@ if (!module.parent) {
     });
   })
   .boot(function booted (ctx) {
-    var server = configure(_.extend(config, { k8s: ctx.k8s, appsApi: ctx.appsApi, consul: ctx.consul }));
+    var server = configure(_.extend(config, { kc: ctx.kc, k8s: ctx.k8s, appsApi: ctx.appsApi, consul: ctx.consul }));
     server.listen(port, function ( ) {
       console.log('listening', this.address( ));
     });
   });
 }
-

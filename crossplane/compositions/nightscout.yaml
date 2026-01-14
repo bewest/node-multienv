@@ -1,0 +1,294 @@
+
+apiVersion: apiextensions.crossplane.io/v1
+kind: Composition
+metadata:
+  name: nightscout-standard
+  labels:
+    provider: kubernetes
+    deployment: standard
+spec:
+  compositeTypeRef:
+    apiVersion: nightscout.crossplane.io/v1alpha1
+    kind: XNightscoutInstance
+  mode: Pipeline
+  pipeline:
+    - step: setup-storage
+      resources:
+        - name: mongodb-pvc
+          base:
+            apiVersion: v1
+            kind: PersistentVolumeClaim
+            spec:
+              accessModes: ["ReadWriteOnce"]
+              resources:
+                requests:
+                  storage: 2Gi
+          patches:
+            - fromFieldPath: spec.parameters.WEB_NAME
+              toFieldPath: metadata.name
+              transforms:
+                - type: string
+                  string:
+                    fmt: "%s-mongodb-data"
+            - fromFieldPath: spec.parameters.storageSize
+              toFieldPath: spec.resources.requests.storage
+    - step: setup-mongodb
+      resources:
+        - name: mongodb-service
+          base:
+            apiVersion: v1
+            kind: Service
+            metadata:
+              labels:
+                app: mongodb
+            spec:
+              clusterIP: None
+              ports:
+                - port: 27017
+                  targetPort: 27017
+              selector:
+                app: mongodb
+          patches:
+            - fromFieldPath: spec.parameters.WEB_NAME
+              toFieldPath: metadata.name
+              transforms:
+                - type: string
+                  string:
+                    fmt: "%s-mongodb"
+        - name: mongodb-statefulset
+          base:
+            apiVersion: apps/v1
+            kind: StatefulSet
+            metadata:
+              labels:
+                app: mongodb
+            spec:
+              serviceName: mongodb
+              replicas: 1
+              selector:
+                matchLabels:
+                  app: mongodb
+              template:
+                metadata:
+                  labels:
+                    app: mongodb
+                spec:
+                  containers:
+                    - name: mongodb
+                      image: mongo:4.4
+                      ports:
+                        - containerPort: 27017
+                      volumeMounts:
+                        - name: mongodb-data
+                          mountPath: /data/db
+                      resources:
+                        requests:
+                          cpu: "100m"
+                          memory: "256Mi"
+                        limits:
+                          cpu: "500m"
+                          memory: "512Mi"
+              volumeClaimTemplates:
+                - metadata:
+                    name: mongodb-data
+                  spec:
+                    accessModes: ["ReadWriteOnce"]
+                    resources:
+                      requests:
+                        storage: 1Gi
+    - step: setup-mongodb-user
+      dependsOn:
+        - setup-mongodb
+      resources:
+        - name: mongodb-provisioner-job
+          base:
+            apiVersion: batch/v1
+            kind: Job
+            metadata:
+              labels:
+                app: mongodb-provisioner
+            spec:
+              backoffLimit: 4
+              template:
+                spec:
+                  containers:
+                    - name: provisioner
+                      image: provisioner:latest  # Replace with your actual provisioner image
+                      command: ["mint-user"]
+                      env:
+                        - name: MONGO_ROOT_URI
+                          value: mongodb://$(MONGODB_SERVICE):27017/admin
+                        - name: ASSIGN_MONGO_WEBHOOK
+                          value: http://localhost:3000/provision/complete  # Adjust this URL as needed
+                        - name: TARGET_DATABASE
+                          valueFrom:
+                            fieldPath: spec.parameters.WEB_NAME
+                  restartPolicy: OnFailure
+          patches:
+            - fromFieldPath: spec.parameters.WEB_NAME
+              toFieldPath: metadata.name
+              transforms:
+                - type: string
+                  string:
+                    fmt: "%s-provisioner"
+
+    - step: setup-nightscout
+      dependsOn:
+        - setup-mongodb-user
+      resources:
+        - name: nightscout-deployment
+          base:
+            apiVersion: apps/v1
+            kind: Deployment
+            spec:
+              replicas: 1
+              template:
+                spec:
+                  containers:
+                    - name: nightscout
+                      image: nightscout/cgm-remote-monitor:latest
+                      env:
+                        - name: MONGODB_URI
+                          value: mongodb://$(MONGODB_SERVICE):27017/$(WEB_NAME)
+                      resources:
+                        requests:
+                          cpu: "5m"
+                          memory: "120Mi"
+                        limits:
+                          cpu: "500m"
+                          memory: "500Mi"
+          patches:
+            - fromFieldPath: spec.parameters.WEB_NAME
+              toFieldPath: metadata.name
+    - name: mongodb-pvc
+      base:
+        apiVersion: v1
+        kind: PersistentVolumeClaim
+        spec:
+          accessModes: ["ReadWriteOnce"]
+          resources:
+            requests:
+              storage: 1Gi
+      patches:
+        - fromFieldPath: spec.parameters.WEB_NAME
+          toFieldPath: metadata.name
+          transforms:
+            - type: string
+              string:
+                fmt: "%s-mongodb-data"
+        - fromFieldPath: spec.parameters.storageSize
+          toFieldPath: spec.resources.requests.storage
+
+    - name: mongodb-service
+      base:
+        apiVersion: v1
+        kind: Service
+        metadata:
+          labels:
+            app: mongodb
+        spec:
+          clusterIP: None
+          ports:
+            - port: 27017
+              targetPort: 27017
+          selector:
+            app: mongodb
+      patches:
+        - fromFieldPath: spec.parameters.WEB_NAME
+          toFieldPath: metadata.name
+          transforms:
+            - type: string
+              string:
+                fmt: "%s-mongodb"
+        - fromFieldPath: spec.parameters.WEB_NAME
+          toFieldPath: metadata.labels.instance
+        - fromFieldPath: spec.parameters.WEB_NAME
+          toFieldPath: spec.selector.instance
+
+    - name: mongodb-statefulset
+      base:
+        apiVersion: apps/v1
+        kind: StatefulSet
+        metadata:
+          labels:
+            app: mongodb
+        spec:
+          serviceName: mongodb
+          replicas: 1
+          selector:
+            matchLabels:
+              app: mongodb
+          template:
+            metadata:
+              labels:
+                app: mongodb
+            spec:
+              containers:
+                - name: mongodb
+                  image: mongo:4.4
+                  ports:
+                    - containerPort: 27017
+                  volumeMounts:
+                    - name: mongodb-data
+                      mountPath: /data/db
+                  resources:
+                    requests:
+                      cpu: "100m"
+                      memory: "256Mi"
+                    limits:
+                      cpu: "500m"
+                      memory: "512Mi"
+          volumeClaimTemplates:
+            - metadata:
+                name: mongodb-data
+              spec:
+                accessModes: ["ReadWriteOnce"]
+                resources:
+                  requests:
+                    storage: 1Gi
+      patches:
+        - fromFieldPath: spec.parameters.WEB_NAME
+          toFieldPath: metadata.name
+          transforms:
+            - type: string
+              string:
+                fmt: "%s-mongodb"
+        - fromFieldPath: spec.parameters.WEB_NAME
+          toFieldPath: metadata.labels.instance
+        - fromFieldPath: spec.parameters.WEB_NAME
+          toFieldPath: spec.selector.matchLabels.instance
+        - fromFieldPath: spec.parameters.WEB_NAME
+          toFieldPath: spec.template.metadata.labels.instance
+        - fromFieldPath: spec.parameters.storageSize
+          toFieldPath: spec.volumeClaimTemplates[0].spec.resources.requests.storage
+
+    - name: nightscout-deployment
+      base:
+        apiVersion: apps/v1
+        kind: Deployment
+        spec:
+          replicas: 1
+          template:
+            spec:
+              containers:
+                - name: nightscout
+                  image: nightscout/cgm-remote-monitor:latest
+                  resources:
+                    requests:
+                      cpu: "5m"
+                      memory: "120Mi"
+                    limits:
+                      cpu: "500m"
+                      memory: "500Mi"
+                - name: mongodb
+                  image: mongo:4.4
+                  resources:
+                    requests:
+                      cpu: "100m"
+                      memory: "256Mi"
+                    limits:
+                      cpu: "500m"
+                      memory: "512Mi"
+      patches:
+        - fromFieldPath: spec.parameters.WEB_NAME
+          toFieldPath: metadata.name
