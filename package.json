@@ -4,7 +4,7 @@
   "description": "Many unique environment for one server/process.",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
+    "test": "node test/k8s-safe.test.js && node test/k8s-token-leak.test.js",
     "start": "node master.js",
     "postinstall": "env"
   },
