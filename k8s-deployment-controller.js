@@ -2,6 +2,9 @@
 var restify = require('restify');
 var bunyan = require('bunyan');
 var _ = require('lodash');
+// never send or log raw k8s client results/errors: they carry the
+// service-account token (OPS-039, D-009)
+var k8s_safe = require('./lib/k8s-safe');
 var Consul = require('consul');
 var url = require('url');
 var dns = require('dns');
@@ -132,7 +135,7 @@ function configure (opts) {
       res.deployment = result.body;
       res.result = result.body;
       next( );
-    }).catch(next);
+    }).catch(k8s_safe.fail(next));
   }
 
   function format_multienv_compatible_result (req, res, next) {
@@ -156,7 +159,7 @@ function configure (opts) {
     var msg = {status: 'create or update starting' };
     appsApi.readNamespacedDeployment(req.params.name, selected_namespace).then(function (result) {
       msg.status = "readNamespacedDeployment result"
-      msg.result = result;
+      msg.result = k8s_safe.summary_result(result);
       console.log("replace or create", msg);
       var body = result.body;
       /*
@@ -170,17 +173,17 @@ function configure (opts) {
       console.log("before update", req.suggestion);
       appsApi.replaceNamespacedDeployment(body.metadata.name, selected_namespace, body).then(function (result) {
         msg.status = "replaceNamespacedDeployment result"
-        msg.result = result;
+        msg.result = k8s_safe.summary_result(result);
         console.log("replace or create", msg);
         res.header('Location', '/environs/' + body.metadata.name);
         res.result = result.body;
         next( );
-      }).catch(next);
+      }).catch(k8s_safe.fail(next));
     }).catch(function (err) {
-      console.log('first time creating?', err);
+      console.log('first time creating?', k8s_safe.summary(err));
       appsApi.createNamespacedDeployment(selected_namespace, req.deployment).then(function (result) {
         msg.status = "createNamespacedDeployment result"
-        msg.result = result;
+        msg.result = k8s_safe.summary_result(result);
         console.log("replace or create", msg);
         var body = result.body;
         res.header('Location', '/environs/' + body.metadata.name);
@@ -188,8 +191,8 @@ function configure (opts) {
         // res.result = result.body.data;
         next( );
       }).catch(function (err) {
-        console.log('error creating config map', err);
-        next(err);
+        console.log('error creating config map', k8s_safe.summary(err));
+        next(k8s_safe.error(err));
       });
     });
   }
@@ -243,7 +246,7 @@ function configure (opts) {
       res.status(204);
       res.end( );
       next( );
-    }).catch(next);
+    }).catch(k8s_safe.fail(next));
   }
 
   function suggest_deployment_template_params (req, res, next) {
@@ -264,7 +267,7 @@ function configure (opts) {
     const deploymentName = req.deployment.metadata.name;
 
     appsApi.createNamespacedDeployment(selected_namespace, req.deployment).then(function (result) {
-      res.result = result;
+      res.result = k8s_safe.wrapped(result);
       return next( );
     }).catch((err) => {
       // maybe previously existed but we are adding a new type of config or are
@@ -281,18 +284,18 @@ function configure (opts) {
         // value: { "updated-at": new Date().toISOString() }
         value: new Date().toISOString()
       }];
-      console.log("ATTEMPT TO PATCH DEPLOYMENT THAT COULD NOT BE CREATED", deploymentName, req.deployment, patch, err.response.body);
+      console.log("ATTEMPT TO PATCH DEPLOYMENT THAT COULD NOT BE CREATED", deploymentName, req.deployment, patch, k8s_safe.summary(err));
      // Perform the patch operation
      var options = { headers: { "Content-Type": "application/json-patch+json" } };
      appsApi.patchNamespacedDeployment(deploymentName, selected_namespace, patch, undefined, undefined, undefined, undefined, undefined, options)
        .then((result) => {
 				console.log(`deployment ${req.deployment.metadata.name} updated for rolling restart`);
         // res.result = deployment
-        res.result = result;
+        res.result = k8s_safe.wrapped(result);
         next( );
       }).catch((err) => {
-        console.error("Error updating deployment that couldn't be added.", err);
-        next(err);
+        console.error("Error updating deployment that couldn't be added.", k8s_safe.summary(err));
+        next(k8s_safe.error(err));
       });
     });
   }
@@ -313,12 +316,17 @@ function configure (opts) {
       .then((result) => {
 				console.log(`deployment ${targetDeployment} updated for rolling restart`);
         // res.result = deployment
-        res.result = result;
+        res.result = k8s_safe.wrapped(result);
         next( );
       }).catch((err) => {
-        console.error("Error updating deployment", err);
-        next(err);
+        console.error("Error updating deployment", k8s_safe.summary(err));
+        next(k8s_safe.error(err));
       });
+    }).catch((err) => {
+      // was an unhandled rejection: Node printed the whole HttpError (token
+      // included) and exited
+      console.error("Error reading deployment", targetDeployment, k8s_safe.summary(err));
+      next(k8s_safe.error(err));
     });
   }
 
@@ -330,7 +338,7 @@ function configure (opts) {
       res.status(204);
       res.end( );
       next( );
-    }).catch(next);
+    }).catch(k8s_safe.fail(next));
   }
 
   function list_configmaps (req, res, next) {
@@ -342,9 +350,9 @@ function configure (opts) {
     var labelSelector = req.query.labelSelector;
     var resourceVersion = null;
     k8s.listNamespacedConfigMap(selected_namespace, false, false, params.continue, fieldSelector, labelSelector, params.limit, resourceVersion).then(function (result, resp) {
-      res.result = result;
+      res.result = k8s_safe.wrapped(result);
       next( );
-    }).catch(next);
+    }).catch(k8s_safe.fail(next));
   }
 
   function list_deployments (req, res, next) {
@@ -356,9 +364,9 @@ function configure (opts) {
     var labelSelector = req.query.labelSelector;
     var resourceVersion = null;
     appsApi.listNamespacedDeployment(selected_namespace, false, false, params.continue, fieldSelector, labelSelector, params.limit, resourceVersion).then(function (result, resp) {
-      res.result = result;
+      res.result = k8s_safe.wrapped(result);
       next( );
-    }).catch(next);
+    }).catch(k8s_safe.fail(next));
   }
 
   function template_config_map (data) {
@@ -386,7 +394,7 @@ function configure (opts) {
     k8s.readNamespacedConfigMap(req.params.name, selected_namespace).then(function (result) {
       res.result = result.body;
       next( );
-    }).catch(next);
+    }).catch(k8s_safe.fail(next));
   }
 
   function format_result (req, res, next) {
@@ -399,7 +407,7 @@ function configure (opts) {
     var msg = {status: 'create or update starting' };
     k8s.readNamespacedConfigMap(req.params.name, selected_namespace).then(function (result) {
       msg.status = "readNamespacedConfigMap result"
-      msg.result = result;
+      msg.result = k8s_safe.summary_result(result);
       console.log("replace or create", msg);
       var body = result.body;
       if (req.params.field && req.configmap.data[req.params.field]) {
@@ -413,28 +421,28 @@ function configure (opts) {
       console.log("before update", req.suggestion);
       k8s.replaceNamespacedConfigMap(body.metadata.name, selected_namespace, body).then(function (result) {
         msg.status = "replaceNamespacedConfigMap result"
-        msg.result = result;
+        msg.result = k8s_safe.summary_result(result);
         console.log("replace or create", msg);
         res.header('Location', '/environs/' + body.metadata.name);
         res.result = result.body.data;
         next( );
       }).catch(function (err) {
-        console.log('error replacing config map', err, body);
-        next(err);
+        console.log('error replacing config map', k8s_safe.summary(err), body);
+        next(k8s_safe.error(err));
       });
     }).catch(function (err) {
-      console.log('first time creating?', err);
+      console.log('first time creating?', k8s_safe.summary(err));
       k8s.createNamespacedConfigMap(selected_namespace, req.configmap).then(function (result) {
         msg.status = "createNamespacedConfigMap result"
-        msg.result = result;
+        msg.result = k8s_safe.summary_result(result);
         console.log("replace or create", msg);
         var body = result.body;
         res.header('Location', '/environs/' + body.metadata.name);
         res.result = result.body.data;
         next( );
       }).catch(function (err) {
-        console.log('error creating config map', err);
-        next(err);
+        console.log('error creating config map', k8s_safe.summary(err));
+        next(k8s_safe.error(err));
       });
     });
   }
@@ -445,7 +453,7 @@ function configure (opts) {
       res.status(204);
       res.end( );
       next( );
-    }).catch(next);
+    }).catch(k8s_safe.fail(next));
   }
 
   function patch_configmap_remove_field (req, res, next) {
@@ -461,8 +469,8 @@ function configure (opts) {
       res.end( );
       next( );
     }).catch(function (err) {
-      console.log("ERROR PATCHING", err, err.response);
-      next(err);
+      console.log("ERROR PATCHING", k8s_safe.summary(err));
+      next(k8s_safe.error(err));
     });
   }
 
@@ -477,10 +485,10 @@ function configure (opts) {
     var options = { headers: { "Content-Type": "application/merge-patch+json" } };
     k8s.patchNamespacedConfigMap(targetConfigMap, selected_namespace, patch, undefined, undefined, undefined, undefined, undefined, options)
     .then(function (result) {
-      res.result = result;
+      res.result = k8s_safe.wrapped(result);
       next( );
     }).catch(function (err) {
-      next(err);
+      next(k8s_safe.error(err));
     });
   }
 
@@ -698,7 +706,7 @@ if (!module.parent) {
       console.log("CONNECTED", res.body.resources.length > 0);
       next( );
     }).catch(function (err) {
-      console.log("FAILURE", err);
+      console.log("FAILURE", k8s_safe.summary(err));
       process.exit(1);
     });
   })
