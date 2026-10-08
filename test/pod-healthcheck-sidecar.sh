@@ -59,6 +59,14 @@ running=$(docker inspect -f '{{.State.Running}}' "$name")
 docker stats --no-stream --format 'info mem {{.MemUsage}}' "$name"
 docker image inspect -f 'info image {{.RepoTags}} {{.Size}} bytes' "$image"
 
+# SIGTERM must stop it promptly, or every tenant pod waits out its whole
+# termination grace period.
+t0=$(date +%s)
+docker stop -t 10 "$name" >/dev/null
+t1=$(date +%s)
+code=$(docker inspect -f '{{.State.ExitCode}}' "$name")
+if [ $((t1 - t0)) -le 3 ] && [ "$code" != 137 ]; then echo "ok   stops on SIGTERM in $((t1 - t0))s (exit $code)"; else echo "FAIL took $((t1 - t0))s to stop (exit $code)"; fail=1; fi
+
 # Missing Downward API values: must exit non-zero instead of serving a path
 # that can never match.
 if docker run --rm --network none --read-only --tmpfs /www:size=1m,uid=$user,gid=$user --user "$user:$user" \

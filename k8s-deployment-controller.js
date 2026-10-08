@@ -284,17 +284,12 @@ function configure (opts) {
       // or hybrid environments.
       // With MULTIENV_TENANT_HEALTHCHECK=pod the restart also adds the
       // pod-healthcheck sidecar if the existing deployment lacks it.
-      restart_patch(deploymentName).then((patch) => {
-      console.log("ATTEMPT TO PATCH DEPLOYMENT THAT COULD NOT BE CREATED", deploymentName, req.deployment, patch, k8s_safe.summary(err));
-     // Perform the patch operation
-     var options = { headers: { "Content-Type": "application/json-patch+json" } };
-     return appsApi.patchNamespacedDeployment(deploymentName, selected_namespace, patch, undefined, undefined, undefined, undefined, undefined, options)
-       .then((result) => {
+      console.log("ATTEMPT TO PATCH DEPLOYMENT THAT COULD NOT BE CREATED", deploymentName, req.deployment, k8s_safe.summary(err));
+      restart_deployment(deploymentName).then((result) => {
 				console.log(`deployment ${req.deployment.metadata.name} updated for rolling restart`);
         // res.result = deployment
         res.result = k8s_safe.wrapped(result);
         next( );
-      });
       }).catch((err) => {
         console.error("Error updating deployment that couldn't be added.", k8s_safe.summary(err));
         next(k8s_safe.error(err));
@@ -302,38 +297,59 @@ function configure (opts) {
     });
   }
 
-  // The rolling-restart patch, plus the sidecar when adopting on restart.
-  function restart_patch (deploymentName, deployment) {
-    var patch = [ tenant_healthcheck.restart_op( ) ];
-    if (healthcheck.style != 'pod') return Promise.resolve(patch);
-    var read = deployment ? Promise.resolve(deployment)
-      : appsApi.readNamespacedDeployment(deploymentName, selected_namespace).then((result) => result.body);
-    return read.then((body) => patch.concat(tenant_healthcheck.adopt_ops(body, healthcheck)));
+  function patch_deployment (name, patch) {
+    var options = { headers: { "Content-Type": "application/json-patch+json" } };
+    return appsApi.patchNamespacedDeployment(name, selected_namespace, patch, undefined, undefined, undefined, undefined, undefined, options);
   }
 
+  function read_deployment_body (name) {
+    return appsApi.readNamespacedDeployment(name, selected_namespace).then((result) => result.body);
+  }
+
+  // Rolling restart, as 7deafde.  In pod mode the same patch also adopts the
+  // pod-healthcheck sidecar, guarded by the deployment's resourceVersion so
+  // two writers can't both add one.  If that fails, retry once from a fresh
+  // read, then fall back to the plain restart so the change that triggered
+  // it is never dropped.
+  function restart_deployment (name, deployment) {
+    if (healthcheck.style != 'pod') return patch_deployment(name, [ tenant_healthcheck.restart_op( ) ]);
+    var read = deployment ? Promise.resolve(deployment) : read_deployment_body(name);
+    return read.then((body) => patch_deployment(name, tenant_healthcheck.restart_and_adopt_ops(body, name, healthcheck)))
+      .catch((err) => {
+        console.log('restart with pod-healthcheck adoption failed, retrying', name, k8s_status(err));
+        return read_deployment_body(name).then((body) => patch_deployment(name, tenant_healthcheck.restart_and_adopt_ops(body, name, healthcheck)));
+      }).catch((err) => {
+        console.log('adoption failed twice, restarting without it', name, k8s_status(err));
+        return patch_deployment(name, [ tenant_healthcheck.restart_op( ) ]);
+      });
+  }
+
+  function k8s_status (err) {
+    return (err && (err.statusCode || (err.response && err.response.statusCode))) || 500;
+  }
+
+  // Status and name only, never the raw k8s result or error (OPS-039).
+  function send_k8s_error (res, next, name, err) {
+    var status = k8s_status(err);
+    res.json(status, { ok: false, name: name, status: status });
+    next(false);   // ends the route; format_result must not send again
+  }
 
   function handle_sync_updates (req, res, next) {
     console.log("INCOMING UPDATE", req.body);
     var annotations = req.body.object.metadata.annotations || { };
     var targetDeployment = annotations['tenant'] || req.body.object.metadata.name;
 		appsApi.readNamespacedDeployment(targetDeployment, selected_namespace).then((deployment) => {
-      return restart_patch(targetDeployment, deployment.body);
-    }).then((patch) => {
-      var options = { headers: { "Content-Type": "application/json-patch+json" } };
-      appsApi.patchNamespacedDeployment(targetDeployment, selected_namespace, patch, undefined, undefined, undefined, undefined, undefined, options)
-      .then((result) => {
+      return restart_deployment(targetDeployment, deployment.body);
+    }).then((result) => {
 				console.log(`deployment ${targetDeployment} updated for rolling restart`);
         // res.result = deployment
         res.result = k8s_safe.wrapped(result);
         next( );
-      }).catch((err) => {
-        console.error("Error updating deployment", k8s_safe.summary(err));
-        next(k8s_safe.error(err));
-      });
     }).catch((err) => {
-      // was an unhandled rejection: Node printed the whole HttpError (token
-      // included) and exited
-      console.error("Error reading deployment", targetDeployment, k8s_safe.summary(err));
+      // a failed read was an unhandled rejection in 7deafde: Node printed the
+      // whole HttpError (token included) and exited
+      console.error("Error updating deployment", targetDeployment, k8s_safe.summary(err));
       next(k8s_safe.error(err));
     });
   }
@@ -562,6 +578,12 @@ function configure (opts) {
       console.log("NOTHING TO DO SINCE POD IS NOT RUNNING", req.body);
       return next( );
     }
+    if (serviceData.metadata.deletionTimestamp) {
+      // A terminating pod still reports Running; re-registering it could
+      // resurrect an entry its deletion event already removed (D-011).
+      console.log("NOT REGISTERING TERMINATING POD", serviceData.metadata.name);
+      return next( );
+    }
 		const tenantName = serviceData.metadata.labels.tenant;
     if (!tenantName) {
       // gen4/isolate pods may lack the label; 7deafde registered these with
@@ -638,38 +660,40 @@ function configure (opts) {
 
   server.get('/healthchecks/pod/:name/assigned/podIP/:ip', assigned_ip_name_health_check);
   server.post('/healthchecks/pod/:name/adopt', function (req, res, next) {
-    patch_sidecar(req, res, next, function (body) {
-      var ops = tenant_healthcheck.adopt_ops(body, healthcheck);
-      return ops.length ? [ tenant_healthcheck.restart_op( ) ].concat(ops) : ops;
+    patch_sidecar(req, res, next, function (body, name) {
+      return tenant_healthcheck.adopt_ops(body, healthcheck).length ? tenant_healthcheck.restart_and_adopt_ops(body, name, healthcheck) : [ ];
     });
   });
   server.del('/healthchecks/pod/:name/adopt', function (req, res, next) {
     patch_sidecar(req, res, next, function (body) {
       var ops = tenant_healthcheck.unadopt_ops(body);
-      return ops.length ? [ tenant_healthcheck.restart_op( ) ].concat(ops) : ops;
+      return ops.length ? tenant_healthcheck.guard(body, tenant_healthcheck.restart_ops(body).concat(ops)) : ops;
     });
   });
 
   // Add or remove one tenant's pod-healthcheck sidecar (canary and rollback,
-  // independent of MULTIENV_TENANT_HEALTHCHECK).  Responds with a summary
-  // only, never the raw k8s result or error (OPS-039).
+  // independent of MULTIENV_TENANT_HEALTHCHECK).  Only for deployments whose
+  // pod template carries tenant=<name>.  Responds with a summary only, never
+  // the raw k8s result or error (OPS-039).
   function patch_sidecar (req, res, next, ops_for) {
     var name = req.params.name;
-    appsApi.readNamespacedDeployment(name, selected_namespace).then((result) => {
-      var patch = ops_for(result.body);
+    read_deployment_body(name).then((body) => {
+      if (!tenant_healthcheck.is_tenant_deployment(body, name)) {
+        return { status: 422, ok: false, name: name, reason: 'not a tenant deployment' };
+      }
+      var patch = ops_for(body, name);
       if (!patch.length) return { ok: true, name: name, changed: false };
-      var options = { headers: { "Content-Type": "application/json-patch+json" } };
-      return appsApi.patchNamespacedDeployment(name, selected_namespace, patch, undefined, undefined, undefined, undefined, undefined, options)
+      return patch_deployment(name, patch)
         .then(( ) => ({ ok: true, name: name, changed: true, ops: patch.length }));
     }).then((summary) => {
       console.log('pod-healthcheck sidecar', req.method, summary);
-      res.json(200, summary);
+      var status = summary.status || 200;
+      delete summary.status;
+      res.json(status, summary);
       next( );
     }).catch((err) => {
-      var status = (err && (err.statusCode || (err.response && err.response.statusCode))) || 500;
-      console.log('pod-healthcheck sidecar', req.method, name, 'failed', status);
-      res.json(status, { ok: false, name: name, status: status });
-      next( );
+      console.log('pod-healthcheck sidecar', req.method, name, 'failed', k8s_status(err));
+      send_k8s_error(res, next, name, err);
     });
   }
   server.get('/healthchecks/controller/self/:instance', function (req, res, next) {

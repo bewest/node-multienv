@@ -3,10 +3,13 @@
 // k8s-deployment-controller.js).  No cluster, no consul: k8s and consul are
 // fakes.  Run: node test/tenant-healthcheck.test.js
 //
-// Negative controls: set MULTIENV_TENANT_HEALTHCHECK default to 'pod' in
-// lib/tenant-healthcheck.js, or choose the pod URL from cfg.style instead of
-// the pod spec, and the "defaults reproduce 7deafde" and "no sidecar, no pod
-// URL" cases fail.
+// Negative controls (each was run and fails):
+// - default MULTIENV_TENANT_HEALTHCHECK to 'pod': "defaults: legacy ...",
+//   "legacy template equals 7deafde" and the legacy /sync/* cases fail;
+// - build the pod URL from config instead of the pod spec: "style=pod alone
+//   never yields a pod URL" and the named-port cases fail;
+// - give the sidecar envFrom: the sidecar spec case fails;
+// - drop the resourceVersion guard: the concurrent adoption cases fail.
 
 var assert = require('assert');
 var http = require('http');
@@ -69,21 +72,32 @@ function apply_patch (doc, ops) {
   return doc;
 }
 
-function deployment (spec) {
+function deployment (spec, opts) {
+  opts = opts || { };
+  var meta = { labels: { tenant: opts.tenant === undefined ? 'tenant-a' : opts.tenant } };
+  if (opts.tenant === null) delete meta.labels.tenant;
+  if (!opts.noAnnotations) meta.annotations = { 'managed-by': 'x' };
   return {
-    metadata: { name: 'tenant-a' },
-    spec: { template: { metadata: { annotations: { 'managed-by': 'x' } }, spec: spec } }
+    metadata: { name: 'tenant-a', resourceVersion: '100' },
+    spec: { template: { metadata: meta, spec: spec } }
   };
 }
 
 // ---------------------------------------------------------------- config
 
-test('defaults: legacy, 7deafde timings, no initial status', function () {
+test('defaults: legacy, 7deafde timings', function () {
   var cfg = hc.config({ });
   assert.strictEqual(cfg.style, 'legacy');
   assert.deepStrictEqual(cfg.endpoint, { interval: '10s', timeout: '', deregister: '20s' });
-  assert.deepStrictEqual(cfg.validpod, { interval: '5s', timeout: '', deregister: '5s', status: '' });
+  assert.deepStrictEqual(cfg.validpod, { interval: '5s', timeout: '', deregister: '5s' });
   assert.strictEqual(cfg.port, 1338);
+});
+
+test('an initially passing ValidPodName cannot be configured (D-011 §4)', function () {
+  var cfg = hc.config({ MULTIENV_CONSUL_VALIDPOD_INITIAL_STATUS: 'passing' });
+  var w = wire(hc.consul_checks(pod(), cfg, LEGACY_SERVICE));
+  assert.strictEqual(w[0].Status, undefined);
+  assert.strictEqual(w[1].Status, undefined);
 });
 
 test('unknown style falls back to legacy', function () {
@@ -91,10 +105,11 @@ test('unknown style falls back to legacy', function () {
   assert.strictEqual(hc.config({ MULTIENV_TENANT_HEALTHCHECK: 'POD' }).style, 'pod');
 });
 
-test('refuses the Nightscout port and bad statuses', function () {
+test('refuses the Nightscout port and malformed ports at boot', function () {
   assert.throws(function () { hc.config({ MULTIENV_TENANT_HEALTHCHECK_PORT: '1337' }); });
   assert.throws(function () { hc.config({ MULTIENV_TENANT_HEALTHCHECK_PORT: 'abc' }); });
-  assert.throws(function () { hc.config({ MULTIENV_CONSUL_VALIDPOD_INITIAL_STATUS: 'ok' }); });
+  assert.throws(function () { hc.config({ MULTIENV_TENANT_HEALTHCHECK_PORT: '1338abc' }); });
+  assert.throws(function () { hc.config({ MULTIENV_TENANT_HEALTHCHECK_PORT: '70000' }); });
 });
 
 // ---------------------------------------------------------------- consul checks
@@ -130,27 +145,31 @@ test('pod URL follows the port the pod declares, not the controller config', fun
   assert.ok(checks[1].http.indexOf('http://10.244.1.7:8080/') === 0, checks[1].http);
 });
 
-test('timing overrides and initial status reach the wire', function () {
+test('timing overrides reach the wire', function () {
   var cfg = hc.config({
-    MULTIENV_CONSUL_VALIDPOD_INTERVAL: '30s', MULTIENV_CONSUL_VALIDPOD_DEREGISTER_AFTER: '1m',
-    MULTIENV_CONSUL_VALIDPOD_TIMEOUT: '2s', MULTIENV_CONSUL_VALIDPOD_INITIAL_STATUS: 'passing',
+    MULTIENV_CONSUL_VALIDPOD_INTERVAL: '10s', MULTIENV_CONSUL_VALIDPOD_DEREGISTER_AFTER: '1m',
+    MULTIENV_CONSUL_VALIDPOD_TIMEOUT: '2s',
     MULTIENV_CONSUL_ENDPOINT_INTERVAL: '15s', MULTIENV_CONSUL_ENDPOINT_TIMEOUT: '3s'
   });
   var w = wire(hc.consul_checks(pod(), cfg, LEGACY_SERVICE));
   assert.strictEqual(w[0].Interval, '15s');
   assert.strictEqual(w[0].Timeout, '3s');
-  assert.strictEqual(w[0].Status, undefined);
-  assert.strictEqual(w[1].Interval, '30s');
+  assert.strictEqual(w[1].Interval, '10s');
   assert.strictEqual(w[1].Timeout, '2s');
-  assert.strictEqual(w[1].Status, 'passing');
   assert.strictEqual(w[1].DeregisterCriticalServiceAfter, '1m');
 });
 
 // ---------------------------------------------------------------- sidecar spec
 
-test('sidecar: no envFrom, hardened, Downward API env, named port', function () {
+test('sidecar: no envFrom, hardened, Downward API env, named port, no probes', function () {
   var c = hc.sidecar_container(hc.config({ }));
   assert.strictEqual(c.envFrom, undefined);
+  assert.strictEqual(c.livenessProbe, undefined);
+  assert.strictEqual(c.readinessProbe, undefined);
+  assert.strictEqual(c.startupProbe, undefined);
+  assert.strictEqual(c.imagePullPolicy, 'IfNotPresent');
+  assert.strictEqual(c.securityContext.runAsUser, 65534);
+  assert.deepStrictEqual(hc.sidecar_volume(), { name: 'pod-healthcheck-www', emptyDir: { sizeLimit: '1Mi' } });
   assert.strictEqual(c.securityContext.runAsNonRoot, true);
   assert.strictEqual(c.securityContext.readOnlyRootFilesystem, true);
   assert.strictEqual(c.securityContext.allowPrivilegeEscalation, false);
@@ -160,7 +179,7 @@ test('sidecar: no envFrom, hardened, Downward API env, named port', function () 
   assert.strictEqual(env.TENANT.valueFrom.fieldRef.fieldPath, "metadata.labels['tenant']");
   assert.strictEqual(env.POD_UID.valueFrom.fieldRef.fieldPath, 'metadata.uid');
   assert.strictEqual(env.PORT.value, '1338');
-  assert.deepStrictEqual(c.resources, { requests: { cpu: '1m', memory: '4Mi' }, limits: { cpu: '20m', memory: '16Mi' } });
+  assert.deepStrictEqual(c.resources, { requests: { cpu: '1m', memory: '4Mi' }, limits: { cpu: '20m', memory: '32Mi' } });
 });
 
 test('inject is idempotent', function () {
@@ -203,6 +222,36 @@ test('unadopt_ops is guarded by test ops and is empty without a sidecar', functi
   assert.strictEqual(ops[2].op, 'test');
 });
 
+test('adopt_ops tolerates a body without a pod template', function () {
+  assert.deepStrictEqual(hc.adopt_ops({ metadata: { } }, hc.config({ })), [ ]);
+  assert.deepStrictEqual(hc.unadopt_ops({ }), [ ]);
+});
+
+test('restart_and_adopt_ops: guarded by resourceVersion; a stale second adoption fails', function () {
+  var d = deployment({ containers: [ { name: 'nightscout' } ] });
+  var first = hc.restart_and_adopt_ops(d, 'tenant-a', hc.config({ }));
+  var second = hc.restart_and_adopt_ops(d, 'tenant-a', hc.config({ }));
+  assert.deepStrictEqual(first[0], { op: 'test', path: '/metadata/resourceVersion', value: '100' });
+  var after = apply_patch(d, first);
+  after.metadata.resourceVersion = '101';
+  assert.throws(function () { apply_patch(after, second); });
+  // and from a fresh read there is nothing to adopt: restart only, unguarded
+  assert.deepStrictEqual(hc.restart_and_adopt_ops(after, 'tenant-a', hc.config({ })).map(function (o) { return o.op; }), ['add']);
+});
+
+test('restart_and_adopt_ops: no sidecar for a deployment without tenant=<name>', function () {
+  var d = deployment({ containers: [ { name: 'nightscout' } ] }, { tenant: null });
+  assert.strictEqual(hc.restart_and_adopt_ops(d, 'tenant-a', hc.config({ })).length, 1);
+  var other = deployment({ containers: [ { name: 'nightscout' } ] }, { tenant: 'tenant-z' });
+  assert.strictEqual(hc.restart_and_adopt_ops(other, 'tenant-a', hc.config({ })).length, 1);
+});
+
+test('restart_ops works when the pod template has no annotations', function () {
+  var d = deployment({ containers: [ { name: 'nightscout' } ] }, { noAnnotations: true });
+  var after = apply_patch(d, hc.restart_ops(d));
+  assert.ok(after.spec.template.metadata.annotations['updated-at']);
+});
+
 // ---------------------------------------------------------------- controller wiring
 
 function fake_cluster (existing) {
@@ -221,6 +270,7 @@ function fake_cluster (existing) {
     },
     createNamespacedDeployment: function (ns, body) {
       calls.creates.push(body);
+      if (calls.create_error) return Promise.reject(calls.create_error);
       if (deployments[body.metadata.name]) {
         var err = new Error('conflict'); err.statusCode = 409; err.response = { statusCode: 409, body: { reason: 'AlreadyExists' } };
         return Promise.reject(err);
@@ -230,7 +280,19 @@ function fake_cluster (existing) {
     },
     patchNamespacedDeployment: function (name, ns, patch) {
       calls.patches.push({ name: name, patch: patch });
-      deployments[name] = apply_patch(deployments[name], patch);
+      if (calls.before_patch) calls.before_patch(name, patch);
+      if (calls.fail_guarded && patch[0] && patch[0].op == 'test' && patch[0].path == '/metadata/resourceVersion') {
+        calls.fail_guarded--;
+        var e = new Error('injected'); e.statusCode = 422; e.response = { statusCode: 422, request: { headers: { Authorization: 'Bearer FAKE-SA-TOKEN' } } };
+        return Promise.reject(e);
+      }
+      try {
+        deployments[name] = apply_patch(deployments[name], patch);
+      } catch (err) {
+        var e2 = new Error('patch failed'); e2.statusCode = 422; e2.response = { statusCode: 422, request: { headers: { Authorization: 'Bearer FAKE-SA-TOKEN' } } };
+        return Promise.reject(e2);
+      }
+      deployments[name].metadata.resourceVersion = String(+(deployments[name].metadata.resourceVersion || 0) + 1);
       return Promise.resolve({ body: deployments[name] });
     }
   };
@@ -246,7 +308,7 @@ function controller (cluster, env) {
   return configure({
     name: 'test', appsApi: cluster.appsApi, consul: cluster.consul, k8s: { },
     MULTIENV_K8S_NAMESPACE: 'default', MULTIENV_HEALTH_CHECK_SERVICE: LEGACY_SERVICE,
-    MULTIENV_TENANT_NODEPOOL_TARGET: 'pool',
+    MULTIENV_TENANT_NODEPOOL_TARGET: 'pool', MULTIENV_TENANT_REQUESTS_ENABLE: true, MULTIENV_TENANT_LIMITS_ENABLE: true,
     requests: { cpu: '5m', memory: '120Mi' }, limits: { cpu: '500m', memory: '500Mi' },
     default: { deployment: { annotations: { 'managed-by': 'x' }, labels: { managed: 'multienv' } },
                configmap: { annotations: { }, labels: { } } },
@@ -374,7 +436,7 @@ test('controller: adopt/unadopt routes work in legacy mode and are idempotent', 
   return with_server(cluster, { }, function (server) {
     return request(server, 'POST', '/healthchecks/pod/tenant-a/adopt').then(function (res) {
       assert.strictEqual(res.status, 200);
-      assert.deepStrictEqual(JSON.parse(res.body), { ok: true, name: 'tenant-a', changed: true, ops: 3 });
+      assert.deepStrictEqual(JSON.parse(res.body), { ok: true, name: 'tenant-a', changed: true, ops: 4 });
       return request(server, 'POST', '/healthchecks/pod/tenant-a/adopt');
     }).then(function (res) {
       assert.deepStrictEqual(JSON.parse(res.body), { ok: true, name: 'tenant-a', changed: false });
@@ -396,6 +458,91 @@ test('controller: adopt on a missing deployment returns a summary, never the k8s
       assert.strictEqual(res.status, 404);
       assert.deepStrictEqual(JSON.parse(res.body), { ok: false, name: 'nope', status: 404 });
       assert.ok(res.body.indexOf('FAKE-SA-TOKEN') < 0);
+    });
+  });
+});
+
+test('controller: legacy template equals 7deafde, field for field', function () {
+  var cluster = fake_cluster();
+  return with_server(cluster, { }, function (server) {
+    return request(server, 'POST', '/sync/additions', { type: 'ADDED', object: { metadata: { name: 'tenant-b' } } }).then(function () {
+      assert.deepStrictEqual(JSON.parse(JSON.stringify(cluster.calls.creates[0])), require('./fixtures/template-7deafde.json'));
+    });
+  });
+});
+
+test('controller: a terminating pod is not re-registered', function () {
+  var cluster = fake_cluster();
+  return with_server(cluster, { }, function (server) {
+    var p = pod(); p.metadata.deletionTimestamp = '2026-10-08T00:00:00Z';
+    return request(server, 'POST', '/consul/sync/updates', { type: 'MODIFIED', object: p }).then(function (res) {
+      assert.strictEqual(res.status, 200);
+      assert.strictEqual(cluster.calls.registrations.length, 0);
+    });
+  });
+});
+
+test('controller: /sync/updates for a missing deployment answers 404, no token, no crash', function () {
+  var cluster = fake_cluster();
+  return with_server(cluster, { MULTIENV_TENANT_HEALTHCHECK: 'pod' }, function (server) {
+    return request(server, 'POST', '/sync/updates', { type: 'MODIFIED', object: { metadata: { name: 'nope' } } }).then(function (res) {
+      assert.strictEqual(res.status, 404);
+      assert.ok(res.body.indexOf('FAKE-SA-TOKEN') < 0);
+    });
+  });
+});
+
+test('controller: create error without .response still restarts the existing deployment', function () {
+  var cluster = fake_cluster([ deployment({ containers: [ { name: 'nightscout' } ] }) ]);
+  cluster.calls.create_error = new Error('socket hang up');
+  return with_server(cluster, { }, function (server) {
+    return request(server, 'POST', '/sync/additions', { type: 'ADDED', object: { metadata: { name: 'tenant-a' } } }).then(function (res) {
+      assert.strictEqual(res.status, 200);
+      assert.strictEqual(cluster.calls.patches.length, 1);
+    });
+  });
+});
+
+test('controller: concurrent adoption by another replica leaves one sidecar and still restarts', function () {
+  var cluster = fake_cluster([ deployment({ containers: [ { name: 'nightscout' } ] }) ]);
+  var raced = false;
+  cluster.calls.before_patch = function (name) {
+    if (raced) return;
+    raced = true;   // another replica adopts between our read and our patch
+    var d = cluster.deployments[name];
+    cluster.deployments[name] = apply_patch(d, hc.adopt_ops(d, hc.config({ })));
+    cluster.deployments[name].metadata.resourceVersion = '150';
+  };
+  return with_server(cluster, { MULTIENV_TENANT_HEALTHCHECK: 'pod' }, function (server) {
+    return request(server, 'POST', '/sync/updates', { type: 'MODIFIED', object: { metadata: { name: 'tenant-a' } } }).then(function (res) {
+      assert.strictEqual(res.status, 200);
+      var names = cluster.deployments['tenant-a'].spec.template.spec.containers.map(function (c) { return c.name; });
+      assert.deepStrictEqual(names, ['nightscout', 'pod-healthcheck']);
+      assert.ok(cluster.deployments['tenant-a'].spec.template.metadata.annotations['updated-at']);
+    });
+  });
+});
+
+test('controller: if adoption keeps failing, the restart still happens', function () {
+  var cluster = fake_cluster([ deployment({ containers: [ { name: 'nightscout' } ] }) ]);
+  cluster.calls.fail_guarded = 2;
+  return with_server(cluster, { MULTIENV_TENANT_HEALTHCHECK: 'pod' }, function (server) {
+    return request(server, 'POST', '/sync/updates', { type: 'MODIFIED', object: { metadata: { name: 'tenant-a' } } }).then(function (res) {
+      assert.strictEqual(res.status, 200);
+      assert.strictEqual(cluster.calls.patches.length, 3);
+      assert.ok(!hc.has_sidecar(cluster.deployments['tenant-a'].spec.template.spec));
+      assert.ok(cluster.deployments['tenant-a'].spec.template.metadata.annotations['updated-at']);
+    });
+  });
+});
+
+test('controller: adopt refuses a deployment that is not tenant=<name>', function () {
+  var cluster = fake_cluster([ deployment({ containers: [ { name: 'nightscout' } ] }, { tenant: null }) ]);
+  return with_server(cluster, { }, function (server) {
+    return request(server, 'POST', '/healthchecks/pod/tenant-a/adopt').then(function (res) {
+      assert.strictEqual(res.status, 422);
+      assert.deepStrictEqual(JSON.parse(res.body), { ok: false, name: 'tenant-a', reason: 'not a tenant deployment' });
+      assert.strictEqual(cluster.calls.patches.length, 0);
     });
   });
 });
