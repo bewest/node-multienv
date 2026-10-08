@@ -8,6 +8,7 @@ var k8s_safe = require('./lib/k8s-safe');
 var Consul = require('consul');
 var url = require('url');
 var dns = require('dns');
+var tenant_healthcheck = require('./lib/tenant-healthcheck');
 
 function configure (opts) {
 
@@ -15,6 +16,7 @@ function configure (opts) {
   var appsApi = opts.appsApi;
   var consul = opts.consul;
   var selected_namespace = opts.MULTIENV_K8S_NAMESPACE;
+  var healthcheck = opts.healthcheck || tenant_healthcheck.config({ });
 
   var server = restify.createServer(opts);
 
@@ -120,6 +122,10 @@ function configure (opts) {
       template.spec.template.spec.nodeSelector = {
         'doks.digitalocean.com/node-pool': opts.MULTIENV_TENANT_NODEPOOL_TARGET
       };
+    }
+
+    if (healthcheck.style == 'pod') {
+      tenant_healthcheck.inject(template.spec.template.spec, healthcheck);
     }
 
     return template;
@@ -276,28 +282,33 @@ function configure (opts) {
       // TODO: consider creating a list of patches to add or remove configmaps
       // based on inspected labels and annotations to help support migrations
       // or hybrid environments.
-      const patch = [{
-        op: "add",
-        path: "/spec/template/metadata/annotations/updated-at",
-        // path: "/spec/template/metadata/annotations",
-        // path: "/metadata/annotations/updated-at",
-        // value: { "updated-at": new Date().toISOString() }
-        value: new Date().toISOString()
-      }];
+      // With MULTIENV_TENANT_HEALTHCHECK=pod the restart also adds the
+      // pod-healthcheck sidecar if the existing deployment lacks it.
+      restart_patch(deploymentName).then((patch) => {
       console.log("ATTEMPT TO PATCH DEPLOYMENT THAT COULD NOT BE CREATED", deploymentName, req.deployment, patch, k8s_safe.summary(err));
      // Perform the patch operation
      var options = { headers: { "Content-Type": "application/json-patch+json" } };
-     appsApi.patchNamespacedDeployment(deploymentName, selected_namespace, patch, undefined, undefined, undefined, undefined, undefined, options)
+     return appsApi.patchNamespacedDeployment(deploymentName, selected_namespace, patch, undefined, undefined, undefined, undefined, undefined, options)
        .then((result) => {
 				console.log(`deployment ${req.deployment.metadata.name} updated for rolling restart`);
         // res.result = deployment
         res.result = k8s_safe.wrapped(result);
         next( );
+      });
       }).catch((err) => {
         console.error("Error updating deployment that couldn't be added.", k8s_safe.summary(err));
         next(k8s_safe.error(err));
       });
     });
+  }
+
+  // The rolling-restart patch, plus the sidecar when adopting on restart.
+  function restart_patch (deploymentName, deployment) {
+    var patch = [ tenant_healthcheck.restart_op( ) ];
+    if (healthcheck.style != 'pod') return Promise.resolve(patch);
+    var read = deployment ? Promise.resolve(deployment)
+      : appsApi.readNamespacedDeployment(deploymentName, selected_namespace).then((result) => result.body);
+    return read.then((body) => patch.concat(tenant_healthcheck.adopt_ops(body, healthcheck)));
   }
 
 
@@ -306,11 +317,8 @@ function configure (opts) {
     var annotations = req.body.object.metadata.annotations || { };
     var targetDeployment = annotations['tenant'] || req.body.object.metadata.name;
 		appsApi.readNamespacedDeployment(targetDeployment, selected_namespace).then((deployment) => {
-      const patch = [{
-				op: "add",
-				path: "/spec/template/metadata/annotations/updated-at",
-				value: new Date().toISOString()
-			}];
+      return restart_patch(targetDeployment, deployment.body);
+    }).then((patch) => {
       var options = { headers: { "Content-Type": "application/json-patch+json" } };
       appsApi.patchNamespacedDeployment(targetDeployment, selected_namespace, patch, undefined, undefined, undefined, undefined, undefined, options)
       .then((result) => {
@@ -555,11 +563,15 @@ function configure (opts) {
       return next( );
     }
 		const tenantName = serviceData.metadata.labels.tenant;
+    if (!tenantName) {
+      // gen4/isolate pods may lack the label; 7deafde registered these with
+      // the tag "undefined" and a check URL that could never pass.
+      console.log("NOT REGISTERING POD WITHOUT A tenant LABEL", serviceData.metadata.name);
+      return next( );
+    }
 		const serviceID = `${tenantName}-${serviceData.metadata.namespace}`;
     var id = serviceData.metadata.uid;
     var host = serviceData.status.podIP;
-    var healthCheckService = url.parse(opts.MULTIENV_HEALTH_CHECK_SERVICE);
-    var validPodCheckUrl = url.format({ protocol: healthCheckService.protocol, hostname: healthCheckService.hostname, port: healthCheckService.port,  pathname: ('/healthchecks/pod/' + tenantName + '/assigned/podIP/' + host)});
     var port = 1337;
 		var insert = {
 			name: 'backends',
@@ -567,22 +579,9 @@ function configure (opts) {
 			port: port,
 			id: id,
 			tags: [ tenantName, serviceID, 'tenant', 'backend' ],
-			checks: [
-        {
-				name: "EndpointAvailable",
-				ttl: '30s',
-				interval: '10s',
-				http: url.format({protocol: 'http', hostname: host, port: port,  pathname: '/api/v1/status.txt'}),
-				deregister_critical_service_after: '20s'
-			},
-			{
-				name: "ValidPodName",
-				ttl: '10s',
-				interval: '5s',
-				http: validPodCheckUrl,
-				failures_before_critical: 1,
-				deregister_critical_service_after: '5s'
-			},
+			// EndpointAvailable and ValidPodName; ValidPodName goes to the pod's
+			// own sidecar only when this pod has one (lib/tenant-healthcheck.js).
+			checks: tenant_healthcheck.consul_checks(serviceData, healthcheck, opts.MULTIENV_HEALTH_CHECK_SERVICE)
 			/*
 			{
 				name: "ValidExpectedPort",
@@ -593,7 +592,6 @@ function configure (opts) {
 				deregister_critical_service_after: '1m'
 			},
 			*/
-			]
 		};
     consul.agent.service.register(insert, function (err, body, resp) {
       console.log("CREATED BACKEND SITE IN CONSUL", err, insert);
@@ -639,6 +637,41 @@ function configure (opts) {
   server.del('/environs/:name', delete_configmap);
 
   server.get('/healthchecks/pod/:name/assigned/podIP/:ip', assigned_ip_name_health_check);
+  server.post('/healthchecks/pod/:name/adopt', function (req, res, next) {
+    patch_sidecar(req, res, next, function (body) {
+      var ops = tenant_healthcheck.adopt_ops(body, healthcheck);
+      return ops.length ? [ tenant_healthcheck.restart_op( ) ].concat(ops) : ops;
+    });
+  });
+  server.del('/healthchecks/pod/:name/adopt', function (req, res, next) {
+    patch_sidecar(req, res, next, function (body) {
+      var ops = tenant_healthcheck.unadopt_ops(body);
+      return ops.length ? [ tenant_healthcheck.restart_op( ) ].concat(ops) : ops;
+    });
+  });
+
+  // Add or remove one tenant's pod-healthcheck sidecar (canary and rollback,
+  // independent of MULTIENV_TENANT_HEALTHCHECK).  Responds with a summary
+  // only, never the raw k8s result or error (OPS-039).
+  function patch_sidecar (req, res, next, ops_for) {
+    var name = req.params.name;
+    appsApi.readNamespacedDeployment(name, selected_namespace).then((result) => {
+      var patch = ops_for(result.body);
+      if (!patch.length) return { ok: true, name: name, changed: false };
+      var options = { headers: { "Content-Type": "application/json-patch+json" } };
+      return appsApi.patchNamespacedDeployment(name, selected_namespace, patch, undefined, undefined, undefined, undefined, undefined, options)
+        .then(( ) => ({ ok: true, name: name, changed: true, ops: patch.length }));
+    }).then((summary) => {
+      console.log('pod-healthcheck sidecar', req.method, summary);
+      res.json(200, summary);
+      next( );
+    }).catch((err) => {
+      var status = (err && (err.statusCode || (err.response && err.response.statusCode))) || 500;
+      console.log('pod-healthcheck sidecar', req.method, name, 'failed', status);
+      res.json(status, { ok: false, name: name, status: status });
+      next( );
+    });
+  }
   server.get('/healthchecks/controller/self/:instance', function (req, res, next) {
     var ok = (req.params.instance == MULTIENV_SELF_ADDRESS);
     res.json(ok ? 200 : 500, { ok, status:  ok ? 'OK' : "bad", host: MULTIENV_SELF_ADDRESS });
@@ -650,6 +683,8 @@ function configure (opts) {
   });
   return server;
 }
+
+module.exports = configure;
 
 if (!module.parent) {
   var port = parseInt(process.env.PORT || '2828')
@@ -667,6 +702,7 @@ if (!module.parent) {
     MULTIENV_TENANT_REQUESTS_ENABLE: (process.env.MULTIENV_TENANT_REQUESTS_ENABLE ||'1') != 'false',
     MULTIENV_TENANT_LIMITS_ENABLE: (process.env.MULTIENV_TENANT_LIMITS_ENABLE ||'1') != 'false',
     MULTIENV_HEALTH_CHECK_SERVICE: (process.env.MULTIENV_HEALTH_CHECK_SERVICE || 'http://multienv-deployment-controller.service.consul:3000'),
+    healthcheck: tenant_healthcheck.config(process.env),
     requests: {
       cpu: process.env.MULTIENV_TENANT_REQUESTS_CPU || '5m',
       memory: process.env.MULTIENV_TENANT_REQUESTS_MEMORY || '120Mi'
@@ -697,6 +733,7 @@ if (!module.parent) {
     }
   }
   };
+  console.log('tenant healthcheck', JSON.stringify(tenant_healthcheck.describe(config.healthcheck)));
   var boot = require('bootevent')( );
   boot.acquire(function k8s (ctx, next) {
     var my = this;
