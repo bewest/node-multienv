@@ -5,6 +5,7 @@ var _ = require('lodash');
 // never send or log raw k8s client results/errors: they carry the
 // service-account token (OPS-039, D-009)
 var k8s_safe = require('./lib/k8s-safe');
+var consulReconcile = require('./lib/consul-reconcile');
 var Consul = require('consul');
 var url = require('url');
 var dns = require('dns');
@@ -521,6 +522,27 @@ function configure (opts) {
   server.post('/consul/sync/updates', sync_consul_update, format_result);
   server.post('/consul/sync/deletions', sync_consul_deletion);
 
+  // F5a (Q-CONSUL-REGISTER-MISSING): register Running tenant pods that have no
+  // registration anywhere. Off unless MULTIENV_CONSUL_RECONCILE_INTERVAL is set.
+  if (opts.MULTIENV_CONSUL_RECONCILE_INTERVAL_MS > 0) {
+    server.consul_reconcile = consulReconcile({
+      consul: consul,
+      intervalMs: opts.MULTIENV_CONSUL_RECONCILE_INTERVAL_MS,
+      graceMs: opts.MULTIENV_CONSUL_RECONCILE_GRACE_MS,
+      ratePerSec: opts.MULTIENV_CONSUL_RECONCILE_RATE,
+      maxPerPass: opts.MULTIENV_CONSUL_RECONCILE_MAX,
+      firstDelayMs: opts.MULTIENV_CONSUL_RECONCILE_FIRST_DELAY_MS,
+      listPods: function ( ) {
+        return k8s.listNamespacedPod(selected_namespace, undefined, undefined, undefined, undefined, opts.MULTIENV_CONSUL_RECONCILE_SELECTOR)
+          .then(function (result) { return result.body.items || [ ]; });
+      },
+      register: function (pod, callback) {
+        consul.agent.service.register(consul_registration(pod), function (err) { callback(err); });
+      },
+    });
+    server.consul_reconcile.start( );
+  }
+
   function sync_consul_addition (req, res, next) {
 
     console.log("NOTHING TO DO WITH CONSUL SINCE POD IS NOT RUNNING", req.body);
@@ -548,12 +570,8 @@ function configure (opts) {
     });
   }
 
-  function sync_consul_update (req, res, next) {
-		const serviceData = req.body.object;
-    if (serviceData.status.phase != 'Running') {
-      console.log("NOTHING TO DO SINCE POD IS NOT RUNNING", req.body);
-      return next( );
-    }
+  // the backends registration for one Running tenant pod
+  function consul_registration (serviceData) {
 		const tenantName = serviceData.metadata.labels.tenant;
 		const serviceID = `${tenantName}-${serviceData.metadata.namespace}`;
     var id = serviceData.metadata.uid;
@@ -595,6 +613,16 @@ function configure (opts) {
 			*/
 			]
 		};
+    return insert;
+  }
+
+  function sync_consul_update (req, res, next) {
+		const serviceData = req.body.object;
+    if (serviceData.status.phase != 'Running') {
+      console.log("NOTHING TO DO SINCE POD IS NOT RUNNING", req.body);
+      return next( );
+    }
+    var insert = consul_registration(serviceData);
     consul.agent.service.register(insert, function (err, body, resp) {
       console.log("CREATED BACKEND SITE IN CONSUL", err, insert);
       if (err) {
@@ -667,6 +695,12 @@ if (!module.parent) {
     MULTIENV_TENANT_REQUESTS_ENABLE: (process.env.MULTIENV_TENANT_REQUESTS_ENABLE ||'1') != 'false',
     MULTIENV_TENANT_LIMITS_ENABLE: (process.env.MULTIENV_TENANT_LIMITS_ENABLE ||'1') != 'false',
     MULTIENV_HEALTH_CHECK_SERVICE: (process.env.MULTIENV_HEALTH_CHECK_SERVICE || 'http://multienv-deployment-controller.service.consul:3000'),
+    // F5a: e.g. 10m; unset or 0 is off
+    MULTIENV_CONSUL_RECONCILE_INTERVAL_MS: consulReconcile.parse_duration(process.env.MULTIENV_CONSUL_RECONCILE_INTERVAL) || 0,
+    MULTIENV_CONSUL_RECONCILE_GRACE_MS: consulReconcile.parse_duration(process.env.MULTIENV_CONSUL_RECONCILE_GRACE || '2m'),
+    MULTIENV_CONSUL_RECONCILE_RATE: parseFloat(process.env.MULTIENV_CONSUL_RECONCILE_RATE || '5'),
+    MULTIENV_CONSUL_RECONCILE_MAX: parseInt(process.env.MULTIENV_CONSUL_RECONCILE_MAX || '200'),
+    MULTIENV_CONSUL_RECONCILE_SELECTOR: process.env.MULTIENV_CONSUL_RECONCILE_SELECTOR || 'role=config-as-deploy,managed=multienv',
     requests: {
       cpu: process.env.MULTIENV_TENANT_REQUESTS_CPU || '5m',
       memory: process.env.MULTIENV_TENANT_REQUESTS_MEMORY || '120Mi'
@@ -748,3 +782,4 @@ if (!module.parent) {
   });
 }
 
+module.exports = exports = configure;
