@@ -118,6 +118,89 @@ test('pod mode: fallback keeps the image change when adoption keeps failing', fu
   });
 });
 
+// RC1: F3's config-version stamp (multienv.t1pal.org/config-rv) composes
+// with adoption and the image pin, on /sync/updates and on a re-addition.
+var CONFIG_RV = 'multienv.t1pal.org/config-rv';
+
+function post_sync (state, env, path, type, configmap) {
+  var server = configure({
+    name: 'test', appsApi: state.appsApi, k8s: { }, consul: { },
+    MULTIENV_K8S_NAMESPACE: 'default', MULTIENV_HEALTH_CHECK_SERVICE: 'http://c:3000/',
+    default: { deployment: { annotations: { }, labels: { } }, configmap: { annotations: { }, labels: { } } },
+    healthcheck: hc.config(env)
+  });
+  return new Promise(function (resolve) { server.listen(0, '127.0.0.1', resolve); }).then(function ( ) {
+    return new Promise(function (resolve, reject) {
+      var payload = JSON.stringify({ type: type, object: configmap });
+      var req = http.request({ host: '127.0.0.1', port: server.address( ).port, method: 'POST', path: path,
+        headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(payload) } }, function (res) {
+        res.resume( ); res.on('end', function ( ) { server.close( ); resolve(res.statusCode); });
+      });
+      req.on('error', reject);
+      req.end(payload);
+    });
+  });
+}
+
+function versioned_configmap (rv) {
+  var cm = tenant_configmap( );
+  cm.metadata.resourceVersion = String(rv);
+  cm.data = { WEB_NAME: 'tenant-a' };
+  return cm;
+}
+
+function with_create (state) {
+  state.appsApi.createNamespacedDeployment = function ( ) {
+    var e = new Error('exists'); e.statusCode = 409; e.body = { code: 409 }; return Promise.reject(e);
+  };
+  return state;
+}
+
+test('RC1 pod mode: /sync/updates restarts, adopts, sets the image and stamps the version in one guarded patch', function ( ) {
+  var state = cluster(0);
+  return post_sync(state, { MULTIENV_TENANT_HEALTHCHECK: 'pod' }, '/sync/updates', 'MODIFIED', versioned_configmap(42)).then(function (status) {
+    assert.strictEqual(status, 200);
+    assert.strictEqual(state.patches.length, 1);
+    assert.strictEqual(state.patches[0][0].op, 'test');
+    assert.deepStrictEqual(containers(state), [ 'nightscout=' + IMAGE, 'pod-healthcheck=busybox:1.36.1' ]);
+    assert.strictEqual(state.d.metadata.annotations[CONFIG_RV], '42');
+    assert.ok(!(CONFIG_RV in state.d.spec.template.metadata.annotations), 'stamp on the pod template');
+  });
+});
+
+test('RC1 pod mode: a re-addition with a changed version restarts, adopts, sets the image and moves the stamp', function ( ) {
+  var state = with_create(cluster(0));
+  state.d.metadata.annotations = { [CONFIG_RV]: '41' };
+  return post_sync(state, { MULTIENV_TENANT_HEALTHCHECK: 'pod' }, '/sync/additions', 'ADDED', versioned_configmap(42)).then(function (status) {
+    assert.strictEqual(status, 200);
+    assert.strictEqual(state.patches.length, 1);
+    assert.strictEqual(state.patches[0][0].op, 'test');
+    assert.deepStrictEqual(containers(state), [ 'nightscout=' + IMAGE, 'pod-healthcheck=busybox:1.36.1' ]);
+    assert.strictEqual(state.d.metadata.annotations[CONFIG_RV], '42');
+    assert.ok(state.d.spec.template.metadata.annotations['updated-at']);
+  });
+});
+
+test('RC1 pod mode: a re-addition with the same version patches nothing (no restart, no adoption)', function ( ) {
+  var state = with_create(cluster(0));
+  state.d.metadata.annotations = { [CONFIG_RV]: '42' };
+  return post_sync(state, { MULTIENV_TENANT_HEALTHCHECK: 'pod' }, '/sync/additions', 'ADDED', versioned_configmap(42)).then(function (status) {
+    assert.strictEqual(status, 200);
+    assert.strictEqual(state.patches.length, 0);
+  });
+});
+
+test('RC1 pod mode: an unstamped Deployment is stamped on re-addition without a restart or adoption', function ( ) {
+  var state = with_create(cluster(0));
+  return post_sync(state, { MULTIENV_TENANT_HEALTHCHECK: 'pod' }, '/sync/additions', 'ADDED', versioned_configmap(42)).then(function (status) {
+    assert.strictEqual(status, 200);
+    assert.strictEqual(state.patches.length, 1);
+    assert.deepStrictEqual(state.patches[0].map(function (op) { return op.path; }), [ '/metadata/annotations' ]);
+    assert.strictEqual(state.d.metadata.annotations[CONFIG_RV], '42');
+    assert.deepStrictEqual(containers(state), [ 'nightscout=nightscout/cgm-remote-monitor:latest' ]);
+  });
+});
+
 (function run (i, failed) {
   if (i >= cases.length) {
     console.log(failed ? (failed + ' of ' + cases.length + ' failed') : ('all ' + cases.length + ' passed'));

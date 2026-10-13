@@ -139,6 +139,27 @@ function syncPostToController (opts) {
   return tr;
 }
 
+// F5a (Q-CONSUL-REGISTER-MISSING): this process is the single consul
+// operator, so it is the one place that asks the controller for a
+// register-missing pass. The first pass comes one full interval after start,
+// so a restarting or overlapping operator pod doesn't add passes.
+var reconcile_timer = null;
+function startReconcileTimer (opts) {
+  if (reconcile_timer || !(opts.interval > 0)) { return; }
+  var endpoint = url.parse(opts.gateway);
+  var api = url.format({hostname: endpoint.hostname, port: endpoint.port, protocol: endpoint.protocol,
+    pathname: path.join(endpoint.pathname, '/sync/reconcile') });
+  console.log('CONSUL RECONCILE every', opts.interval, 'ms via', api);
+  reconcile_timer = setInterval(function ( ) {
+    got.post(api, {json: { }, timeout: opts.timeout, retry: 0}).json( ).then(function (summary) {
+      console.log('CONSUL RECONCILE', JSON.stringify(summary));
+    }).catch(function (err) {
+      var body = err && err.response && err.response.body;
+      console.log('CONSUL RECONCILE FAILED', err && err.response && err.response.statusCode, typeof body == 'string' ? body.slice(0, 300) : k8s_safe.summary(err));
+    });
+  }, opts.interval);
+}
+
 function naiveGetFromGateway (opts) {
   // each element in the stream describes a tenant
 
@@ -431,6 +452,13 @@ if (!module.parent) {
     filter_none: process.env.FILTER_NONE == '1'
   };
 
+  // F5a: e.g. 10m on the consul operator only; unset is off
+  var reconcile_opts = {
+    gateway: CLUSTER_GATEWAY,
+    interval: require('./lib/consul-reconcile').parse_duration(process.env.MULTIENV_CONSUL_RECONCILE_INTERVAL) || 0,
+    timeout: 5 * 60 * 1000,
+  };
+
   function businessStreamsFor (controller) {
     switch(controller) {
       case 'deployment':
@@ -502,6 +530,7 @@ if (!module.parent) {
 
   })
   .boot(function booted (ctx) {
+    startReconcileTimer(reconcile_opts);
     var watcher = resumableWatch(_.extend({ }, resume_opts, {
       watch: new k8slib.Watch(ctx.kc),
       list: ctx.list,
