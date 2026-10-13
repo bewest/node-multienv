@@ -6,6 +6,9 @@ var transform = require('parallel-transform');
 var got = require('got');
 var url = require('url');
 var path = require('path');
+// never log raw k8s client results/errors: they carry the service-account
+// token (OPS-039, D-009)
+var k8s_safe = require('./lib/k8s-safe');
 
 var stream = require('stream');
 
@@ -64,7 +67,7 @@ function naivePostToGateway (opts) {
       update.gateway = {err: null, success: body};
       callback(null, update);
     }).catch(function (err) {
-      console.log(name, "ERROR POST", name, api, arguments);
+      console.log(name, "ERROR POST", name, api, k8s_safe.summary(err));
       update.gateway = {err: err};
       callback(null, update);
     });
@@ -107,7 +110,7 @@ function syncPostToController (opts) {
       update.gateway = {err: null, success: body};
       callback(null, update);
     }).catch(function (err) {
-      console.log(name, "ERROR POST", name, api, arguments);
+      console.log(name, "ERROR POST", name, api, k8s_safe.summary(err));
       update.gateway = {err: err};
       callback(null, update);
     });
@@ -133,7 +136,7 @@ function naiveGetFromGateway (opts) {
       update.health = {err: null, success: body};
       callback(null, update);
     }).catch(function (err) {
-      console.log(name, "ERROR GET", api, arguments);
+      console.log(name, "ERROR GET", api, k8s_safe.summary(err));
       update.health = {err: err};
       callback(null, update);
     });
@@ -185,7 +188,7 @@ function inspectBookmarks (opts, k8s) {
         }
         return callback(err);
       }).catch(function (missing) {
-        console.log('NO EXISTING BOOKMARK', bookmarkName, bookmarkNamespace, missing);
+        console.log('NO EXISTING BOOKMARK', bookmarkName, bookmarkNamespace, k8s_safe.summary(missing));
         callback(err);
       });
 
@@ -245,7 +248,7 @@ function saveBookMark (opts, k8s) {
         console.log("CREATED BOOKMARK CONFIGMAP", res.body);
         return callback( );
       }).catch(function (err) {
-        console.log("COULD NOT CREATE BOOKMARK CONFIGMAP", bookmark_config, err);
+        console.log("COULD NOT CREATE BOOKMARK CONFIGMAP", bookmark_config, k8s_safe.summary(err));
         return callback( );
 
       });
@@ -338,7 +341,7 @@ function configure (opts) {
     },
     // done callback is called if the watch terminates normally
     function (err) {
-      console.log(err);
+      console.log(err && k8s_safe.summary(err));
     }
   );
   // function predicate (data) { }
@@ -409,12 +412,24 @@ if (!module.parent) {
       ctx.k8s.getAPIResources( ).then(function (res) {
         console.log("CONNECTED", res.body.resources.length > 0);
         next( );
-      }).catch(my.fail);
+      }).catch(function (err) {
+        // what bootevent's fail does, without the raw error
+        console.error(k8s_safe.summary(err));
+        process.exit(1);
+      });
     })
     .acquire(async function describe_latest_resource_version (ctx, next) {
 
       // Get latest resourceVersion, along with a count of active changes
-      const stream = await ctx.k8s.listNamespacedConfigMap(WATCH_NAMESPACE, false, false, undefined, WATCH_FIELDSELECTOR, WATCH_LABELSELECTOR, 1, undefined, undefined, undefined,  undefined, undefined, {});
+      let stream;
+      try {
+        stream = await ctx.k8s.listNamespacedConfigMap(WATCH_NAMESPACE, false, false, undefined, WATCH_FIELDSELECTOR, WATCH_LABELSELECTOR, 1, undefined, undefined, undefined,  undefined, undefined, {});
+      } catch (err) {
+        // was an unhandled rejection: Node printed the whole HttpError (token
+        // included) and exited
+        console.error(k8s_safe.summary(err));
+        return process.exit(1);
+      }
       console.log("FOUND LATEST", stream.body, stream.body.metadata.resourceVersion);
       if (!INIT_WITH_FULL_AUDIT) {
         watch_opts.resourceVersion = stream.body.metadata.resourceVersion;
@@ -476,7 +491,7 @@ if (!module.parent) {
           }
           );
       }).catch(function (err) {
-        boot.fail(err);
+        boot.fail(k8s_safe.summary(err));
       });
     });
   }

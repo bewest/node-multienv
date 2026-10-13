@@ -2,6 +2,9 @@
 var restify = require('restify');
 var bunyan = require('bunyan');
 var _ = require('lodash');
+// never send or log raw k8s client results/errors: they carry the
+// service-account token (OPS-039, D-009)
+var k8s_safe = require('./lib/k8s-safe');
 
 function configure (opts) {
 
@@ -45,7 +48,7 @@ function configure (opts) {
     k8s.readNamespacedConfigMap(req.params.name, selected_namespace).then(function (result) {
       res.result = result.body;
       next( );
-    }).catch(next);
+    }).catch(k8s_safe.fail(next));
   }
 
   function format_result (req, res, next) {
@@ -75,7 +78,7 @@ function configure (opts) {
     var msg = {status: 'create or update starting' };
     k8s.readNamespacedConfigMap(req.params.name, selected_namespace).then(function (result) {
       msg.status = "readNamespacedConfigMap result"
-      msg.result = result;
+      msg.result = k8s_safe.summary_result(result);
       console.log("replace or create", msg);
       var body = result.body;
       if (req.params.field && req.configmap.data[req.params.field]) {
@@ -87,25 +90,25 @@ function configure (opts) {
       console.log("before update", req.suggestion);
       k8s.replaceNamespacedConfigMap(body.metadata.name, selected_namespace, body).then(function (result) {
         msg.status = "replaceNamespacedConfigMap result"
-        msg.result = result;
+        msg.result = k8s_safe.summary_result(result);
         console.log("replace or create", msg);
         res.header('Location', '/environs/' + body.metadata.name);
         res.result = result.body.data;
         next( );
-      }).catch(next);
+      }).catch(k8s_safe.fail(next));
     }).catch(function (err) {
-      console.log('first time creating?', err);
+      console.log('first time creating?', k8s_safe.summary(err));
       k8s.createNamespacedConfigMap(selected_namespace, req.configmap).then(function (result) {
         msg.status = "createNamespacedConfigMap result"
-        msg.result = result;
+        msg.result = k8s_safe.summary_result(result);
         console.log("replace or create", msg);
         var body = result.body;
         res.header('Location', '/environs/' + body.metadata.name);
         res.result = result.body.data;
         next( );
       }).catch(function (err) {
-        console.log('error creating config map', err);
-        next(err);
+        console.log('error creating config map', k8s_safe.summary(err));
+        next(k8s_safe.error(err));
       });
     });
   }
@@ -134,7 +137,7 @@ function configure (opts) {
       res.status(204);
       res.end( );
       next( );
-    }).catch(next);
+    }).catch(k8s_safe.fail(next));
   }
 
   server.get('/inspect/:name', fetch_config_map, format_result );
@@ -171,7 +174,7 @@ if (!module.parent) {
       console.log("CONNECTED", res.body.resources.length > 0);
       next( );
     }).catch(function (err) {
-      console.log("FAILURE", err);
+      console.log("FAILURE", k8s_safe.summary(err));
       process.exit(1);
     });
   })
