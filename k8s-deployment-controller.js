@@ -522,26 +522,29 @@ function configure (opts) {
   server.post('/consul/sync/updates', sync_consul_update, format_result);
   server.post('/consul/sync/deletions', sync_consul_deletion);
 
-  // F5a (Q-CONSUL-REGISTER-MISSING): register Running tenant pods that have no
-  // registration anywhere. Off unless MULTIENV_CONSUL_RECONCILE_INTERVAL is set.
-  if (opts.MULTIENV_CONSUL_RECONCILE_INTERVAL_MS > 0) {
-    server.consul_reconcile = consulReconcile({
-      consul: consul,
-      intervalMs: opts.MULTIENV_CONSUL_RECONCILE_INTERVAL_MS,
-      graceMs: opts.MULTIENV_CONSUL_RECONCILE_GRACE_MS,
-      ratePerSec: opts.MULTIENV_CONSUL_RECONCILE_RATE,
-      maxPerPass: opts.MULTIENV_CONSUL_RECONCILE_MAX,
-      firstDelayMs: opts.MULTIENV_CONSUL_RECONCILE_FIRST_DELAY_MS,
-      listPods: function ( ) {
-        return k8s.listNamespacedPod(selected_namespace, undefined, undefined, undefined, undefined, opts.MULTIENV_CONSUL_RECONCILE_SELECTOR)
-          .then(function (result) { return result.body.items || [ ]; });
-      },
-      register: function (pod, callback) {
-        consul.agent.service.register(consul_registration(pod), function (err) { callback(err); });
-      },
+  // F5a (Q-CONSUL-REGISTER-MISSING): one pass that registers Running tenant
+  // pods with no registration anywhere. Nothing runs it unless asked: the
+  // consul operator calls it on MULTIENV_CONSUL_RECONCILE_INTERVAL, or an
+  // operator by hand. Answers with the pass's counts.
+  var consul_reconcile = consulReconcile({
+    consul: consul,
+    graceMs: opts.MULTIENV_CONSUL_RECONCILE_GRACE_MS,
+    ratePerSec: opts.MULTIENV_CONSUL_RECONCILE_RATE,
+    maxPerPass: opts.MULTIENV_CONSUL_RECONCILE_MAX,
+    listPods: function ( ) {
+      return k8s.listNamespacedPod(selected_namespace, undefined, undefined, undefined, undefined, opts.MULTIENV_CONSUL_RECONCILE_SELECTOR)
+        .then(function (result) { return result.body.items || [ ]; });
+    },
+    register: function (pod, callback) {
+      consul.agent.service.register(consul_registration(pod), function (err) { callback(err); });
+    },
+  });
+  server.post('/consul/sync/reconcile', function (req, res, next) {
+    consul_reconcile.runOnce( ).then(function (summary) {
+      res.json(summary.skipped ? 409 : (summary.error ? 500 : 200), summary);
+      next( );
     });
-    server.consul_reconcile.start( );
-  }
+  });
 
   function sync_consul_addition (req, res, next) {
 
@@ -695,8 +698,7 @@ if (!module.parent) {
     MULTIENV_TENANT_REQUESTS_ENABLE: (process.env.MULTIENV_TENANT_REQUESTS_ENABLE ||'1') != 'false',
     MULTIENV_TENANT_LIMITS_ENABLE: (process.env.MULTIENV_TENANT_LIMITS_ENABLE ||'1') != 'false',
     MULTIENV_HEALTH_CHECK_SERVICE: (process.env.MULTIENV_HEALTH_CHECK_SERVICE || 'http://multienv-deployment-controller.service.consul:3000'),
-    // F5a: e.g. 10m; unset or 0 is off
-    MULTIENV_CONSUL_RECONCILE_INTERVAL_MS: consulReconcile.parse_duration(process.env.MULTIENV_CONSUL_RECONCILE_INTERVAL) || 0,
+    // F5a, per pass (POST /consul/sync/reconcile)
     MULTIENV_CONSUL_RECONCILE_GRACE_MS: consulReconcile.parse_duration(process.env.MULTIENV_CONSUL_RECONCILE_GRACE || '2m'),
     MULTIENV_CONSUL_RECONCILE_RATE: parseFloat(process.env.MULTIENV_CONSUL_RECONCILE_RATE || '5'),
     MULTIENV_CONSUL_RECONCILE_MAX: parseInt(process.env.MULTIENV_CONSUL_RECONCILE_MAX || '200'),

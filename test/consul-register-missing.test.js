@@ -2,9 +2,10 @@
 'use strict';
 // Q-CONSUL-REGISTER-MISSING (F5a); OPS-071, OPS-073.
 //
-// lib/consul-reconcile.js and its wiring in k8s-deployment-controller.js,
-// against a fake Consul HTTP API (catalog health, agent register, sessions,
-// KV lock) and a fake pod list.
+// lib/consul-reconcile.js, the controller's POST /consul/sync/reconcile, and
+// the consul operator's timer in k8s-dispatcher.js, against a fake Consul HTTP
+// API (catalog health, agent register), a fake pod list and a fake
+// Kubernetes API for the dispatcher.
 //
 //   node test/consul-register-missing.test.js
 //   OPERATOR_WATCH_CONTROL=<tree at 7deafde> node test/consul-register-missing.test.js
@@ -20,6 +21,8 @@ var http = require('http');
 var url = require('url');
 var Module = require('module');
 var Consul = require('consul');
+var child_process = require('child_process');
+var os = require('os');
 
 var SRC = path.join(__dirname, '..');
 var CONTROL = process.env.OPERATOR_WATCH_CONTROL || '';
@@ -42,7 +45,7 @@ function entry (tenant, uid) {
 // existing: [entry]; hooks.health(n, tag, entries) may return other entries
 function fakeConsul (existing, hooks) {
   hooks = hooks || { };
-  var state = { registered: [ ], sessions: { }, lock: null, nextSession: 1, health: 0, requests: 0, registerFails: 0 };
+  var state = { registered: [ ], health: 0, requests: 0, registerFails: 0 };
   function entries ( ) {
     return existing.concat(state.registered.map(function (r) { return entry(r.Tags[0], r.ID); }));
   }
@@ -69,22 +72,6 @@ function fakeConsul (existing, hooks) {
         state.registered.push(JSON.parse(body));
         return send(200);
       }
-      if (u.pathname == '/v1/session/create') {
-        var id = 'session-' + (state.nextSession++);
-        state.sessions[id] = JSON.parse(body || '{}');
-        return send(200, { ID: id });
-      }
-      if ((m = u.pathname.match(/^\/v1\/session\/renew\/(.+)$/))) {
-        if (!state.sessions[m[1]]) { return send(404, 'Session id not found'); }
-        return send(200, [ { ID: m[1] } ]);
-      }
-      if ((m = u.pathname.match(/^\/v1\/kv\/(.+)$/)) && u.query.acquire) {
-        var sid = u.query.acquire;
-        if (!state.sessions[sid]) { return send(500, 'invalid session'); }
-        if (state.lock && state.lock != sid && state.sessions[state.lock]) { return send(200, false); }
-        state.lock = sid;
-        return send(200, true);
-      }
       send(404, 'fake consul: ' + u.pathname);
     });
   });
@@ -107,7 +94,7 @@ async function withConsul (existing, hooks, fn) {
 
 function reconciler (consul, pods, extra) {
   return consulReconcile(Object.assign({
-    consul: consul, intervalMs: 60000, ratePerSec: 1000,
+    consul: consul, ratePerSec: 1000,
     listPods: function ( ) { return Promise.resolve(pods); },
     register: function (p, cb) {
       consul.agent.service.register({ name: 'backends', id: p.metadata.uid, address: p.status.podIP, port: 1337, tags: [ p.metadata.labels.tenant, 'tenant', 'backend' ] }, function (err) { cb(err); });
@@ -131,7 +118,25 @@ function loadController (dir) {
   return m.exports;
 }
 
-async function controllerPass (dir, consul, pods, interval) {
+function post (port, p) {
+  return new Promise(function (resolve, reject) {
+    var req = http.request({ host: '127.0.0.1', port: port, method: 'POST', path: p,
+      headers: { 'content-type': 'application/json', 'content-length': 2 } }, function (res) {
+      var chunks = [ ];
+      res.on('data', function (c) { chunks.push(c); });
+      res.on('end', function ( ) {
+        var text = Buffer.concat(chunks).toString( );
+        var body; try { body = JSON.parse(text); } catch (e) { body = text; }
+        resolve({ status: res.statusCode, body: body });
+      });
+    });
+    req.on('error', reject);
+    req.end('{}');
+  });
+}
+
+// start the controller with fakes; fn(port, listed)
+async function withController (dir, consul, pods, fn) {
   var configure = loadController(dir);
   var listed = [ ];
   var k8s = { listNamespacedPod: function (ns, a, b, c, d, selector) {
@@ -139,22 +144,70 @@ async function controllerPass (dir, consul, pods, interval) {
     return Promise.resolve({ body: { items: pods } });
   } };
   var log = console.log;
-  if (!VERBOSE) { console.log = function ( ) { }; }
-  var server = configure({
-    k8s: k8s, appsApi: { }, consul: consul, MULTIENV_K8S_NAMESPACE: 'hosted-tenants',
-    MULTIENV_HEALTH_CHECK_SERVICE: 'http://multienv-deployment-controller:3000',
-    MULTIENV_CONSUL_RECONCILE_INTERVAL_MS: interval, MULTIENV_CONSUL_RECONCILE_FIRST_DELAY_MS: 0,
-    MULTIENV_CONSUL_RECONCILE_GRACE_MS: 120000, MULTIENV_CONSUL_RECONCILE_RATE: 1000, MULTIENV_CONSUL_RECONCILE_MAX: 200,
-    MULTIENV_CONSUL_RECONCILE_SELECTOR: 'role=config-as-deploy,managed=multienv',
-    requests: { }, limits: { }, default: { deployment: { annotations: { }, labels: { } }, configmap: { annotations: { }, labels: { } } },
-  });
+  var write = process.stdout.write;
+  if (!VERBOSE) { console.log = function ( ) { }; process.stdout.write = function ( ) { return true; }; }
+  var server;
   try {
-    await sleep(700);
+    server = configure({
+      k8s: k8s, appsApi: { }, consul: consul, MULTIENV_K8S_NAMESPACE: 'hosted-tenants',
+      MULTIENV_HEALTH_CHECK_SERVICE: 'http://multienv-deployment-controller:3000',
+      MULTIENV_CONSUL_RECONCILE_GRACE_MS: 120000, MULTIENV_CONSUL_RECONCILE_RATE: 1000, MULTIENV_CONSUL_RECONCILE_MAX: 200,
+      MULTIENV_CONSUL_RECONCILE_SELECTOR: 'role=config-as-deploy,managed=multienv',
+      requests: { }, limits: { }, default: { deployment: { annotations: { }, labels: { } }, configmap: { annotations: { }, labels: { } } },
+    });
+    var port = await listen(server);
+    return await fn(port, listed);
   } finally {
     console.log = log;
-    if (server.consul_reconcile) { server.consul_reconcile.stop( ); }
+    process.stdout.write = write;
+    if (server) { server.close( ); }
   }
-  return { listed: listed, reconcile: !!server.consul_reconcile };
+}
+
+// ---- the consul operator (k8s-dispatcher.js) as a process ----------------
+
+function fakeK8s ( ) {
+  return http.createServer(function (req, res) {
+    var u = url.parse(req.url, true);
+    res.writeHead(200, { 'content-type': 'application/json' });
+    if (u.pathname.replace(/\/$/, '') == '/api/v1') {
+      return res.end(JSON.stringify({ kind: 'APIResourceList', resources: [ { name: 'pods', namespaced: true, kind: 'Pod' } ] }));
+    }
+    if (u.query.watch) { return res.write(''); }   // a watch that stays open, with no events
+    res.end(JSON.stringify({ kind: 'List', metadata: { resourceVersion: '1' }, items: [ ] }));
+  });
+}
+
+async function runOperator (dir, env, ms) {
+  var api = fakeK8s( );
+  var calls = [ ];
+  var gw = http.createServer(function (req, res) {
+    calls.push(req.url);
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ pods: 0, registered: 0 }));
+  });
+  var apiPort = await listen(api);
+  var gwPort = await listen(gw);
+  var work = fs.mkdtempSync(path.join(os.tmpdir(), 'f5a-'));
+  var kubeconfig = path.join(work, 'kubeconfig.json');
+  fs.writeFileSync(kubeconfig, JSON.stringify({
+    apiVersion: 'v1', kind: 'Config', 'current-context': 'fake',
+    clusters: [ { name: 'fake', cluster: { server: 'http://127.0.0.1:' + apiPort } } ],
+    users: [ { name: 'fake', user: { token: 'f5a-fake-token' } } ],
+    contexts: [ { name: 'fake', context: { cluster: 'fake', user: 'fake', namespace: 'default' } } ],
+  }));
+  var child = child_process.spawn(process.execPath, [ path.join(dir, 'k8s-dispatcher.js') ], { cwd: dir, stdio: VERBOSE ? 'inherit' : 'ignore',
+    env: Object.assign({ }, process.env, {
+      MULTIENV_K8S_AUTH: 'local', KUBECONFIG: kubeconfig, SYNC_CONTROLLER: 'deployment', FILTER_NONE: '1',
+      WATCH_ENDPOINT: '/api/v1/namespaces/default/pods', WATCH_LABELSELECTOR: 'role=config-as-deploy,managed=multienv',
+      CLUSTER_GATEWAY: 'http://127.0.0.1:' + gwPort + '/consul/' }, env) });
+  var started = Date.now( );
+  await sleep(ms);
+  child.kill('SIGKILL');
+  api.close( );
+  gw.close( );
+  fs.rmSync(work, { recursive: true, force: true });
+  return { calls: calls, started: started };
 }
 
 var MIXED = [
@@ -168,29 +221,35 @@ var MIXED = [
 var CASES = [
   {
     id: 'r1', control: true,
-    what: 'the controller, with MULTIENV_CONSUL_RECONCILE_INTERVAL set, registers only the Running pod with no registration',
+    what: 'POST /consul/sync/reconcile registers only the Running pod with no registration, and answers with counts',
     run: function (dir) {
       return withConsul([ entry('tenant-a') ], null, async function (consul, state) {
-        var r = await controllerPass(dir, consul, MIXED, 60000);
-        assert.deepStrictEqual(ids(state), [ 'uid-tenant-b' ], 'registered');
-        var reg = state.registered[0];
-        assert.strictEqual(reg.Name, 'backends');
-        assert.strictEqual(reg.Address, '10.0.2.8');
-        assert.ok(reg.Tags.indexOf('tenant-b') > -1, 'tenant tag');
-        assert.strictEqual(reg.Checks.length, 2, 'same checks as /consul/sync');
-        assert.deepStrictEqual(r.listed, [ { ns: 'hosted-tenants', selector: 'role=config-as-deploy,managed=multienv' } ]);
+        await withController(dir, consul, MIXED, async function (port, listed) {
+          var r = await post(port, '/consul/sync/reconcile');
+          assert.strictEqual(r.status, 200, 'status');
+          assert.deepStrictEqual(ids(state), [ 'uid-tenant-b' ], 'registered');
+          assert.strictEqual(r.body.missing, 1);
+          assert.strictEqual(r.body.registered, 1);
+          var reg = state.registered[0];
+          assert.strictEqual(reg.Name, 'backends');
+          assert.strictEqual(reg.Address, '10.0.2.8');
+          assert.ok(reg.Tags.indexOf('tenant-b') > -1, 'tenant tag');
+          assert.strictEqual(reg.Checks.length, 2, 'same checks as /consul/sync');
+          assert.deepStrictEqual(listed, [ { ns: 'hosted-tenants', selector: 'role=config-as-deploy,managed=multienv' } ]);
+        });
       });
     },
   },
   {
     id: 'r2', control: false,
-    what: 'off by default: no interval, no timer, no Consul or pod requests',
+    what: 'the controller does nothing by itself: no Consul or pod requests until a pass is asked for',
     run: function (dir) {
       return withConsul([ ], null, async function (consul, state) {
-        var r = await controllerPass(dir, consul, MIXED, 0);
-        assert.strictEqual(r.reconcile, false, 'reconcile started');
-        assert.strictEqual(state.requests, 0, 'consul requests');
-        assert.strictEqual(r.listed.length, 0, 'pod lists');
+        await withController(dir, consul, MIXED, async function (port, listed) {
+          await sleep(500);
+          assert.strictEqual(state.requests, 0, 'consul requests');
+          assert.strictEqual(listed.length, 0, 'pod lists');
+        });
       });
     },
   },
@@ -200,7 +259,6 @@ var CASES = [
     run: function ( ) {
       return withConsul([ entry('tenant-a'), entry('tenant-b') ], null, async function (consul, state) {
         var s = await reconciler(consul, [ pod('tenant-a'), pod('tenant-b') ]).runOnce( );
-        assert.strictEqual(s.leader, true);
         assert.strictEqual(s.missing, 0);
         assert.strictEqual(state.registered.length, 0);
       });
@@ -208,13 +266,15 @@ var CASES = [
   },
   {
     id: 'r4', control: false,
-    what: 'two replicas at once: only the lock holder registers, each missing pod once',
-    run: function ( ) {
+    what: 'a second pass asked for while one is running in the same controller is refused (409)',
+    run: function (dir) {
       return withConsul([ ], null, async function (consul, state) {
-        var pods = [ pod('tenant-a'), pod('tenant-b'), pod('tenant-c') ];
-        var both = await Promise.all([ reconciler(consul, pods).runOnce( ), reconciler(consul, pods).runOnce( ) ]);
-        assert.deepStrictEqual(both.map(function (s) { return s.leader; }).sort( ), [ false, true ], 'leaders');
-        assert.deepStrictEqual(ids(state), [ 'uid-tenant-a', 'uid-tenant-b', 'uid-tenant-c' ]);
+        var pods = [ 'a', 'b', 'c' ].map(function (x) { return pod('tenant-' + x); });
+        await withController(dir, consul, pods, async function (port) {
+          var both = await Promise.all([ post(port, '/consul/sync/reconcile'), post(port, '/consul/sync/reconcile') ]);
+          assert.deepStrictEqual(both.map(function (r) { return r.status; }).sort( ), [ 200, 409 ], 'statuses');
+          assert.deepStrictEqual(ids(state), [ 'uid-tenant-a', 'uid-tenant-b', 'uid-tenant-c' ]);
+        });
       });
     },
   },
@@ -275,19 +335,20 @@ var CASES = [
     },
   },
   {
-    id: 'r9', control: false,
-    what: 'the session is renewed between passes, and replaced when Consul has dropped it',
-    run: function ( ) {
-      return withConsul([ ], null, async function (consul, state) {
-        var r = reconciler(consul, [ ]);
-        assert.strictEqual((await r.runOnce( )).leader, true);
-        assert.strictEqual((await r.runOnce( )).leader, true);
-        assert.strictEqual(state.nextSession, 2, 'one session for two passes');
-        state.sessions = { };
-        assert.strictEqual((await r.runOnce( )).leader, true);
-        assert.strictEqual(state.nextSession, 3, 'a new session after the old one was dropped');
-        assert.strictEqual(state.sessions['session-2'].TTL, '120s', 'TTL is twice the interval');
-      });
+    id: 'r9', control: true,
+    what: 'the consul operator, with MULTIENV_CONSUL_RECONCILE_INTERVAL set, asks for a pass every interval',
+    run: async function (dir) {
+      var r = await runOperator(dir, { MULTIENV_CONSUL_RECONCILE_INTERVAL: '400ms' }, 1900);
+      var passes = r.calls.filter(function (u) { return u == '/consul/sync/reconcile'; });
+      assert.ok(passes.length >= 2 && passes.length <= 4, 'passes: ' + passes.length);
+    },
+  },
+  {
+    id: 'r9b', control: false,
+    what: 'the consul operator asks for no pass when MULTIENV_CONSUL_RECONCILE_INTERVAL is unset',
+    run: async function (dir) {
+      var r = await runOperator(dir, { }, 1200);
+      assert.strictEqual(r.calls.filter(function (u) { return /reconcile/.test(u); }).length, 0, 'passes');
     },
   },
   {
