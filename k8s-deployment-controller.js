@@ -279,13 +279,78 @@ function configure (opts) {
 
   }
 
+  // F3 (OPS-036, Q-CONTROLLER-IDEMPOTENT-ADD): the tenant ConfigMap version a
+  // Deployment was last made from, on the Deployment's own metadata (not the
+  // pod template, so writing it restarts nothing).
+  var CONFIG_RV = 'multienv.t1pal.org/config-rv';
+
+  // the version to stamp, only for the tenant's own ConfigMap
+  function applied_config_rv (req, deploymentName) {
+    var meta = (req.body && req.body.object && req.body.object.metadata) || { };
+    if (!meta.resourceVersion || meta.name != deploymentName) { return null; }
+    return String(meta.resourceVersion);
+  }
+
+  // JSON patch ops that set the stamp on an existing Deployment
+  function stamp_ops (deployment, rv) {
+    if (deployment.metadata && deployment.metadata.annotations) {
+      return [{ op: "add", path: "/metadata/annotations/" + CONFIG_RV.replace(/~/g, '~0').replace(/\//g, '~1'), value: rv }];
+    }
+    return [{ op: "add", path: "/metadata/annotations", value: { [CONFIG_RV]: rv } }];
+  }
+
+  function http_status (err) {
+    return err && (err.statusCode || (err.response && err.response.statusCode) || (err.body && err.body.code));
+  }
+
   function handle_sync_addition (req, res, next) {
     const deploymentName = req.deployment.metadata.name;
+    const rv = opts.MULTIENV_SYNC_ADD_ALWAYS_RESTART ? null : applied_config_rv(req, deploymentName);
+    if (rv) {
+      req.deployment.metadata.annotations = { ...req.deployment.metadata.annotations, [CONFIG_RV]: rv };
+    }
+
+    function done (promise, why) {
+      promise.then((result) => {
+        console.log(`deployment ${deploymentName} ${why}`);
+        res.result = k8s_safe.wrapped(result);
+        next( );
+      }).catch((err) => {
+        console.error("Error updating deployment that couldn't be added.", k8s_safe.summary(err));
+        next(k8s_safe.error(err));
+      });
+    }
 
     appsApi.createNamespacedDeployment(selected_namespace, req.deployment).then(function (result) {
       res.result = k8s_safe.wrapped(result);
       return next( );
     }).catch((err) => {
+      if (rv && http_status(err) == 409) {
+        // Already exists. A repeated addition (a re-list, a full-audit
+        // replay) restarts the tenant only when its ConfigMap changed since
+        // the Deployment was made from it.
+        return read_deployment_body(deploymentName).then(function (existing) {
+          var annotations = (existing.metadata && existing.metadata.annotations) || { };
+          var stamped = annotations[CONFIG_RV];
+          if (stamped == rv) {
+            console.log("DEPLOYMENT ALREADY FROM THIS CONFIG, NOT RESTARTING", deploymentName, rv);
+            res.result = { body: existing };
+            return next( );
+          }
+          if (!stamped) {
+            // made before stamps existed: assume it matches its ConfigMap
+            return done(patch_deployment(deploymentName, stamp_ops(existing, rv)), `stamped with config ${rv}, not restarted`);
+          }
+          // changed: restart as /sync/updates would (sidecar adoption in pod
+          // mode, the tenant's image), with the new stamp on the same patch
+          console.log("CONFIG CHANGED SINCE DEPLOYMENT WAS MADE", deploymentName, stamped, rv);
+          var extra_ops = (body) => nightscout_image.update_patch(body, req.body.object, opts).concat(stamp_ops(body, rv));
+          return done(restart_deployment(deploymentName, existing, extra_ops), `updated for rolling restart (config ${stamped} -> ${rv})`);
+        }).catch((err) => {
+          console.error("Error reading deployment that couldn't be added.", deploymentName, k8s_safe.summary(err));
+          next(k8s_safe.error(err));
+        });
+      }
       // maybe previously existed but we are adding a new type of config or are
       // transitioning configmaps in or out of labels configured for different
       // watches to facilitate a hybrid or migrating environment.
@@ -295,15 +360,7 @@ function configure (opts) {
       // With MULTIENV_TENANT_HEALTHCHECK=pod the restart also adds the
       // pod-healthcheck sidecar if the existing deployment lacks it.
       console.log("ATTEMPT TO PATCH DEPLOYMENT THAT COULD NOT BE CREATED", deploymentName, req.deployment, k8s_safe.summary(err));
-      restart_deployment(deploymentName).then((result) => {
-				console.log(`deployment ${req.deployment.metadata.name} updated for rolling restart`);
-        // res.result = deployment
-        res.result = k8s_safe.wrapped(result);
-        next( );
-      }).catch((err) => {
-        console.error("Error updating deployment that couldn't be added.", k8s_safe.summary(err));
-        next(k8s_safe.error(err));
-      });
+      done(restart_deployment(deploymentName), 'updated for rolling restart');
     });
   }
 
@@ -364,8 +421,11 @@ function configure (opts) {
 		appsApi.readNamespacedDeployment(targetDeployment, selected_namespace).then((deployment) => {
       // Per-tenant image override lives on the tenant's own ConfigMap; skip
       // supplementary objects that point at the tenant via annotations.tenant.
-      var image_ops = (targetDeployment == req.body.object.metadata.name)
-        ? (body) => nightscout_image.update_patch(body, req.body.object, opts)
+      // F3: the restart also records which ConfigMap version it applies.
+      var own = targetDeployment == req.body.object.metadata.name;
+      var rv = applied_config_rv(req, targetDeployment);
+      var image_ops = (own || rv)
+        ? (body) => (own ? nightscout_image.update_patch(body, req.body.object, opts) : [ ]).concat(rv ? stamp_ops(body, rv) : [ ])
         : null;
       return restart_deployment(targetDeployment, deployment.body, image_ops);
     }).then((result) => {
@@ -756,6 +816,8 @@ if (!module.parent) {
     MULTIENV_NIGHTSCOUT_IMAGE_PULL_POLICY: process.env.MULTIENV_NIGHTSCOUT_IMAGE_PULL_POLICY,
     MULTIENV_HEALTH_CHECK_SERVICE: (process.env.MULTIENV_HEALTH_CHECK_SERVICE || 'http://multienv-deployment-controller.service.consul:3000'),
     healthcheck: tenant_healthcheck.config(process.env),
+    // F3 off: every repeated addition restarts the tenant, as before
+    MULTIENV_SYNC_ADD_ALWAYS_RESTART: process.env.MULTIENV_SYNC_ADD_ALWAYS_RESTART == '1',
     requests: {
       cpu: process.env.MULTIENV_TENANT_REQUESTS_CPU || '5m',
       memory: process.env.MULTIENV_TENANT_REQUESTS_MEMORY || '120Mi'
@@ -837,4 +899,3 @@ if (!module.parent) {
     });
   });
 }
-
