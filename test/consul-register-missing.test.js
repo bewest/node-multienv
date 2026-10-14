@@ -35,7 +35,13 @@ function pod (tenant, opts) {
   opts = opts || { };
   var meta = { name: tenant + '-pod', namespace: 'hosted-tenants', uid: 'uid-' + tenant, labels: { tenant: tenant, role: 'config-as-deploy', managed: 'multienv' } };
   if (opts.deleting) { meta.deletionTimestamp = LONG_AGO; }
-  return { metadata: meta, status: { phase: opts.phase || 'Running', podIP: '10.0.2.' + tenant.length, startTime: opts.startTime || LONG_AGO } };
+  var status = { phase: opts.phase || 'Running', podIP: '10.0.2.' + tenant.length, startTime: opts.startTime || LONG_AGO,
+    conditions: [ { type: 'Ready', status: opts.notReady ? 'False' : 'True' } ] };
+  if (opts.notReady) {
+    status.containerStatuses = [ { name: 'nightscout', ready: false, restartCount: 7,
+      state: { waiting: { reason: 'CrashLoopBackOff' } } } ];
+  }
+  return { metadata: meta, status: status };
 }
 
 function entry (tenant, uid) {
@@ -216,6 +222,7 @@ var MIXED = [
   pod('tenant-c', { phase: 'Pending' }),                   // not running
   pod('tenant-d', { deleting: true }),                     // terminating
   pod('tenant-e', { startTime: new Date( ).toISOString( ) }), // inside the grace period
+  pod('tenant-f', { notReady: true }),                     // crash-looping: Running, IP, not Ready
 ];
 
 var CASES = [
@@ -361,6 +368,31 @@ var CASES = [
       assert.strictEqual(d('1500'), 1500);
       assert.strictEqual(d(''), 0);
       assert.ok(isNaN(d('ten minutes')));
+    },
+  },
+  {
+    id: 'r11', control: false,
+    what: 'a crash-looping pod (Running with an IP, not Ready) is not registered',
+    run: function ( ) {
+      return withConsul([ ], null, async function (consul, state) {
+        var s = await reconciler(consul, [ pod('tenant-a', { notReady: true }), pod('tenant-b') ]).runOnce( );
+        assert.strictEqual(s.missing, 1, 'missing');
+        assert.deepStrictEqual(ids(state), [ 'uid-tenant-b' ], 'registered');
+      });
+    },
+  },
+  {
+    id: 'r12', control: false,
+    what: 'a pass that fails reports a k8s_safe summary of the error (the 500 body), not the raw error',
+    run: async function ( ) {
+      var closed = http.createServer( );
+      var port = await listen(closed);
+      await new Promise(function (r) { closed.close(r); });
+      var consul = new Consul({ host: '127.0.0.1', port: String(port) });
+      var s = await reconciler(consul, [ pod('tenant-a') ]).runOnce( );
+      assert.strictEqual(typeof s.error, 'object', 'error: ' + JSON.stringify(s.error));
+      assert.ok(!('stack' in s.error), 'stack in the body');
+      assert.ok(s.error.code || s.error.message, 'says what failed');
     },
   },
 ];
