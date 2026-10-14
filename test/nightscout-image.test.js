@@ -51,7 +51,9 @@ test('invalid values fall back with a log line', function ( ) {
   var r = ni.resolve({ MULTIENV_NIGHTSCOUT_IMAGE: 'nightscout/cgm-remote-monitor:15.0.7' }, tenant(bad), log);
   assert.deepStrictEqual(r, { image: 'nightscout/cgm-remote-monitor:15.0.7', source: 'env' });
   assert.strictEqual(log.lines.length, 1);
-  assert.match(log.lines[0].msg, /INVALID ns\.mdn\.io\/nightscout-image/);
+  assert.match(log.lines[0].msg, /IGNORED ns\.mdn\.io\/nightscout-image/);
+  assert.strictEqual(JSON.stringify(log.lines[0].detail).indexOf('rm -rf'), -1);
+  assert.strictEqual(JSON.stringify(log.lines[0].detail).indexOf('tenant-a'), -1);
 
   log = capture( );
   r = ni.resolve({ MULTIENV_NIGHTSCOUT_IMAGE: 'has space:latest', MULTIENV_NIGHTSCOUT_IMAGE_PULL_POLICY: 'sometimes' }, undefined, log);
@@ -92,4 +94,49 @@ test('update_patch applies and then reverts a canary', function ( ) {
     { op: 'replace', path: '/spec/template/spec/containers/0/image', value: ni.DEFAULT_IMAGE },
     { op: 'remove', path: '/spec/template/metadata/annotations/ns.mdn.io~1nightscout-image' }
   ]);
+});
+
+test('boot refuses an image pin that is set but invalid (no fallback to :latest)', function ( ) {
+  var bad = [ 'has space:latest', 'nightscout/cgm-remote-monitor@sha256:' + 'AB12'.repeat(16),
+    'nightscout/cgm-remote-monitor@sha256:' + 'ab12'.repeat(15), 'Nightscout/CGM' ];
+  bad.forEach(function (value) {
+    assert.throws(function ( ) { ni.check_config({ MULTIENV_NIGHTSCOUT_IMAGE: value }); }, /MULTIENV_NIGHTSCOUT_IMAGE/, value);
+  });
+  assert.doesNotThrow(function ( ) { ni.check_config({ }); });
+  assert.doesNotThrow(function ( ) { ni.check_config({ MULTIENV_NIGHTSCOUT_IMAGE: '' }); });
+  assert.doesNotThrow(function ( ) { ni.check_config({ MULTIENV_NIGHTSCOUT_IMAGE: 'nightscout/cgm-remote-monitor@' + DIGEST }); });
+  assert.throws(function ( ) { ni.check_config({ MULTIENV_NIGHTSCOUT_IMAGE_REPOS: 'nightscout/cgm-remote-monitor:latest' }); }, /REPOS/);
+  assert.throws(function ( ) { ni.check_config({ MULTIENV_NIGHTSCOUT_IMAGE_REPOS: 'ok/repo,,' }); }, /REPOS/);
+  assert.doesNotThrow(function ( ) { ni.check_config({ MULTIENV_NIGHTSCOUT_IMAGE_REPOS: 'nightscout/cgm-remote-monitor, registry.example.org/t1pal/nightscout' }); });
+});
+
+test('annotation must be pinned by digest and from an allowed repository', function ( ) {
+  var env = { MULTIENV_NIGHTSCOUT_IMAGE: 'nightscout/cgm-remote-monitor@' + DIGEST };
+  var cases = [
+    [ 'nightscout/cgm-remote-monitor:15.0.9', 'not pinned by digest' ],
+    [ 'nightscout/cgm-remote-monitor:latest', 'not pinned by digest' ],
+    [ 'nightscout/cgm-remote-monitor@sha256:' + 'AB12'.repeat(16), 'malformed' ],
+    [ 'nightscout/cgm-remote-monitor@sha256:' + 'ab12'.repeat(15), 'malformed' ],
+    [ 'someone/else@' + DIGEST, 'repository not allowed' ],
+    [ 'docker.io/nightscout/cgm-remote-monitor@' + DIGEST, 'repository not allowed' ]
+  ];
+  cases.forEach(function (c) {
+    var log = capture( );
+    var annotations = { }; annotations[ni.ANNOTATION] = c[0];
+    var r = ni.resolve(env, tenant(annotations), log);
+    assert.deepStrictEqual(r, { image: env.MULTIENV_NIGHTSCOUT_IMAGE, source: 'env' }, c[0]);
+    assert.strictEqual(log.lines.length, 1, c[0]);
+    assert.strictEqual(log.lines[0].detail.reason, c[1], c[0]);
+    assert.strictEqual(JSON.stringify(log.lines[0].detail).indexOf(c[0]), -1, 'value not logged');
+  });
+  var ok = { }; ok[ni.ANNOTATION] = 'nightscout/cgm-remote-monitor:15.0.9@' + DIGEST;
+  assert.strictEqual(ni.resolve(env, tenant(ok)).source, 'annotation');
+  var other = { }; other[ni.ANNOTATION] = 'registry.example.org/t1pal/nightscout@' + DIGEST;
+  assert.strictEqual(ni.resolve(env, tenant(other)).source, 'env');
+  assert.strictEqual(ni.resolve(Object.assign({ MULTIENV_NIGHTSCOUT_IMAGE_REPOS: 'registry.example.org/t1pal/nightscout' }, env), tenant(other)).source, 'annotation');
+});
+
+test('update_patch ignores an unpinned annotation and keeps the current image', function ( ) {
+  var annotations = { }; annotations[ni.ANNOTATION] = 'attacker/image:latest';
+  assert.deepStrictEqual(ni.update_patch(deployment(ni.DEFAULT_IMAGE), tenant(annotations), { }, capture( )), [ ]);
 });

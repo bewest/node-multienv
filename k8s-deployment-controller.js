@@ -840,6 +840,8 @@ if (!module.parent) {
   var MULTIENV_SELF_REGISTRATION_NAME = (process.env.MULTIENV_SELF_REGISTRATION_NAME || 'multienv-deployment-controller');
   var MULTIENV_SELF_ADDRESS = (process.env.POD_IP || process.env.HOSTNAME);
   var CONSUL = process.env.CONSUL || 'http://consul.service.consul';
+  // Refuse to boot on an unusable image pin rather than fall back to :latest.
+  nightscout_image.check_config(process.env);
   var config = {
     MULTIENV_K8S_NAMESPACE: process.env.MULTIENV_K8S_NAMESPACE || 'default',
     MULTIENV_TENANT_NODEPOOL_TARGET: process.env.MULTIENV_TENANT_NODEPOOL_TARGET || 'bigger-tenant-runners',
@@ -847,6 +849,7 @@ if (!module.parent) {
     MULTIENV_TENANT_LIMITS_ENABLE: (process.env.MULTIENV_TENANT_LIMITS_ENABLE ||'1') != 'false',
     MULTIENV_NIGHTSCOUT_IMAGE: process.env.MULTIENV_NIGHTSCOUT_IMAGE || nightscout_image.DEFAULT_IMAGE,
     MULTIENV_NIGHTSCOUT_IMAGE_PULL_POLICY: process.env.MULTIENV_NIGHTSCOUT_IMAGE_PULL_POLICY,
+    MULTIENV_NIGHTSCOUT_IMAGE_REPOS: process.env.MULTIENV_NIGHTSCOUT_IMAGE_REPOS,
     MULTIENV_HEALTH_CHECK_SERVICE: (process.env.MULTIENV_HEALTH_CHECK_SERVICE || 'http://multienv-deployment-controller.service.consul:3000'),
     healthcheck: tenant_healthcheck.config(process.env),
     // F3 off: every repeated addition restarts the tenant, as before
