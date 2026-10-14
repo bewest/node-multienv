@@ -9,7 +9,9 @@
 // - build the pod URL from config instead of the pod spec: "style=pod alone
 //   never yields a pod URL" and the named-port cases fail;
 // - give the sidecar envFrom: the sidecar spec case fails;
-// - drop the resourceVersion guard: the concurrent adoption cases fail.
+// - drop the resourceVersion guard: the concurrent adoption cases fail;
+// - accept any MULTIENV_CONSUL_* timing string (as 2919b34 did): "refuses
+//   malformed Consul check timings at boot" fails.
 
 var assert = require('assert');
 var http = require('http');
@@ -113,6 +115,21 @@ test('refuses the Nightscout port and malformed ports at boot', function () {
 });
 
 // ---------------------------------------------------------------- consul checks
+
+test('refuses malformed Consul check timings at boot', function () {
+  ['MULTIENV_CONSUL_ENDPOINT_INTERVAL', 'MULTIENV_CONSUL_ENDPOINT_TIMEOUT', 'MULTIENV_CONSUL_ENDPOINT_DEREGISTER_AFTER',
+   'MULTIENV_CONSUL_VALIDPOD_INTERVAL', 'MULTIENV_CONSUL_VALIDPOD_TIMEOUT', 'MULTIENV_CONSUL_VALIDPOD_DEREGISTER_AFTER'].forEach(function (key) {
+    ['10', '5 s', 'five', '10S', '-5s', '1.5s'].forEach(function (bad) {
+      var env = { }; env[key] = bad;
+      assert.throws(function () { hc.config(env); }, new RegExp(key), key + '=' + bad);
+    });
+    var ok = { }; ok[key] = '500ms';
+    assert.doesNotThrow(function () { hc.config(ok); });
+  });
+  var cfg = hc.config({ MULTIENV_CONSUL_VALIDPOD_TIMEOUT: '', MULTIENV_CONSUL_VALIDPOD_DEREGISTER_AFTER: '5m' });
+  assert.strictEqual(cfg.validpod.timeout, '');
+  assert.strictEqual(cfg.validpod.deregister, '5m');
+});
 
 test('defaults reproduce 7deafde on the wire', function () {
   var p = pod();
