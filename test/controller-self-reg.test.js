@@ -201,6 +201,12 @@ test('interval 0 registers once', async function ( ) {
   } finally { agent.close( ); }
 });
 
+test('MULTIENV_SELF_REGISTER_ID=none alone also registers only once (one-setting back-out)', function ( ) {
+  var base = { name: NAME, address: '10.0.0.1', port: '3000' };
+  assert.strictEqual(selfReg.options({ MULTIENV_SELF_REGISTER_ID: 'none' }, base).intervalMs, 0);
+  assert.strictEqual(selfReg.options({ MULTIENV_SELF_REGISTER_ID: 'none', MULTIENV_SELF_REGISTER_INTERVAL: '30s' }, base).intervalMs, 30000);
+});
+
 test('options: default interval, durations, bad value, pod name and hostname', function ( ) {
   assert.strictEqual(opts_for('p').intervalMs, 60000);
   assert.strictEqual(opts_for('p', { MULTIENV_SELF_REGISTER_INTERVAL: '30s' }).intervalMs, 30000);
