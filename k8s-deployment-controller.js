@@ -330,7 +330,7 @@ function configure (opts) {
       if (rv && http_status(err) == 409) {
         // Already exists. A repeated addition (a re-list, a full-audit
         // replay) restarts the tenant only when its ConfigMap changed since
-        // the Deployment was made from it.
+        // the Deployment was made from it, or when it has no stamp yet.
         return read_deployment_body(deploymentName).then(function (existing) {
           var annotations = (existing.metadata && existing.metadata.annotations) || { };
           var stamped = annotations[CONFIG_RV];
@@ -339,15 +339,18 @@ function configure (opts) {
             res.result = { body: existing };
             return next( );
           }
-          if (!stamped) {
-            // made before stamps existed: assume it matches its ConfigMap
+          if (!stamped && opts.MULTIENV_SYNC_UNSTAMPED == 'stamp') {
+            // opt-in: trust that a Deployment made before stamps matches its ConfigMap
             return done(patch_deployment(deploymentName, stamp_ops(existing, rv)), `stamped with config ${rv}, not restarted`);
           }
-          // changed: restart as /sync/updates would (sidecar adoption in pod
-          // mode, the tenant's image), with the new stamp on the same patch
-          console.log("CONFIG CHANGED SINCE DEPLOYMENT WAS MADE", deploymentName, stamped, rv);
+          // Changed, or made before stamps existed: its ConfigMap may have
+          // changed during a watch gap (OPS-036) without the Deployment
+          // following, so it isn't marked current without a restart. Restart as
+          // /sync/updates would (sidecar adoption in pod mode, the tenant's
+          // image), with the new stamp on the same patch.
+          console.log(stamped ? "CONFIG CHANGED SINCE DEPLOYMENT WAS MADE" : "DEPLOYMENT MADE BEFORE STAMPS, RESTARTING ONCE", deploymentName, stamped, rv);
           var extra_ops = (body) => nightscout_image.update_patch(body, req.body.object, opts).concat(stamp_ops(body, rv));
-          return done(restart_deployment(deploymentName, existing, extra_ops), `updated for rolling restart (config ${stamped} -> ${rv})`);
+          return done(restart_deployment(deploymentName, existing, extra_ops), `updated for rolling restart (config ${stamped || 'unstamped'} -> ${rv})`);
         }).catch((err) => {
           console.error("Error reading deployment that couldn't be added.", deploymentName, k8s_safe.summary(err));
           next(k8s_safe.error(err));
@@ -859,6 +862,9 @@ if (!module.parent) {
     MULTIENV_CONSUL_RECONCILE_RATE: parseFloat(process.env.MULTIENV_CONSUL_RECONCILE_RATE || '5'),
     MULTIENV_CONSUL_RECONCILE_MAX: parseInt(process.env.MULTIENV_CONSUL_RECONCILE_MAX || '200'),
     MULTIENV_CONSUL_RECONCILE_SELECTOR: process.env.MULTIENV_CONSUL_RECONCILE_SELECTOR || 'role=config-as-deploy,managed=multienv',
+    // F3: what a repeated addition does to a Deployment with no stamp yet:
+    // 'restart' (default; restart once and stamp) or 'stamp' (stamp only)
+    MULTIENV_SYNC_UNSTAMPED: process.env.MULTIENV_SYNC_UNSTAMPED == 'stamp' ? 'stamp' : 'restart',
     requests: {
       cpu: process.env.MULTIENV_TENANT_REQUESTS_CPU || '5m',
       memory: process.env.MULTIENV_TENANT_REQUESTS_MEMORY || '120Mi'
