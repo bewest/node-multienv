@@ -127,6 +127,7 @@ function post_sync (state, env, path, type, configmap) {
     name: 'test', appsApi: state.appsApi, k8s: { }, consul: { },
     MULTIENV_K8S_NAMESPACE: 'default', MULTIENV_HEALTH_CHECK_SERVICE: 'http://c:3000/',
     default: { deployment: { annotations: { }, labels: { } }, configmap: { annotations: { }, labels: { } } },
+    MULTIENV_SYNC_UNSTAMPED: env.MULTIENV_SYNC_UNSTAMPED,
     healthcheck: hc.config(env)
   });
   return new Promise(function (resolve) { server.listen(0, '127.0.0.1', resolve); }).then(function ( ) {
@@ -190,9 +191,21 @@ test('RC1 pod mode: a re-addition with the same version patches nothing (no rest
   });
 });
 
-test('RC1 pod mode: an unstamped Deployment is stamped on re-addition without a restart or adoption', function ( ) {
+test('RC1 pod mode: an unstamped Deployment is restarted once on re-addition: adopts, sets the image and stamps, in one guarded patch', function ( ) {
   var state = with_create(cluster(0));
   return post_sync(state, { MULTIENV_TENANT_HEALTHCHECK: 'pod' }, '/sync/additions', 'ADDED', versioned_configmap(42)).then(function (status) {
+    assert.strictEqual(status, 200);
+    assert.strictEqual(state.patches.length, 1);
+    assert.strictEqual(state.patches[0][0].op, 'test');
+    assert.deepStrictEqual(containers(state), [ 'nightscout=' + IMAGE, 'pod-healthcheck=busybox:1.36.1' ]);
+    assert.strictEqual(state.d.metadata.annotations[CONFIG_RV], '42');
+    assert.ok(state.d.spec.template.metadata.annotations['updated-at']);
+  });
+});
+
+test('RC1 pod mode, MULTIENV_SYNC_UNSTAMPED=stamp: an unstamped Deployment is stamped on re-addition without a restart or adoption', function ( ) {
+  var state = with_create(cluster(0));
+  return post_sync(state, { MULTIENV_TENANT_HEALTHCHECK: 'pod', MULTIENV_SYNC_UNSTAMPED: 'stamp' }, '/sync/additions', 'ADDED', versioned_configmap(42)).then(function (status) {
     assert.strictEqual(status, 200);
     assert.strictEqual(state.patches.length, 1);
     assert.deepStrictEqual(state.patches[0].map(function (op) { return op.path; }), [ '/metadata/annotations' ]);
