@@ -271,6 +271,95 @@ var DISPATCHER_CASES = [
       assert.ok(gaps[1] >= gaps[0], 'backoff grows: ' + gaps);
     },
   },
+  {
+    id: 'w10', control: false,
+    what: 'ordering: an ADDED being retried never lands after a later DELETED of the same object',
+    statuses: (function ( ) {
+      var adds = 0;
+      return function (n, p) { if (/additions$/.test(p)) { adds++; return adds <= 2 ? 503 : 200; } return 200; };
+    })( ),
+    script: {
+      lists: [ { resourceVersion: 20, items: [ ] } ],
+      watches: [ function (q, res) {
+        res.writeHead(200);
+        res.write(fakes.line('ADDED', fakes.configmap('tenant-a', 21)));
+        setTimeout(function ( ) { res.write(fakes.line('DELETED', fakes.configmap('tenant-a', 22))); }, 20);
+      } ],
+    },
+    until: function (s) { return posted(s, '/sync/deletions', 'tenant-a').length > 0; },
+    settleMs: 600,
+    check: function (s) {
+      var a = s.posts.filter(function (p) { return p.name == 'tenant-a'; });
+      var del = a.map(function (p) { return p.path; }).lastIndexOf('/sync/deletions');
+      assert.ok(del > -1, 'deletion sent');
+      assert.strictEqual(a[a.length - 1].path, '/sync/deletions', 'last POST for the tenant: ' + JSON.stringify(a));
+      assert.strictEqual(a.filter(function (p) { return p.path == '/sync/additions' && p.status == 200; }).length, 0,
+        'the addition succeeded around the deletion: ' + JSON.stringify(a));
+      assert.ok(s.out.join('').indexOf('SUPERSEDED POST') > -1, 'superseded retry is logged');
+    },
+  },
+  {
+    id: 'w11', control: false,
+    what: 'ordering: an ADDED being retried still lands before a later MODIFIED of the same object',
+    statuses: (function ( ) {
+      var adds = 0;
+      return function (n, p) { if (/additions$/.test(p)) { adds++; return adds <= 2 ? 503 : 200; } return 200; };
+    })( ),
+    script: {
+      lists: [ { resourceVersion: 20, items: [ ] } ],
+      watches: [ function (q, res) {
+        res.writeHead(200);
+        res.write(fakes.line('ADDED', fakes.configmap('tenant-a', 21)));
+        setTimeout(function ( ) { res.write(fakes.line('MODIFIED', fakes.configmap('tenant-a', 22))); }, 20);
+      } ],
+    },
+    until: function (s) { return posted(s, '/sync/updates', 'tenant-a').length > 0; },
+    settleMs: 400,
+    check: function (s) {
+      var a = s.posts.filter(function (p) { return p.name == 'tenant-a'; }).map(function (p) { return p.path + ':' + p.status; });
+      assert.deepStrictEqual(a, [ '/sync/additions:503', '/sync/additions:503', '/sync/additions:200', '/sync/updates:200' ], 'order');
+    },
+  },
+  {
+    id: 'w12', control: false,
+    what: 'a watch that only sends non-410 ERROR events backs off and exits 1 after MULTIENV_WATCH_MAX_FAILURES',
+    env: { MULTIENV_WATCH_MAX_FAILURES: '3' },
+    script: {
+      lists: [ { resourceVersion: 20, items: [ A10 ] } ],
+      watches: [ 1, 2, 3, 4, 5, 6 ].map(function ( ) { return function (q, res) {
+        res.writeHead(200);
+        res.write(fakes.line('ERROR', { kind: 'Status', apiVersion: 'v1', metadata: { }, status: 'Failure', reason: 'InternalError', code: 500 }));
+        setTimeout(function ( ) { res.end( ); }, 20);
+      }; }),
+    },
+    check: function (s) {
+      assert.strictEqual(s.exit, 1, 'exit code');
+      assert.strictEqual(s.api.watches.length, 3, 'watch attempts');
+    },
+  },
+  {
+    id: 'w13', control: false,
+    what: 'F2: deletions held back by MULTIENV_RELIST_MAX_DELETES are not forgotten; a later re-list still sends them',
+    env: { MULTIENV_RELIST_MAX_DELETES: '1' },
+    script: {
+      lists: [
+        { resourceVersion: 20, items: [ A10, B11, D12 ] },
+        { resourceVersion: 40, items: [ A10 ] },
+        { resourceVersion: 60, items: [ A10, B11 ] },
+      ],
+      watches: [
+        function (q, res) { res.writeHead(200); res.write(fakes.expired( )); setTimeout(function ( ) { res.end( ); }, 50); },
+        function (q, res) { res.writeHead(200); res.write(fakes.expired( )); setTimeout(function ( ) { res.end( ); }, 50); },
+      ],
+    },
+    until: function (s) { return s.posts.length >= 1; },
+    settleMs: 600,
+    check: function (s) {
+      assert.strictEqual(posted(s, '/sync/additions', 'tenant-b').length, 0, 'tenant-b re-added after a skipped deletion');
+      assert.strictEqual(posted(s, '/sync/deletions', 'tenant-d').length, 1, 'tenant-d deletion sent on the later re-list');
+      assert.strictEqual(s.posts.length, 1, 'only the deletion: ' + JSON.stringify(s.posts));
+    },
+  },
 ];
 
 // ---- controller /sync/* with a fake apps API ----------------------------
@@ -346,6 +435,7 @@ async function runController (dir, c) {
     k8s: { }, appsApi: apps, consul: { }, MULTIENV_K8S_NAMESPACE: 'default',
     MULTIENV_HEALTH_CHECK_SERVICE: 'http://multienv-deployment-controller:3000',
     MULTIENV_SYNC_ADD_ALWAYS_RESTART: !!c.alwaysRestart,
+    MULTIENV_SYNC_UNSTAMPED: c.unstamped,
     requests: { cpu: '5m', memory: '120Mi' }, limits: { cpu: '500m', memory: '500Mi' },
     default: { deployment: { annotations: { 'managed-by': 'test' }, labels: { managed: 'multienv' } },
       configmap: { annotations: { }, labels: { } } },
@@ -427,7 +517,19 @@ var CONTROLLER_CASES = [
   },
   {
     id: 'c4', control: true,
-    what: 'F3: a Deployment made before stamps is stamped on a repeated addition, not restarted',
+    what: 'F3: a Deployment made before stamps is restarted once and stamped on a repeated addition (its config may be stale)',
+    deployments: { 'tenant-a': existing('tenant-a') },
+    posts: [ added('tenant-a', 7), added('tenant-a', 7) ],
+    check: function (r) {
+      assert.deepStrictEqual(r.statuses, [ 200, 200 ]);
+      assert.strictEqual(restarts(r).length, 1, 'restarts: once on the first stamp, not on the repeat');
+      assert.strictEqual(stampOf(r, 'tenant-a'), '7');
+    },
+  },
+  {
+    id: 'c4s', control: false,
+    what: 'F3: MULTIENV_SYNC_UNSTAMPED=stamp stamps a Deployment made before stamps without restarting it',
+    unstamped: 'stamp',
     deployments: { 'tenant-a': existing('tenant-a') },
     posts: [ added('tenant-a', 7) ],
     check: function (r) {
@@ -443,7 +545,7 @@ var CONTROLLER_CASES = [
     posts: [ added('tenant-a', 7) ],
     check: function (r) {
       assert.deepStrictEqual(r.statuses, [ 200 ]);
-      assert.strictEqual(restarts(r).length, 0, 'restarted');
+      assert.strictEqual(restarts(r).length, 1, 'restarts');
       assert.strictEqual(stampOf(r, 'tenant-a'), '7');
     },
   },

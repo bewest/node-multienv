@@ -334,9 +334,15 @@ function configure (opts) {
             res.result = k8s_safe.wrapped(existing);
             return next( );
           }
-          if (!stamped) {
-            // made before stamps existed: assume it matches its ConfigMap
+          if (!stamped && opts.MULTIENV_SYNC_UNSTAMPED == 'stamp') {
+            // opt-in: trust that a Deployment made before stamps matches its ConfigMap
             return patch_deployment(stamp_ops(existing.body, rv), `stamped with config ${rv}, not restarted`);
+          }
+          if (!stamped) {
+            // Made before stamps existed. Its ConfigMap may have changed during
+            // a watch gap (OPS-036) without the Deployment following, so don't
+            // mark it current: restart it once, as 7deafde would, and stamp it.
+            return patch_deployment([ restart_op( ) ].concat(stamp_ops(existing.body, rv)), `updated for rolling restart (first stamp, config ${rv})`);
           }
           console.log("CONFIG CHANGED SINCE DEPLOYMENT WAS MADE", deploymentName, stamped, rv);
           return patch_deployment([ restart_op( ) ].concat(stamp_ops(existing.body, rv)), `updated for rolling restart (config ${stamped} -> ${rv})`);
@@ -732,6 +738,9 @@ if (!module.parent) {
     MULTIENV_HEALTH_CHECK_SERVICE: (process.env.MULTIENV_HEALTH_CHECK_SERVICE || 'http://multienv-deployment-controller.service.consul:3000'),
     // F3 off: every repeated addition restarts the tenant, as before
     MULTIENV_SYNC_ADD_ALWAYS_RESTART: process.env.MULTIENV_SYNC_ADD_ALWAYS_RESTART == '1',
+    // F3: what a repeated addition does to a Deployment with no stamp yet:
+    // 'restart' (default; restart once and stamp) or 'stamp' (stamp only)
+    MULTIENV_SYNC_UNSTAMPED: process.env.MULTIENV_SYNC_UNSTAMPED == 'stamp' ? 'stamp' : 'restart',
     requests: {
       cpu: process.env.MULTIENV_TENANT_REQUESTS_CPU || '5m',
       memory: process.env.MULTIENV_TENANT_REQUESTS_MEMORY || '120Mi'

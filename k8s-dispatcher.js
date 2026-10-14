@@ -80,6 +80,16 @@ function naivePostToGateway (opts) {
 
 
 function syncPostToController (opts) {
+  // Per-object ordering (RC1 review of F4). parallel-transform keeps output
+  // order, not the order requests reach the controller, and a retry can hold
+  // its slot for minutes: an ADDED being retried could land after a later
+  // DELETED for the same object and bring the tenant back. So events for one
+  // object (namespace/name) are sent one at a time, in arrival order, and a
+  // failed event stops retrying once a DELETED for that object is queued
+  // behind it. (Any other newer event waits its turn: an ADDED being retried
+  // must still land before a later MODIFIED, which doesn't create.)
+  var queues = { };
+  var sequence = 0;
   function operation (update, callback) {
     var object = update.object;
     var endpoint = url.parse(opts.gateway);
@@ -105,6 +115,23 @@ function syncPostToController (opts) {
     var api = url.format({hostname: endpoint.hostname, port: endpoint.port, protocol: endpoint.protocol, pathname: pathname });
     // var method = update.type == 'DELETED' ?  got.delete : got.post;
 
+    var key = (object.metadata.namespace || '') + '/' + name;
+    var queue = queues[key] || (queues[key] = { latest: 0, tail: Promise.resolve( ) });
+    var mine = ++sequence;
+    queue.latest = mine;
+    queue.deleted = update.type == 'DELETED' ? mine : (queue.deleted || 0);
+    // an older event for this object waiting out a retry delay gives way now
+    if (queue.wake && update.type == 'DELETED') { queue.wake( ); }
+    function superseded ( ) { return queue.deleted > mine; }
+    var release;
+    var previous = queue.tail;
+    queue.tail = new Promise(function (resolve) { release = resolve; });
+    function finish (result) {
+      if (queue.latest === mine) { delete queues[key]; }
+      release( );
+      callback(null, result);
+    }
+
     console.log(name, 'to gateway', name, api, object.metadata.name, object.metadata.resourceVersion);
     // F4 (OPS-073): a failed POST used to be logged and dropped. Retry
     // connection errors, timeouts, 408, 429 and 5xx with backoff; this holds
@@ -112,27 +139,40 @@ function syncPostToController (opts) {
     // instead of losing its events.
     var retries = opts.retries || 0;
     function attempt (n) {
+      if (n > 0 && superseded( )) {
+        // a DELETED for this object arrived while this one waited to retry
+        console.log(name, 'SUPERSEDED POST, a deletion of this object is queued', api);
+        update.gateway = {err: null, superseded: true};
+        return finish(update);
+      }
       got.post(api, {json: update, timeout: opts.timeout, retry: 0}).json( ).then( function (body) {
         console.log(name, 'SUCCESSFUL', api);
         update.gateway = {err: null, success: body};
-        callback(null, update);
+        finish(update);
       }).catch(function (err) {
         console.log(name, "ERROR POST", name, api, k8s_safe.summary(err));
         var status = err && err.response && err.response.statusCode;
         var retryable = !status || status == 408 || status == 429 || status >= 500;
+        if (retryable && superseded( )) {
+          console.log(name, 'SUPERSEDED POST, a deletion of this object is queued', api);
+          update.gateway = {err: err, superseded: true};
+          return finish(update);
+        }
         if (retryable && n < retries) {
           var delay = Math.min(opts.retryMaxMs || 60000, (opts.retryBaseMs || 4000) * Math.pow(2, n));
           console.log(name, 'RETRY POST', n + 1, 'of', retries, 'in', delay, 'ms', api);
-          return setTimeout(attempt, delay, n + 1);
+          var timer = setTimeout(function ( ) { queue.wake = null; attempt(n + 1); }, delay);
+          queue.wake = function ( ) { clearTimeout(timer); queue.wake = null; attempt(n + 1); };
+          return;
         }
         if (retryable) {
           console.log(name, 'DROPPED POST after', n + 1, 'attempts', api);
         }
         update.gateway = {err: err};
-        callback(null, update);
+        finish(update);
       });
     }
-    attempt(0);
+    previous.then(function ( ) { attempt(0); });
   }
 
   var tr = transform(opts.parallel, operation);
@@ -390,7 +430,9 @@ if (!module.parent) {
     timeout: parseInt(process.env.MULTIENV_POST_TIMEOUT_MS || '60000'),
   };
   // F1/F2 (OPS-036, OPS-071, OPS-073): resume an ended watch in-process.
-  // MULTIENV_WATCH_EXIT_ON_END=1 brings back the old exit-and-restart.
+  // MULTIENV_WATCH_EXIT_ON_END=1 brings back the old exit-and-restart when a
+  // watch ends; it doesn't restore the rest of 7deafde (the startup list, the
+  // 410 re-list, failure backoff and per-object POST ordering stay).
   var resume_opts = {
     exitOnEnd: process.env.MULTIENV_WATCH_EXIT_ON_END == '1',
     backoffMs: parseInt(process.env.MULTIENV_WATCH_BACKOFF_MS || '1000'),
