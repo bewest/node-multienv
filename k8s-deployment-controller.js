@@ -5,6 +5,7 @@ var _ = require('lodash');
 // never send or log raw k8s client results/errors: they carry the
 // service-account token (OPS-039, D-009)
 var k8s_safe = require('./lib/k8s-safe');
+var self_registration = require('./lib/self-registration');
 var Consul = require('consul');
 var url = require('url');
 var dns = require('dns');
@@ -718,24 +719,14 @@ if (!module.parent) {
         process.exit(1);
       }
       var healthCheckService = url.parse(config.MULTIENV_HEALTH_CHECK_SERVICE);
-      var host = MULTIENV_SELF_ADDRESS;
-      var port = healthCheckService.port;
-      var self_service = {
-        name: MULTIENV_SELF_REGISTRATION_NAME,
-        address: host,
-        port: parseInt(port),
-        tags: [ 'healthchecks', 'multienv', 'multienv-deployment-controller' ],
-        checks: [ {
-          name: "HealthCheckServerOk",
-          ttl: '30s',
-          interval: '10s',
-          http: url.format({protocol: 'http', hostname: host, port: port,  pathname: '/about/server/status'}),
-          deregister_critical_service_after: '20s'
-        } ]
-      };
-      console.log("CONNECTED TO CONSUL, REGISTERING SELF", body, self_service);
-      ctx.consul.agent.service.register(self_service, function (err, body, response) {
-        console.log("REGISTERED", self_service.name, err, body);
+      // Q-CONTROLLER-SELF-REG (F7, OPS-078): own service ID, re-registered on a timer.
+      var registration = self_registration.create(ctx.consul, self_registration.options(process.env, {
+        name: MULTIENV_SELF_REGISTRATION_NAME, address: MULTIENV_SELF_ADDRESS, port: healthCheckService.port
+      }));
+      console.log("CONNECTED TO CONSUL, REGISTERING SELF", registration.service.name, registration.service.id || '(no id)');
+      registration.start(function (err) {
+        console.log("REGISTERED", registration.service.name, registration.service.id || '(no id)', err ? err.message : 'ok');
+        self_registration.deregister_on_exit(registration);
         next( );
       });
     });
