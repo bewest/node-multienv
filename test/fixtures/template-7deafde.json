@@ -1,0 +1,71 @@
+{
+  "kind": "Deployment",
+  "metadata": {
+    "name": "tenant-b",
+    "annotations": {
+      "managed-by": "x"
+    },
+    "labels": {
+      "managed": "multienv",
+      "internal_name": "tenant-b"
+    }
+  },
+  "spec": {
+    "replicas": 1,
+    "selector": {
+      "matchLabels": {
+        "internal_name": "tenant-b"
+      }
+    },
+    "template": {
+      "metadata": {
+        "name": "tenant-b",
+        "annotations": {
+          "managed-by": "x"
+        },
+        "labels": {
+          "managed": "multienv",
+          "internal_name": "tenant-b",
+          "tenant": "tenant-b"
+        }
+      },
+      "spec": {
+        "hostname": "tenant-b",
+        "subdomain": "backends",
+        "containers": [
+          {
+            "name": "nightscout",
+            "image": "nightscout/cgm-remote-monitor:latest",
+            "envFrom": [
+              {
+                "secretRef": {
+                  "name": "tenant-b-secrets",
+                  "optional": true
+                }
+              },
+              {
+                "configMapRef": {
+                  "name": "tenant-b",
+                  "optional": true
+                }
+              }
+            ],
+            "resources": {
+              "requests": {
+                "cpu": "5m",
+                "memory": "120Mi"
+              },
+              "limits": {
+                "cpu": "500m",
+                "memory": "500Mi"
+              }
+            }
+          }
+        ],
+        "nodeSelector": {
+          "doks.digitalocean.com/node-pool": "pool"
+        }
+      }
+    }
+  }
+}
