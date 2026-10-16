@@ -9,6 +9,7 @@ var Consul = require('consul');
 var url = require('url');
 var dns = require('dns');
 var tenant_healthcheck = require('./lib/tenant-healthcheck');
+var nightscout_image = require('./lib/nightscout-image');
 
 function configure (opts) {
 
@@ -40,6 +41,8 @@ function configure (opts) {
   }
 
   function template_deployment (data) {
+    // data.object is the tenant ConfigMap when called from /sync/additions.
+    var ns_image = nightscout_image.resolve(opts, data.object);
     var template = {
       kind: "Deployment"
     , metadata: {
@@ -66,7 +69,11 @@ function configure (opts) {
         metadata: {
           name: data.WEB_NAME,
           annotations: {
-            ...opts.default.deployment.annotations
+            ...opts.default.deployment.annotations,
+            // records a per-tenant image override so it can be reverted
+            ...(ns_image.source == 'annotation' ? {
+              [nightscout_image.ANNOTATION]: ns_image.image
+            } : { })
             // 'managed-by': 'multienv/k8s-deployment-controller'
           },
           labels: {
@@ -81,8 +88,11 @@ function configure (opts) {
           hostname: `${data.WEB_NAME}`,
           subdomain: "backends",
           containers: [ {
-            name: 'nightscout',
-            image: 'nightscout/cgm-remote-monitor:latest',
+            name: nightscout_image.CONTAINER_NAME,
+            image: ns_image.image,
+            ...(ns_image.imagePullPolicy ? {
+              imagePullPolicy: ns_image.imagePullPolicy
+            } : { }),
             envFrom: [
               {
                 secretRef: {
@@ -311,16 +321,28 @@ function configure (opts) {
   // two writers can't both add one.  If that fails, retry once from a fresh
   // read, then fall back to the plain restart so the change that triggered
   // it is never dropped.
-  function restart_deployment (name, deployment) {
-    if (healthcheck.style != 'pod') return patch_deployment(name, [ tenant_healthcheck.restart_op( ) ]);
+  //
+  // extra_ops(body), when given, adds ops computed from the deployment as
+  // read (the per-tenant Nightscout image); they ride on every attempt,
+  // including the fallback, so an image change is never dropped.
+  function restart_deployment (name, deployment, extra_ops) {
+    var extra = (body) => (extra_ops && body) ? extra_ops(body) : [ ];
+    if (healthcheck.style != 'pod') {
+      return patch_deployment(name, [ tenant_healthcheck.restart_op( ) ].concat(extra(deployment)));
+    }
+    var last;
     var read = deployment ? Promise.resolve(deployment) : read_deployment_body(name);
-    return read.then((body) => patch_deployment(name, tenant_healthcheck.restart_and_adopt_ops(body, name, healthcheck)))
+    var attempt = (body) => {
+      last = body;
+      return patch_deployment(name, tenant_healthcheck.restart_and_adopt_ops(body, name, healthcheck).concat(extra(body)));
+    };
+    return read.then(attempt)
       .catch((err) => {
         console.log('restart with pod-healthcheck adoption failed, retrying', name, k8s_status(err));
-        return read_deployment_body(name).then((body) => patch_deployment(name, tenant_healthcheck.restart_and_adopt_ops(body, name, healthcheck)));
+        return read_deployment_body(name).then(attempt);
       }).catch((err) => {
         console.log('adoption failed twice, restarting without it', name, k8s_status(err));
-        return patch_deployment(name, [ tenant_healthcheck.restart_op( ) ]);
+        return patch_deployment(name, [ tenant_healthcheck.restart_op( ) ].concat(extra(last)));
       });
   }
 
@@ -340,7 +362,12 @@ function configure (opts) {
     var annotations = req.body.object.metadata.annotations || { };
     var targetDeployment = annotations['tenant'] || req.body.object.metadata.name;
 		appsApi.readNamespacedDeployment(targetDeployment, selected_namespace).then((deployment) => {
-      return restart_deployment(targetDeployment, deployment.body);
+      // Per-tenant image override lives on the tenant's own ConfigMap; skip
+      // supplementary objects that point at the tenant via annotations.tenant.
+      var image_ops = (targetDeployment == req.body.object.metadata.name)
+        ? (body) => nightscout_image.update_patch(body, req.body.object, opts)
+        : null;
+      return restart_deployment(targetDeployment, deployment.body, image_ops);
     }).then((result) => {
 				console.log(`deployment ${targetDeployment} updated for rolling restart`);
         // res.result = deployment
@@ -720,11 +747,16 @@ if (!module.parent) {
   var MULTIENV_SELF_REGISTRATION_NAME = (process.env.MULTIENV_SELF_REGISTRATION_NAME || 'multienv-deployment-controller');
   var MULTIENV_SELF_ADDRESS = (process.env.POD_IP || process.env.HOSTNAME);
   var CONSUL = process.env.CONSUL || 'http://consul.service.consul';
+  // Refuse to boot on an unusable image pin rather than fall back to :latest.
+  nightscout_image.check_config(process.env);
   var config = {
     MULTIENV_K8S_NAMESPACE: process.env.MULTIENV_K8S_NAMESPACE || 'default',
     MULTIENV_TENANT_NODEPOOL_TARGET: process.env.MULTIENV_TENANT_NODEPOOL_TARGET || 'bigger-tenant-runners',
     MULTIENV_TENANT_REQUESTS_ENABLE: (process.env.MULTIENV_TENANT_REQUESTS_ENABLE ||'1') != 'false',
     MULTIENV_TENANT_LIMITS_ENABLE: (process.env.MULTIENV_TENANT_LIMITS_ENABLE ||'1') != 'false',
+    MULTIENV_NIGHTSCOUT_IMAGE: process.env.MULTIENV_NIGHTSCOUT_IMAGE || nightscout_image.DEFAULT_IMAGE,
+    MULTIENV_NIGHTSCOUT_IMAGE_PULL_POLICY: process.env.MULTIENV_NIGHTSCOUT_IMAGE_PULL_POLICY,
+    MULTIENV_NIGHTSCOUT_IMAGE_REPOS: process.env.MULTIENV_NIGHTSCOUT_IMAGE_REPOS,
     MULTIENV_HEALTH_CHECK_SERVICE: (process.env.MULTIENV_HEALTH_CHECK_SERVICE || 'http://multienv-deployment-controller.service.consul:3000'),
     healthcheck: tenant_healthcheck.config(process.env),
     requests: {
