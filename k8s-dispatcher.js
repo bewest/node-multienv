@@ -6,6 +6,10 @@ var transform = require('parallel-transform');
 var got = require('got');
 var url = require('url');
 var path = require('path');
+// never log raw k8s client results/errors: they carry the service-account
+// token (OPS-039, D-009)
+var k8s_safe = require('./lib/k8s-safe');
+var resumableWatch = require('./lib/resumable-watch');
 
 var stream = require('stream');
 
@@ -64,7 +68,7 @@ function naivePostToGateway (opts) {
       update.gateway = {err: null, success: body};
       callback(null, update);
     }).catch(function (err) {
-      console.log(name, "ERROR POST", name, api, arguments);
+      console.log(name, "ERROR POST", name, api, k8s_safe.summary(err));
       update.gateway = {err: err};
       callback(null, update);
     });
@@ -76,6 +80,16 @@ function naivePostToGateway (opts) {
 
 
 function syncPostToController (opts) {
+  // Per-object ordering (RC1 review of F4). parallel-transform keeps output
+  // order, not the order requests reach the controller, and a retry can hold
+  // its slot for minutes: an ADDED being retried could land after a later
+  // DELETED for the same object and bring the tenant back. So events for one
+  // object (namespace/name) are sent one at a time, in arrival order, and a
+  // failed event stops retrying once a DELETED for that object is queued
+  // behind it. (Any other newer event waits its turn: an ADDED being retried
+  // must still land before a later MODIFIED, which doesn't create.)
+  var queues = { };
+  var sequence = 0;
   function operation (update, callback) {
     var object = update.object;
     var endpoint = url.parse(opts.gateway);
@@ -101,20 +115,89 @@ function syncPostToController (opts) {
     var api = url.format({hostname: endpoint.hostname, port: endpoint.port, protocol: endpoint.protocol, pathname: pathname });
     // var method = update.type == 'DELETED' ?  got.delete : got.post;
 
+    var key = (object.metadata.namespace || '') + '/' + name;
+    var queue = queues[key] || (queues[key] = { latest: 0, tail: Promise.resolve( ) });
+    var mine = ++sequence;
+    queue.latest = mine;
+    queue.deleted = update.type == 'DELETED' ? mine : (queue.deleted || 0);
+    // an older event for this object waiting out a retry delay gives way now
+    if (queue.wake && update.type == 'DELETED') { queue.wake( ); }
+    function superseded ( ) { return queue.deleted > mine; }
+    var release;
+    var previous = queue.tail;
+    queue.tail = new Promise(function (resolve) { release = resolve; });
+    function finish (result) {
+      if (queue.latest === mine) { delete queues[key]; }
+      release( );
+      callback(null, result);
+    }
+
     console.log(name, 'to gateway', name, api, object.metadata.name, object.metadata.resourceVersion);
-    got.post(api, {json: update}).json( ).then( function (body) {
-      console.log(name, 'SUCCESSFUL', api);
-      update.gateway = {err: null, success: body};
-      callback(null, update);
-    }).catch(function (err) {
-      console.log(name, "ERROR POST", name, api, arguments);
-      update.gateway = {err: err};
-      callback(null, update);
-    });
+    // F4 (OPS-073): a failed POST used to be logged and dropped. Retry
+    // connection errors, timeouts, 408, 429 and 5xx with backoff; this holds
+    // one of the parallel slots, so a controller outage slows the watch
+    // instead of losing its events.
+    var retries = opts.retries || 0;
+    function attempt (n) {
+      if (n > 0 && superseded( )) {
+        // a DELETED for this object arrived while this one waited to retry
+        console.log(name, 'SUPERSEDED POST, a deletion of this object is queued', api);
+        update.gateway = {err: null, superseded: true};
+        return finish(update);
+      }
+      got.post(api, {json: update, timeout: opts.timeout, retry: 0}).json( ).then( function (body) {
+        console.log(name, 'SUCCESSFUL', api);
+        update.gateway = {err: null, success: body};
+        finish(update);
+      }).catch(function (err) {
+        console.log(name, "ERROR POST", name, api, k8s_safe.summary(err));
+        var status = err && err.response && err.response.statusCode;
+        var retryable = !status || status == 408 || status == 429 || status >= 500;
+        if (retryable && superseded( )) {
+          console.log(name, 'SUPERSEDED POST, a deletion of this object is queued', api);
+          update.gateway = {err: err, superseded: true};
+          return finish(update);
+        }
+        if (retryable && n < retries) {
+          var delay = Math.min(opts.retryMaxMs || 60000, (opts.retryBaseMs || 4000) * Math.pow(2, n));
+          console.log(name, 'RETRY POST', n + 1, 'of', retries, 'in', delay, 'ms', api);
+          var timer = setTimeout(function ( ) { queue.wake = null; attempt(n + 1); }, delay);
+          queue.wake = function ( ) { clearTimeout(timer); queue.wake = null; attempt(n + 1); };
+          return;
+        }
+        if (retryable) {
+          console.log(name, 'DROPPED POST after', n + 1, 'attempts', api);
+        }
+        update.gateway = {err: err};
+        finish(update);
+      });
+    }
+    previous.then(function ( ) { attempt(0); });
   }
 
   var tr = transform(opts.parallel, operation);
   return tr;
+}
+
+// F5a (Q-CONSUL-REGISTER-MISSING): this process is the single consul
+// operator, so it is the one place that asks the controller for a
+// register-missing pass. The first pass comes one full interval after start,
+// so a restarting or overlapping operator pod doesn't add passes.
+var reconcile_timer = null;
+function startReconcileTimer (opts) {
+  if (reconcile_timer || !(opts.interval > 0)) { return; }
+  var endpoint = url.parse(opts.gateway);
+  var api = url.format({hostname: endpoint.hostname, port: endpoint.port, protocol: endpoint.protocol,
+    pathname: path.join(endpoint.pathname, '/sync/reconcile') });
+  console.log('CONSUL RECONCILE every', opts.interval, 'ms via', api);
+  reconcile_timer = setInterval(function ( ) {
+    got.post(api, {json: { }, timeout: opts.timeout, retry: 0}).json( ).then(function (summary) {
+      console.log('CONSUL RECONCILE', JSON.stringify(summary));
+    }).catch(function (err) {
+      var body = err && err.response && err.response.body;
+      console.log('CONSUL RECONCILE FAILED', err && err.response && err.response.statusCode, typeof body == 'string' ? body.slice(0, 300) : k8s_safe.summary(err));
+    });
+  }, opts.interval);
 }
 
 function naiveGetFromGateway (opts) {
@@ -133,7 +216,7 @@ function naiveGetFromGateway (opts) {
       update.health = {err: null, success: body};
       callback(null, update);
     }).catch(function (err) {
-      console.log(name, "ERROR GET", api, arguments);
+      console.log(name, "ERROR GET", api, k8s_safe.summary(err));
       update.health = {err: err};
       callback(null, update);
     });
@@ -185,7 +268,7 @@ function inspectBookmarks (opts, k8s) {
         }
         return callback(err);
       }).catch(function (missing) {
-        console.log('NO EXISTING BOOKMARK', bookmarkName, bookmarkNamespace, missing);
+        console.log('NO EXISTING BOOKMARK', bookmarkName, bookmarkNamespace, k8s_safe.summary(missing));
         callback(err);
       });
 
@@ -245,7 +328,7 @@ function saveBookMark (opts, k8s) {
         console.log("CREATED BOOKMARK CONFIGMAP", res.body);
         return callback( );
       }).catch(function (err) {
-        console.log("COULD NOT CREATE BOOKMARK CONFIGMAP", bookmark_config, err);
+        console.log("COULD NOT CREATE BOOKMARK CONFIGMAP", bookmark_config, k8s_safe.summary(err));
         return callback( );
 
       });
@@ -338,7 +421,7 @@ function configure (opts) {
     },
     // done callback is called if the watch terminates normally
     function (err) {
-      console.log(err);
+      console.log(err && k8s_safe.summary(err));
     }
   );
   // function predicate (data) { }
@@ -361,7 +444,25 @@ if (!module.parent) {
     gateway: CLUSTER_GATEWAY,
     parallel: parseInt(process.env.PARALLEL_UPDATES || '12'),
     highWaterMark: 100,
+    // F4: about 2 minutes of retries by default
+    retries: parseInt(process.env.MULTIENV_POST_RETRIES || '5'),
+    retryBaseMs: parseInt(process.env.MULTIENV_POST_RETRY_BASE_MS || '4000'),
+    retryMaxMs: parseInt(process.env.MULTIENV_POST_RETRY_MAX_MS || '60000'),
+    timeout: parseInt(process.env.MULTIENV_POST_TIMEOUT_MS || '60000'),
   };
+  // F1/F2 (OPS-036, OPS-071, OPS-073): resume an ended watch in-process.
+  // MULTIENV_WATCH_EXIT_ON_END=1 brings back the old exit-and-restart when a
+  // watch ends; it doesn't restore the rest of 7deafde (the startup list, the
+  // 410 re-list, failure backoff and per-object POST ordering stay).
+  var resume_opts = {
+    exitOnEnd: process.env.MULTIENV_WATCH_EXIT_ON_END == '1',
+    backoffMs: parseInt(process.env.MULTIENV_WATCH_BACKOFF_MS || '1000'),
+    maxBackoffMs: parseInt(process.env.MULTIENV_WATCH_MAX_BACKOFF_MS || '30000'),
+    maxFailures: parseInt(process.env.MULTIENV_WATCH_MAX_FAILURES || '10'),
+    maxRelistDeletes: parseInt(process.env.MULTIENV_RELIST_MAX_DELETES || '20'),
+  };
+  // what to list again after a 410; other endpoints exit on 410
+  var WATCHED = WATCH_ENDPOINT.match(/^\/api\/v1\/namespaces\/([^/]+)\/(pods|configmaps)$/);
   var watch_opts = {
     fieldSelector: WATCH_FIELDSELECTOR
   , labelSelector: WATCH_LABELSELECTOR
@@ -393,92 +494,116 @@ if (!module.parent) {
     filter_none: process.env.FILTER_NONE == '1'
   };
 
-  function start (retried, max, errors) {
-    if (retried >= max) {
-      console.log("EXITING AFTER ERRORS", retried, errors);
+  // F5a: e.g. 10m on the consul operator only; unset is off
+  var reconcile_opts = {
+    gateway: CLUSTER_GATEWAY,
+    interval: require('./lib/consul-reconcile').parse_duration(process.env.MULTIENV_CONSUL_RECONCILE_INTERVAL) || 0,
+    timeout: 5 * 60 * 1000,
+  };
+
+  function businessStreamsFor (controller) {
+    switch(controller) {
+      case 'deployment':
+        return [ syncPostToController(gateway_opts) ];
+      case 'consul':
+        // return [ syncDeploymentToConsul(gateway_opts) ];
+        return [ syncPostToController(gateway_opts) ];
+      case 'default':
+      case 'runner':
+      default:
+        return [ naivePostToGateway(gateway_opts), naiveGetFromGateway(gateway_opts) ];
+    }
+  }
+
+  var boot = require('bootevent')( );
+  boot.acquire(function k8s (ctx, next) {
+    var my = this;
+    ctx.k8s = require('./lib/k8s')({cluster: !k8s_local});
+    ctx.kc = require('./lib/k8s').get_kc( );
+    ctx.k8s.getAPIResources( ).then(function (res) {
+      console.log("CONNECTED", res.body.resources.length > 0);
+      next( );
+    }).catch(function (err) {
+      // what bootevent's fail does, without the raw error
+      console.error(k8s_safe.summary(err));
+      process.exit(1);
+    });
+  })
+  .acquire(function list_watched (ctx, next) {
+    // everything the watch selects, for the first resourceVersion and to
+    // compare against after a 410 (F2)
+    ctx.list = WATCHED && function list ( ) {
+      var ns = WATCHED[1];
+      var call = WATCHED[2] == 'pods' ? ctx.k8s.listNamespacedPod : ctx.k8s.listNamespacedConfigMap;
+      return call.call(ctx.k8s, ns, false, false, undefined, WATCH_FIELDSELECTOR, WATCH_LABELSELECTOR).then(function (result) {
+        return result.body;
+      });
+    };
+    next( );
+  })
+  .acquire(async function describe_latest_resource_version (ctx, next) {
+
+    // Get latest resourceVersion, along with a count of active changes
+    ctx.seed = [ ];
+    if (INIT_WITH_FULL_AUDIT) {
+      // the first watch starts without a resourceVersion: every object
+      // arrives as ADDED
+      watch_opts.resourceVersion = '';
+      console.log("FULL AUDIT: watching from the start");
+      return next( );
+    }
+    let body;
+    try {
+      if (ctx.list) {
+        body = await ctx.list( );
+        ctx.seed = body.items || [ ];
+      } else {
+        body = (await ctx.k8s.listNamespacedConfigMap(WATCH_NAMESPACE, false, false, undefined, WATCH_FIELDSELECTOR, WATCH_LABELSELECTOR, 1, undefined, undefined, undefined,  undefined, undefined, {})).body;
+      }
+    } catch (err) {
+      // was an unhandled rejection: Node printed the whole HttpError (token
+      // included) and exited
+      console.error(k8s_safe.summary(err));
       return process.exit(1);
     }
-    if (retried) {
-      console.log("RETRYING AFTER ERROR", retried, errors);
-    }
-    var boot = require('bootevent')( );
-    boot.acquire(function k8s (ctx, next) {
-      var my = this;
-      ctx.k8s = require('./lib/k8s')({cluster: !k8s_local});
-      ctx.kc = require('./lib/k8s').get_kc( );
-      ctx.k8s.getAPIResources( ).then(function (res) {
-        console.log("CONNECTED", res.body.resources.length > 0);
-        next( );
-      }).catch(my.fail);
-    })
-    .acquire(async function describe_latest_resource_version (ctx, next) {
+    console.log("FOUND LATEST", body.metadata.resourceVersion, (body.items || [ ]).length, 'objects');
+    watch_opts.resourceVersion = body.metadata.resourceVersion;
+    next( );
 
-      // Get latest resourceVersion, along with a count of active changes
-      const stream = await ctx.k8s.listNamespacedConfigMap(WATCH_NAMESPACE, false, false, undefined, WATCH_FIELDSELECTOR, WATCH_LABELSELECTOR, 1, undefined, undefined, undefined,  undefined, undefined, {});
-      console.log("FOUND LATEST", stream.body, stream.body.metadata.resourceVersion);
-      if (!INIT_WITH_FULL_AUDIT) {
-        watch_opts.resourceVersion = stream.body.metadata.resourceVersion;
+  })
+  .boot(function booted (ctx) {
+    startReconcileTimer(reconcile_opts);
+    var watcher = resumableWatch(_.extend({ }, resume_opts, {
+      watch: new k8slib.Watch(ctx.kc),
+      list: ctx.list,
+      endpoint: WATCH_ENDPOINT,
+      params: _.pick(watch_opts, 'fieldSelector', 'labelSelector'),
+      resourceVersion: watch_opts.resourceVersion,
+      seed: ctx.seed,
+      onFatal: function (code, reason) {
+        console.log(reason, watcher && watcher.counters);
+        process.exit(code);
+      },
+    }));
+    console.log('started watch', _.omit(watch_opts, 'watch'));
+    var events = watcher.source;
+    emit_init(events);
+    events.once('initialized', console.log.bind(console, "INITED!!"));
+    var control = stream.pipeline(events,
+      // inspectBookmarks(bookmark_config, ctx.k8s),
+      // saveBookMark(bookmark_config, ctx.k8s),
+      ignoreBookMark(bookmark_config, ctx.k8s),
+      pre(filter_opts),
+      slowRateStream(delay_opts),
+      ...businessStreamsFor(SYNC_CONTROLLER),
+      // naivePostToGateway(gateway_opts),
+      // naiveGetFromGateway(gateway_opts),
+      post( ),
+      function ended (err) {
+        // the event stream only ends on a fatal watch error, which exits
+        console.log('STREAM ENDED', err && k8s_safe.summary(err));
+        process.exit(err ? 1 : 0);
       }
-      next( );
-      
-    })
-    .boot(function booted (ctx) {
-      var monitor = configure({ k8s: ctx.k8s, kc: ctx.kc, watch: watch_opts });
-      monitor.then(function (req) {
-        console.log('started watch', watch_opts, req.url);
-        // console.log('req', req);
-        req.on('end', function (err) {
-          console.log("ENDED", err);
-          process.exit(0);
-        });
-        var jsonStream = toJSONStream( );
-        emit_init(jsonStream);
-        var businessStreams;
-        switch(SYNC_CONTROLLER) {
-          case 'deployment':
-            businessStreams = [ syncPostToController(gateway_opts) ];
-            break;
-          case 'consul':
-            // businessStreams = [ syncDeploymentToConsul(gateway_opts) ];
-            businessStreams = [ syncPostToController(gateway_opts) ];
-            break;
-          case 'default':
-          case 'runner':
-          default:
-            businessStreams = [ naivePostToGateway(gateway_opts), naiveGetFromGateway(gateway_opts) ];
-            break;
-        }
-
-        jsonStream.once('initialized', console.log.bind(console, "INITED!!"));
-        var control = stream.pipeline(req,
-          jsonStream,
-          // inspectBookmarks(bookmark_config, ctx.k8s),
-          // saveBookMark(bookmark_config, ctx.k8s),
-          ignoreBookMark(bookmark_config, ctx.k8s),
-          pre(filter_opts),
-          slowRateStream(delay_opts),
-          ...businessStreams,
-          // naivePostToGateway(gateway_opts),
-          // naiveGetFromGateway(gateway_opts),
-          post( ),
-          function ended (err) {
-            console.log('STREAM ENDED', err)
-            if (err) {
-              if (err.type == 'ERROR' && err.object.reason == 'Expired' && watch_opts.resourceVersion != '') {
-                watch_opts.resourceVersion = '';
-                bookmark_config.resourceVersion = '';
-                console.log("Retrying without resourceVersion", watch_opts);
-                errors.push(err);
-                console.log('restarting...');
-                return start(retried + 1, max, errors);
-              }
-            }
-          }
-          );
-      }).catch(function (err) {
-        boot.fail(err);
-      });
-    });
-  }
-  start(0, 2, []);
+      );
+  });
 }
