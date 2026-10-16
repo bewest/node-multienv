@@ -263,40 +263,104 @@ function configure (opts) {
 
   }
 
+  // F3 (OPS-036, Q-CONTROLLER-IDEMPOTENT-ADD): the tenant ConfigMap version a
+  // Deployment was last made from, on the Deployment's own metadata (not the
+  // pod template, so writing it restarts nothing).
+  var CONFIG_RV = 'multienv.t1pal.org/config-rv';
+
+  // the version to stamp, only for the tenant's own ConfigMap
+  function applied_config_rv (req, deploymentName) {
+    var meta = (req.body && req.body.object && req.body.object.metadata) || { };
+    if (!meta.resourceVersion || meta.name != deploymentName) { return null; }
+    return String(meta.resourceVersion);
+  }
+
+  // JSON patch ops that set the stamp on an existing Deployment
+  function stamp_ops (deployment, rv) {
+    if (deployment.metadata && deployment.metadata.annotations) {
+      return [{ op: "add", path: "/metadata/annotations/" + CONFIG_RV.replace(/~/g, '~0').replace(/\//g, '~1'), value: rv }];
+    }
+    return [{ op: "add", path: "/metadata/annotations", value: { [CONFIG_RV]: rv } }];
+  }
+
+  function restart_op ( ) {
+    return {
+      op: "add",
+      path: "/spec/template/metadata/annotations/updated-at",
+      // path: "/spec/template/metadata/annotations",
+      // path: "/metadata/annotations/updated-at",
+      // value: { "updated-at": new Date().toISOString() }
+      value: new Date().toISOString()
+    };
+  }
+
+  function http_status (err) {
+    return err && (err.statusCode || (err.response && err.response.statusCode) || (err.body && err.body.code));
+  }
+
   function handle_sync_addition (req, res, next) {
     const deploymentName = req.deployment.metadata.name;
+    const rv = opts.MULTIENV_SYNC_ADD_ALWAYS_RESTART ? null : applied_config_rv(req, deploymentName);
+    if (rv) {
+      req.deployment.metadata.annotations = { ...req.deployment.metadata.annotations, [CONFIG_RV]: rv };
+    }
+    var options = { headers: { "Content-Type": "application/json-patch+json" } };
+
+    function patch_deployment (patch, why) {
+      appsApi.patchNamespacedDeployment(deploymentName, selected_namespace, patch, undefined, undefined, undefined, undefined, undefined, options)
+        .then((result) => {
+          console.log(`deployment ${deploymentName} ${why}`);
+          res.result = k8s_safe.wrapped(result);
+          next( );
+        }).catch((err) => {
+          console.error("Error updating deployment that couldn't be added.", k8s_safe.summary(err));
+          next(k8s_safe.error(err));
+        });
+    }
 
     appsApi.createNamespacedDeployment(selected_namespace, req.deployment).then(function (result) {
       res.result = k8s_safe.wrapped(result);
       return next( );
     }).catch((err) => {
+      if (rv && http_status(err) == 409) {
+        // Already exists. A repeated addition (a re-list, a full-audit
+        // replay) restarts the tenant only when its ConfigMap changed since
+        // the Deployment was made from it.
+        return appsApi.readNamespacedDeployment(deploymentName, selected_namespace).then(function (existing) {
+          var annotations = (existing.body.metadata && existing.body.metadata.annotations) || { };
+          var stamped = annotations[CONFIG_RV];
+          if (stamped == rv) {
+            console.log("DEPLOYMENT ALREADY FROM THIS CONFIG, NOT RESTARTING", deploymentName, rv);
+            res.result = k8s_safe.wrapped(existing);
+            return next( );
+          }
+          if (!stamped && opts.MULTIENV_SYNC_UNSTAMPED == 'stamp') {
+            // opt-in: trust that a Deployment made before stamps matches its ConfigMap
+            return patch_deployment(stamp_ops(existing.body, rv), `stamped with config ${rv}, not restarted`);
+          }
+          if (!stamped) {
+            // Made before stamps existed. Its ConfigMap may have changed during
+            // a watch gap (OPS-036) without the Deployment following, so don't
+            // mark it current: restart it once, as 7deafde would, and stamp it.
+            return patch_deployment([ restart_op( ) ].concat(stamp_ops(existing.body, rv)), `updated for rolling restart (first stamp, config ${rv})`);
+          }
+          console.log("CONFIG CHANGED SINCE DEPLOYMENT WAS MADE", deploymentName, stamped, rv);
+          return patch_deployment([ restart_op( ) ].concat(stamp_ops(existing.body, rv)), `updated for rolling restart (config ${stamped} -> ${rv})`);
+        }).catch((err) => {
+          console.error("Error reading deployment that couldn't be added.", deploymentName, k8s_safe.summary(err));
+          next(k8s_safe.error(err));
+        });
+      }
       // maybe previously existed but we are adding a new type of config or are
       // transitioning configmaps in or out of labels configured for different
       // watches to facilitate a hybrid or migrating environment.
       // TODO: consider creating a list of patches to add or remove configmaps
       // based on inspected labels and annotations to help support migrations
       // or hybrid environments.
-      const patch = [{
-        op: "add",
-        path: "/spec/template/metadata/annotations/updated-at",
-        // path: "/spec/template/metadata/annotations",
-        // path: "/metadata/annotations/updated-at",
-        // value: { "updated-at": new Date().toISOString() }
-        value: new Date().toISOString()
-      }];
+      const patch = [ restart_op( ) ];
       console.log("ATTEMPT TO PATCH DEPLOYMENT THAT COULD NOT BE CREATED", deploymentName, req.deployment, patch, k8s_safe.summary(err));
-     // Perform the patch operation
-     var options = { headers: { "Content-Type": "application/json-patch+json" } };
-     appsApi.patchNamespacedDeployment(deploymentName, selected_namespace, patch, undefined, undefined, undefined, undefined, undefined, options)
-       .then((result) => {
-				console.log(`deployment ${req.deployment.metadata.name} updated for rolling restart`);
-        // res.result = deployment
-        res.result = k8s_safe.wrapped(result);
-        next( );
-      }).catch((err) => {
-        console.error("Error updating deployment that couldn't be added.", k8s_safe.summary(err));
-        next(k8s_safe.error(err));
-      });
+      // Perform the patch operation
+      patch_deployment(patch, 'updated for rolling restart');
     });
   }
 
@@ -311,6 +375,11 @@ function configure (opts) {
 				path: "/spec/template/metadata/annotations/updated-at",
 				value: new Date().toISOString()
 			}];
+      // F3: record which ConfigMap version this restart applies
+      var rv = applied_config_rv(req, targetDeployment);
+      if (rv) {
+        patch.push(...stamp_ops(deployment.body, rv));
+      }
       var options = { headers: { "Content-Type": "application/json-patch+json" } };
       appsApi.patchNamespacedDeployment(targetDeployment, selected_namespace, patch, undefined, undefined, undefined, undefined, undefined, options)
       .then((result) => {
@@ -667,6 +736,11 @@ if (!module.parent) {
     MULTIENV_TENANT_REQUESTS_ENABLE: (process.env.MULTIENV_TENANT_REQUESTS_ENABLE ||'1') != 'false',
     MULTIENV_TENANT_LIMITS_ENABLE: (process.env.MULTIENV_TENANT_LIMITS_ENABLE ||'1') != 'false',
     MULTIENV_HEALTH_CHECK_SERVICE: (process.env.MULTIENV_HEALTH_CHECK_SERVICE || 'http://multienv-deployment-controller.service.consul:3000'),
+    // F3 off: every repeated addition restarts the tenant, as before
+    MULTIENV_SYNC_ADD_ALWAYS_RESTART: process.env.MULTIENV_SYNC_ADD_ALWAYS_RESTART == '1',
+    // F3: what a repeated addition does to a Deployment with no stamp yet:
+    // 'restart' (default; restart once and stamp) or 'stamp' (stamp only)
+    MULTIENV_SYNC_UNSTAMPED: process.env.MULTIENV_SYNC_UNSTAMPED == 'stamp' ? 'stamp' : 'restart',
     requests: {
       cpu: process.env.MULTIENV_TENANT_REQUESTS_CPU || '5m',
       memory: process.env.MULTIENV_TENANT_REQUESTS_MEMORY || '120Mi'
@@ -748,3 +822,4 @@ if (!module.parent) {
   });
 }
 
+module.exports = exports = configure;
